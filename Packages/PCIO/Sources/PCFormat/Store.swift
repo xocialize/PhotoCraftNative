@@ -346,6 +346,15 @@ enum StoreObject: Sendable {
     var compressed: [UInt8] { PcraftCodec.compress(content) }
 }
 
+/// A compressed object as a ZIP entry stores it, with its CRC-32.
+struct StoredObject: Sendable {
+    var data: [UInt8]
+    var crc: UInt32
+
+    init(data: [UInt8], crc: UInt32) { self.data = data; self.crc = crc }
+    init(data: [UInt8]) { self.init(data: data, crc: CRC32.checksum(data)) }
+}
+
 /// What a file looked like when it was verified. Any change means "verify again".
 struct FileSignature: Equatable {
     var len: UInt64
@@ -369,6 +378,8 @@ struct FileSignature: Equatable {
 }
 
 struct Prepared {
+    /// The manifest, as written (version 1) and as JSON.
+    var model: Manifest
     var manifest: [UInt8]
     /// Bundle path → object, sorted by path.
     var objects: [(path: String, object: StoreObject)]
@@ -395,7 +406,10 @@ public let defaultReverifyBudget: UInt64 = 16 * 1024 * 1024
 public final class PcraftWriter {
     var hashCache: [UInt64: Hash] = [:]
     /// Compressed objects by bundle path (ZIP mode).
-    var compressedObjects: [String: [UInt8]] = [:]
+    var compressedObjects: [String: StoredObject] = [:]
+    /// Writes every ZIP64 field (and a format 2 manifest) even when classic ZIP fits: tests of
+    /// format 2 without multi-gigabyte documents.
+    var forceZip64 = false
     var verified: DirectoryVerificationCache?
     var reverifyBudget = defaultReverifyBudget
 
@@ -435,7 +449,8 @@ public final class PcraftWriter {
         var previews: [(String, [UInt8])] = []
         if let t = opts.thumbnail { previews.append((Store.thumb, try Store.png(t))) }
         if let t = opts.composite { previews.append((Store.composite, try Store.png(t))) }
-        let manifest = Manifest(formatVersion: pcraftFormatVersion, generator: PcraftWriter.generator, document: document,
+        // photocraft's version unless the container needs more (`saveZip` decides that).
+        let manifest = Manifest(formatVersion: pcraftPhotocraftFormatVersion, generator: PcraftWriter.generator, document: document,
                                 thumbnail: opts.thumbnail == nil ? nil : Store.thumb, composite: opts.composite == nil ? nil : Store.composite)
         // JSON can't hold NaN or the infinities (they would load as errors): refuse the save
         // instead, naming the value (photocraft #1101).
@@ -457,43 +472,59 @@ public final class PcraftWriter {
         for (h, (t, s)) in c.tiles { objects.append((Store.tilePath(h), .tile(t, s))) }
         for (h, b) in c.blobs { objects.append((Store.blobPath(h), .blob(b))) }
         objects.sort { $0.0 < $1.0 }
-        return Prepared(manifest: json, objects: objects.map { ($0.0, $0.1) }, previews: previews.map { ($0.0, $0.1) }, stats: stats)
+        return Prepared(model: manifest, manifest: json, objects: objects.map { ($0.0, $0.1) }, previews: previews.map { ($0.0, $0.1) }, stats: stats)
     }
 
-    /// Saves as a ZIP bundle in memory.
+    /// Saves as a ZIP bundle in memory: classic ZIP with a format 1 manifest when it fits (what
+    /// photocraft reads), ZIP64 with a format 2 manifest when it doesn't (over 4 GiB or 65,535
+    /// entries).
     public func saveZip(_ doc: Document, _ opts: SaveOptions = SaveOptions()) throws(FormatError) -> ([UInt8], SaveStats) {
-        let p = try prepare(doc, opts)
+        var p = try prepare(doc, opts)
         var stats = p.stats
-        var z = ZipWriter()
+        // New objects are compressed and checksummed on all cores first (compression dominates a
+        // full save, and one CRC pass over gigabytes would be next).
+        let todo = p.objects.filter { compressedObjects[$0.path] == nil }
+        let fresh = Parallel.map(todo.count) { i -> StoredObject in
+            let data = todo[i].object.compressed
+            return StoredObject(data: data, crc: CRC32.checksum(data))
+        }
+        var freshByPath: [String: StoredObject] = [:]
+        for (i, o) in todo.enumerated() { freshByPath[o.path] = fresh[i] }
+        var next: [String: StoredObject] = [:]
+        next.reserveCapacity(p.objects.count)
+        var stored: [(path: String, object: StoredObject)] = []
+        stored.reserveCapacity(p.objects.count)
+        for (path, obj) in p.objects {
+            let o: StoredObject
+            if let d = compressedObjects[path] {
+                if obj.isTile { stats.tilesReused += 1 }
+                o = d
+            } else {
+                if obj.isTile { stats.tilesWritten += 1 } else { stats.blobsWritten += 1 }
+                o = freshByPath[path] ?? StoredObject(data: obj.compressed)
+            }
+            stored.append((path, o))
+            next[path] = o
+        }
+        // The archive's layout, in writing order: manifest, previews, objects.
+        let layout = [(Store.manifest.utf8.count, p.manifest.count)] + p.previews.map { ($0.name.utf8.count, $0.data.count) }
+            + stored.map { ($0.path.utf8.count, $0.object.data.count) }
+        let zip64 = forceZip64 || !ZipWriter.fitsClassic(layout.map { (nameLength: $0.0, size: $0.1) })
+        if zip64 {
+            // Same length as the version 1 JSON: the layout above still holds.
+            p.model.formatVersion = pcraftFormatVersion
+            p.manifest = try ManifestJSON.encode(p.model)
+        }
+        var z = ZipWriter(forceZip64: forceZip64)
+        z.reserveCapacity(layout.reduce(0) { $0 + 30 + 20 + $1.0 + $1.1 })
         do {
             try z.add(Store.manifest, p.manifest)
             for (name, data) in p.previews { try z.add(name, data) }
+            for (path, o) in stored { try z.addStored(path, o.data, crc: o.crc) }
         } catch {
             throw FormatError.wrap(error)
         }
-        // New objects are compressed on all cores first (compression dominates a full save).
-        let todo = p.objects.filter { compressedObjects[$0.path] == nil }
-        let fresh = Parallel.map(todo.count) { i in todo[i].object.compressed }
-        var freshByPath: [String: [UInt8]] = [:]
-        for (i, o) in todo.enumerated() { freshByPath[o.path] = fresh[i] }
-        var next: [String: [UInt8]] = [:]
-        next.reserveCapacity(p.objects.count)
-        for (path, obj) in p.objects {
-            let data: [UInt8]
-            if let d = compressedObjects[path] {
-                if obj.isTile { stats.tilesReused += 1 }
-                data = d
-            } else {
-                if obj.isTile { stats.tilesWritten += 1 } else { stats.blobsWritten += 1 }
-                data = freshByPath[path] ?? obj.compressed
-            }
-            do {
-                try z.add(path, data)
-            } catch {
-                throw FormatError.wrap(error)
-            }
-            next[path] = data
-        }
+        assert(z.usesZip64 == zip64, "the manifest's version must match the container")
         compressedObjects = next
         do {
             return (try z.finish(), stats)
@@ -588,16 +619,26 @@ public final class PcraftWriter {
     /// separator, otherwise a ZIP file (written atomically).
     @discardableResult
     public func savePath(_ doc: Document, _ url: URL, _ opts: SaveOptions = SaveOptions()) throws(FormatError) -> SaveStats {
-        if FS.isDir(url.path) || url.hasDirectoryPath || url.path.hasSuffix("/") {
+        let package = FS.isDir(url.path) || url.hasDirectoryPath || url.path.hasSuffix("/")
+        return try save(doc, to: url, as: package ? .package : .singleFile, opts)
+    }
+
+    /// Saves to `url` in `container`'s form: a package (`saveDir`, incremental) or one ZIP file
+    /// written atomically (`saveZip`).
+    @discardableResult
+    public func save(_ doc: Document, to url: URL, as container: PcraftFormat.Container, _ opts: SaveOptions = SaveOptions()) throws(FormatError) -> SaveStats {
+        switch container {
+        case .package:
             return try saveDir(doc, url, opts)
+        case .singleFile:
+            let (bytes, stats) = try saveZip(doc, opts)
+            do throws(IOError) {
+                try AtomicSave.atomicWrite(url, bytes)
+            } catch {
+                throw .io(error)
+            }
+            return stats
         }
-        let (bytes, stats) = try saveZip(doc, opts)
-        do throws(IOError) {
-            try AtomicSave.atomicWrite(url, bytes)
-        } catch {
-            throw .io(error)
-        }
-        return stats
     }
 }
 

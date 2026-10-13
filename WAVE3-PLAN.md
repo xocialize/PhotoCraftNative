@@ -71,7 +71,7 @@ format comparison gathered for this plan.
 
 | | Keeps the whole document | Save speed and scale | Opens elsewhere | Status |
 |---|---|---|---|---|
-| **`.pcraft`** | Yes: 153/153 Photoshop-authored and 36/36 Unity documents round-trip equal; everything except undo history | Incremental, content-addressed 256-px zstd tiles. A whole-document save takes ~0.1 s and a load ~40 ms. 300k px per side. ZIP mode has no ZIP64 (4 GiB, 65,535 entries); the directory form has no such limit | photocraft only | Read/write done, 118 tests |
+| **`.pcraft`** | Yes: 153/153 Photoshop-authored and 36/36 Unity documents round-trip equal; everything except undo history | Incremental, content-addressed 256-px zstd tiles. A whole-document save takes ~0.1 s and a load ~40 ms. 300k px per side. The single file is ZIP64 past 4 GiB or 65,535 entries (format 2, AB-T-0240); the package form has no limit | photocraft only | Read/write done, 118 tests |
 | PSD / PSB | Nearly: drops Bitmap/Indexed/Duotone writing, 32-bit CMYK/Lab, timeline, variables and video, and embeds linked smart objects | Whole-file rewrite on every save, fast (a 5.2 GB PSB writes in 0.44 s); PSB to 300k px | Photoshop 1,524/1,524; ImageIO; others unmeasured | Read/write done, 255 + 820 tests |
 | `.comp` | No: sRGB 8/16-bit, no vector masks, smart objects or CMYK | Re-encodes every layer (~2.9 s per 24 MP 16-bit layer) | Compositor only | Compositor's |
 | OpenRaster / layered TIFF | No / as PSD | Whole rewrite | Krita / Photoshop | Read/write done |

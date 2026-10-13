@@ -15,8 +15,18 @@
 import PCDocument
 import PCFoundation
 
-/// Current manifest version written by this build.
-public let pcraftFormatVersion: UInt32 = 1
+/// Newest manifest version this build reads and writes.
+///
+/// - 1: photocraft's format. Every directory bundle (package) and every single-file bundle that
+///   fits classic ZIP is written as version 1, so photocraft keeps opening them.
+/// - 2: the same document schema in a single file that needs ZIP64 (over 4 GiB, or over 65,535
+///   entries; AB-T-0240). Written only then: a reader without ZIP64 can't open the archive, and the
+///   version tells one that gets past it (an unzipped copy) what it holds. Version 1 manifests
+///   migrate to 2 unchanged.
+public let pcraftFormatVersion: UInt32 = 2
+
+/// The manifest version photocraft reads and writes, written whenever a bundle doesn't need more.
+public let pcraftPhotocraftFormatVersion: UInt32 = 1
 
 /// Hex-encoded BLAKE3 hash (64 chars).
 public typealias Hash = String
