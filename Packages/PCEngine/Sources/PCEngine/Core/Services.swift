@@ -21,12 +21,17 @@ public protocol FileSystemService: Sendable {
     func createDirectory(_ path: String) throws
     /// Whether `path` is a folder.
     func isDirectory(_ path: String) -> Bool
+    /// The local file URL behind `path` when this file system is the local disk, for files read
+    /// and written piece by piece rather than whole: `.pcraft` packages (folders saved object by
+    /// object). nil (the default): whole files only, so `.pcraft` saves are single files.
+    func localURL(_ path: String) -> URL?
 }
 
 extension FileSystemService {
     public func list(_ dir: String) throws -> [String] { throw EngineError.other("\(dir): listing folders is not available here") }
     public func createDirectory(_ path: String) throws { throw EngineError.other("\(path): creating folders is not available here") }
     public func isDirectory(_ path: String) -> Bool { false }
+    public func localURL(_ path: String) -> URL? { nil }
 }
 
 /// The local file system (the app and `pccli run`, which name host paths themselves).
@@ -59,6 +64,7 @@ public struct LocalFileSystem: FileSystemService {
         var dir: ObjCBool = false
         return FileManager.default.fileExists(atPath: path, isDirectory: &dir) && dir.boolValue
     }
+    public func localURL(_ path: String) -> URL? { URL(fileURLWithPath: path) }
 }
 
 /// No file access (untrusted automation without granted roots).

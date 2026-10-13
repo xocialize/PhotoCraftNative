@@ -16,6 +16,7 @@ import CoreGraphics
 import Foundation
 import PCAlgo
 import PCDocument
+import PCFormat
 import PCFoundation
 import PCIO
 import PCIOCore
@@ -184,8 +185,20 @@ public enum EngineIO {
         return r
     }
 
-    /// Reads and imports the file at `path` through the session's file service.
+    /// Reads and imports the file at `path` through the session's file service. A `.pcraft`
+    /// package (a folder) is read object by object.
     public static func importPath(_ path: String, services: EngineServices, interrupt: Interrupt = .none) throws -> ImportResult {
+        let fs = services.fileSystem
+        if fileExtension(path) == PcraftFormat.fileExtension, fs.isDirectory(path) {
+            guard let url = fs.localURL(path) else { throw EngineError.other("read `\(path)`: .pcraft packages can't be opened here") }
+            do {
+                var doc = try PcraftFormat.load(contentsOf: url)
+                doc.name = DocState.fileName(path)
+                return ImportResult(document: doc)
+            } catch {
+                throw EngineError.other("open `\(DocState.fileName(path))`: pcraft: \(error)")
+            }
+        }
         let data: Data
         do { data = try services.fileSystem.read(path) } catch { throw EngineError.other("read `\(path)`: \(EngineError.wrap(error))") }
         return try importFile(name: DocState.fileName(path), bytes: [UInt8](data), services: services, interrupt: interrupt)

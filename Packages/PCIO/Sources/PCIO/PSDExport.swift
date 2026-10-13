@@ -99,6 +99,21 @@ public enum PSDExport {
         return r
     }
 
+    /// What the document holds that PSD export doesn't keep and no other warning names: the
+    /// Timeline, Variables and Data Sets, and video layers' frames (only the frame on screen is
+    /// written, as a pixel layer).
+    static func notKept(_ doc: Document) -> [String] {
+        var out: [String] = []
+        if doc.timeline != nil { out.append("the Timeline is not kept in PSD/PSB; save as .pcraft to preserve it") }
+        if !doc.variables.isEmpty { out.append("Variables and Data Sets are not kept in PSD/PSB; save as .pcraft to preserve them") }
+        doc.forEachLayer { _, _, l in
+            if let v = l.video {
+                out.append("layer \"\(l.name)\": video layer (\(v.count) frame\(v.count == 1 ? "" : "s")) written as a pixel layer of its current frame; save as .pcraft to preserve the video")
+            }
+        }
+        return out
+    }
+
     /// Test sweeps: when set, called with every PSD/PSB this module writes (`export`) or builds
     /// (`file`, serialised on demand), so a test run can hand them to an outside checker (the
     /// Photoshop oracle). Internal; tests install it through `@testable import`.
@@ -122,6 +137,7 @@ public enum PSDExport {
         // A cancelled conversion stops early with an incomplete model: never write it.
         try options.interrupt.check()
         if !doc.metadata.text.isEmpty { warnings.append("free-form text metadata is not supported by PSD/PSB; it will be dropped") }
+        warnings += notKept(doc)
         warnings += stripForeignOrderBlocks(&file)
         if options.imagePreviews {
             do {

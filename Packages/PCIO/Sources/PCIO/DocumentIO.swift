@@ -324,6 +324,14 @@ public enum DocumentIO {
         }
     }
 
+    /// The previews a `.pcraft` save embeds, a 256-px thumbnail and a 1024-px composite, rendered
+    /// as the single-file export renders them: for package saves (`PcraftWriter.save(_:to:as:_:)`).
+    public static func pcraftPreviews(_ doc: Document, options: IOOptions) throws -> SaveOptions {
+        try cmykScope(doc.iccProfile, doc.mode, options) {
+            SaveOptions(thumbnail: try preview(doc, side: 256, options), composite: try preview(doc, side: 1024, options))
+        }
+    }
+
     /// The composite reduced to fit `side`, as an RGBA8 preview (photocraft `compose::thumbnail`).
     static func preview(_ doc: Document, side: Int, _ options: IOOptions) throws -> RGBA8Image? {
         guard doc.size.width > 0, doc.size.height > 0 else { return nil }

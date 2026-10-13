@@ -7,6 +7,7 @@
 
 import Foundation
 import PCDocument
+import PCFormat
 
 enum FileMenuCommands: CommandModule {
     static let name = "ui_file"
@@ -21,12 +22,12 @@ enum FileMenuCommands: CommandModule {
             return ["document": .int(i), "name": .string(s.documents[i].doc.name), "warnings": .strings(warnings), "color": color]
         })
         r.add(CommandSpec("file.save", "Save", menu: ["File"], shortcut: "Cmd+S",
-                          params: #"{"path":str? (none: the document's own PSD, PSB or .pcraft file),"quality":0..12?,"tiffLayers":bool?,"tgaBits":24|32?} → {path,warnings,copy,assets?}"#,
+                          params: #"{"path":str? (none: the document's own PSD, PSB or .pcraft file),"form":"package"|"singleFile"? (.pcraft; default: the file's own form, else a package),"quality":0..12?,"tiffLayers":bool?,"tgaBits":24|32?} → {path,warnings,copy,assets?,tiles?}"#,
                           module: name, enabled: hasDoc) { s, p in
             try save(s, p, "file.save", path: p["path"]?.stringValue)
         })
         r.add(CommandSpec("file.saveAs", "Save As…", menu: ["File"], shortcut: "Cmd+Shift+S",
-                          params: #"{"path":str,"quality":0..12?,"tiffLayers":bool?,"tgaBits":24|32?} → {path,warnings,copy,assets?} (the file becomes the document's, unless it is a flat file that can't hold it: a copy)"#,
+                          params: #"{"path":str,"form":"package"|"singleFile"? (.pcraft; default: the file's own form, else a package),"quality":0..12?,"tiffLayers":bool?,"tgaBits":24|32?} → {path,warnings,copy,assets?,tiles?} (the file becomes the document's, unless it is a flat file that can't hold it: a copy)"#,
                           module: name, enabled: hasDoc) { s, p in
             try save(s, p, "file.saveAs", path: try FileCommands.strParam(p, "path", "file.saveAs"))
         })
@@ -68,9 +69,15 @@ enum FileMenuCommands: CommandModule {
     /// `save_in_place`). The journal records `{path}` so an action replays it.
     static func save(_ s: Session, _ p: JSONValue, _ cmd: String, path: String?) throws -> JSONValue {
         let o = try FileCommands.SaveOpts.from(s, p, cmd)
-        let r = try s.saveDocument(to: path, quality: o.quality, tiffLayers: p["tiffLayers"]?.boolValue, tgaBits: o.tgaBits)
+        var form: PcraftFormat.Container?
+        if let f = p["form"]?.stringValue {
+            guard let c = PcraftFormat.Container(rawValue: f) else { throw EngineError.bad(cmd, "\"form\" is \"package\" or \"singleFile\"") }
+            form = c
+        }
+        let r = try s.saveDocument(to: path, quality: o.quality, tiffLayers: p["tiffLayers"]?.boolValue, tgaBits: o.tgaBits, pcraftForm: form)
         var out: JSONValue = ["path": .string(r.path), "warnings": .strings(r.warnings), "copy": .bool(r.copy)]
         if let assets = r.assets { out = out.setting("assets", assets) }
+        if let stats = r.stats { out = out.setting("tiles", ["written": .int(stats.tilesWritten), "reused": .int(stats.tilesReused)]) }
         return out
     }
 }

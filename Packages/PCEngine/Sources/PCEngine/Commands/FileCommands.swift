@@ -17,6 +17,7 @@
 
 import Foundation
 import PCDocument
+import PCFormat
 import PCFoundation
 import PCIOCore
 
@@ -32,8 +33,14 @@ public enum FileCommands: CommandModule {
 
     // MARK: File system (through the session's service)
 
-    /// Every file the engine opens is read here (photocraft `read_file`).
+    /// Every file the engine opens is read here (photocraft `read_file`). A `.pcraft` package (a
+    /// folder) reads as its single-file form, so every reader of document bytes (Place, Open As,
+    /// batch, notes import) takes one.
     static func readFile(_ s: Session, _ path: String) throws -> [UInt8] {
+        if fileExtension(path) == PcraftFormat.fileExtension, s.services.fileSystem.isDirectory(path) {
+            let doc = try EngineIO.importPath(path, services: s.services).document
+            do { return try PcraftFormat.save(doc) } catch { throw EngineError.other("\(path): \(error)") }
+        }
         do { return [UInt8](try s.services.fileSystem.read(path)) } catch { throw EngineError.other("\(path): \(EngineError.wrap(error))") }
     }
 
@@ -55,7 +62,11 @@ public enum FileCommands: CommandModule {
         let fs = s.services.fileSystem
         let base = dir.hasSuffix("/") ? String(dir.dropLast()) : dir
         return try fs.list(dir).map { "\(base)/\($0)" }
-            .filter { !fs.isDirectory($0) && fileExtension($0).map(openable.contains) == true }
+            .filter { p in
+                guard let ext = fileExtension(p), openable.contains(ext) else { return false }
+                // A `.pcraft` package is a folder; no other folder is an image.
+                return ext == PcraftFormat.fileExtension || !fs.isDirectory(p)
+            }
             .sorted()
     }
 

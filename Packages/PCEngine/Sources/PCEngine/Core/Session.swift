@@ -13,6 +13,7 @@
 
 import Foundation
 import PCDocument
+import PCFormat
 import PCFoundation
 import PCHistory
 import PCIntelligence
@@ -41,6 +42,11 @@ public final class Session {
     public var authorize: (@Sendable (String, JSONValue) throws -> Void)?
     /// Readers on other threads.
     public let snapshots = SnapshotStore()
+    /// The form a save writes a new `.pcraft` file in (AB-D-0131): a document package, the app's
+    /// default, or one file, which automation sessions use (scripts and agents expect one file).
+    /// A file system without local folders (`FileSystemService.localURL`) always gets one file;
+    /// an existing `.pcraft` keeps its form (`pcraftContainer(for:requested:)`).
+    public var newPcraftContainer: PcraftFormat.Container = .package
 
     let hub = EventHub()
     var jobs = JobTable()

@@ -151,7 +151,7 @@ enum SmartCommands: CommandModule {
     static func replaceContents(_ s: Session, _ p: JSONValue) throws -> JSONValue {
         let path = try pathParam("layer.smartObjects.replaceContents", p)
         let bytes: [UInt8]
-        do { bytes = [UInt8](try s.services.fileSystem.read(path)) } catch { throw other("can't read \(path): \(EngineError.wrap(error))") }
+        do { bytes = try FileCommands.readFile(s, path) } catch { throw other("can't read \(path): \(EngineError.wrap(error))") }
         let id = try s.layerParam(p)
         return try replaceContentsBytes(s, id, baseName(path), bytes)
     }

@@ -20,6 +20,8 @@ public struct SaveOutcome: Sendable, Equatable {
     public var copy: Bool
     /// What saving the document regenerated (File › Generate › Image Assets: `{files, dir, …}`).
     public var assets: JSONValue?
+    /// What a `.pcraft` package save wrote (tiles written and reused); nil for other saves.
+    public var stats: SaveStats?
 }
 
 /// The session's crash-recovery store (photocraft's `AutosaveFn` / `DiscardAutosaveFn` /
@@ -68,10 +70,12 @@ extension Session {
     /// save is a copy (`savesCopy`), the file becomes the document's: its name and path change,
     /// it is no longer dirty, its crash-recovery data goes, and the Save Document script event
     /// and Image Assets run (photocraft `saved`). `tiffLayers` is the TIFF Options answer (nil:
-    /// not asked, the layers are kept); `tgaBits` the Targa bits per pixel.
+    /// not asked, the layers are kept); `tgaBits` the Targa bits per pixel. A `.pcraft` is saved
+    /// in `pcraftForm`, by default its own form or else a package (`pcraftContainer(for:)`;
+    /// `savePlan` says what Save does).
     @discardableResult
     public func saveDocument(_ index: Int? = nil, to path: String? = nil, quality: Double? = nil, tiffLayers: Bool? = nil, tgaBits: Int? = nil,
-                             forceCopy: Bool = false) throws -> SaveOutcome {
+                             forceCopy: Bool = false, pcraftForm: PcraftFormat.Container? = nil) throws -> SaveOutcome {
         guard let i = index ?? activeIndex, i >= 0, i < documents.count else { throw EngineError.noDocument }
         let st = documents[i]
         let target: String
@@ -89,7 +93,13 @@ extension Session {
         opts.tiffLayers = tiffLayers ?? true
         opts.tgaBits = tgaBits
         opts.imagePreviews = preferences["fileHandling.imagePreviews"]?.stringValue != "never"
-        let warnings = try FileCommands.saveDoc(self, st.doc, target, opts)
+        var warnings: [String] = []
+        var stats: SaveStats?
+        if EngineIO.fileExtension(target) == PcraftFormat.fileExtension, try pcraftContainer(for: target, requested: pcraftForm) == .package {
+            stats = try savePackage(st.doc, target, id: st.id.rawValue)
+        } else {
+            warnings = try FileCommands.saveDoc(self, st.doc, target, opts)
+        }
         let copy = forceCopy || Self.savesCopy(st, target, tiffLayers: tiffLayers)
         var assets: JSONValue?
         if !copy {
@@ -104,7 +114,7 @@ extension Session {
             assets = AutomateCommands.documentSaved(self, i)
             publish()
         }
-        return SaveOutcome(path: target, warnings: warnings, copy: copy, assets: assets)
+        return SaveOutcome(path: target, warnings: warnings, copy: copy, assets: assets, stats: stats)
     }
 
     /// Whether saving document `st` to `path` writes a copy (photocraft `saves_copy`): a flat file

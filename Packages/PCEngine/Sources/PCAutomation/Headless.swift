@@ -41,6 +41,8 @@ public final class Headless {
         case .workspace(let w): svc.fileSystem = WorkspaceFileSystem(w)
         }
         session = Session(services: svc)
+        // Scripts and agents name one output file: a new `.pcraft` is a single file, not a package.
+        session.newPcraftContainer = .singleFile
         if case .trustedLocal = filesystem {} else {
             // Every step of `actions.play` (and every command a command runs) is checked too.
             session.authorize = AutomationPolicy.authorizeEngineStep

@@ -11,6 +11,7 @@ import AppKit
 import Foundation
 import PCAlgo
 import PCDocument
+import PCFormat
 import PCFoundation
 import PCIO
 import PCIOCore
@@ -74,7 +75,8 @@ extension FileCommands {
         guard let d = s.active else { return "no document open" }
         guard let path = d.path else { return "the document has never been saved" }
         let fs = s.services.fileSystem
-        if !fs.exists(path) || fs.isDirectory(path) { return "\(path) is not a file on disk" }
+        let package = fs.isDirectory(path) && fileExtension(path) == PcraftFormat.fileExtension
+        if !fs.exists(path) || (fs.isDirectory(path) && !package) { return "\(path) is not a file on disk" }
         return nil
     }
 
@@ -82,8 +84,8 @@ extension FileCommands {
     /// "Revert" history state); the document is clean afterwards.
     static func revert(_ s: Session) throws -> JSONValue {
         guard let path = s.active?.path else { throw EngineError.other("the document has never been saved") }
-        let bytes = try readFile(s, path)
-        let fresh = try `import`(s, fileName(path), bytes)
+        // Through the open path, which also reads `.pcraft` packages.
+        let fresh = try EngineIO.importPath(path, services: s.services).document
         try s.edit("Revert") { doc, active in
             let (id, name) = (doc.id, doc.name)
             doc = fresh
