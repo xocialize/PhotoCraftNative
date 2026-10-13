@@ -18,14 +18,14 @@ produces must open in Apple's ImageIO with the same composite.
 
 This repository was split out of `xocialize/MetalPlayground` (`PhotoCraftNative/`, history kept) on 2026-10-13, per bridge decision AB-D-0132.
 - **Consumers:** the engine for **PixelAgencyEditor** (`xocialize/PixelAgencyEditor`; AB-D-0133/0134/0136).
-- **Packaging:** each package still has its own `Package.swift`. A single root `Package.swift` exporting every package as a product, plus the `0.1.0` tag, is task AB-T-0234.
+- **Packaging:** one root `Package.swift` exports every package as a product, tagged from `0.1.0` (AB-T-0234). Depend on it by URL: `.package(url: "https://github.com/xocialize/PhotoCraftNative.git", from: "0.1.0")`, then e.g. `.product(name: "PCPSD", package: "PhotoCraftNative")`.
 - **Test data:** the Photoshop-built corpora and measurements live outside git, in `../PhotoCraftNative-Fixtures`, or wherever `PHOTOCRAFT_FIXTURES` points. Tests that need them skip cleanly without them.
 - **Plans:** `PORT-STATUS.md` has the package status, `EVALUATION.md` what isn't native yet, and `WAVE3-PLAN.md` the app plan.
 
 ## Layout
 
-Separate SwiftPM packages mirror photocraft's crate layers (`docs/architecture.md` §3), so each builds and tests on
-its own:
+The package folders mirror photocraft's crate layers (`docs/architecture.md` §3). Each is a group of targets in the
+root `Package.swift`, and each library is a product:
 
 | Layer | Package | photocraft crates | Approach |
 |---|---|---|---|
@@ -45,11 +45,11 @@ Status per crate, test counts, parity numbers and what is left: [PORT-STATUS.md]
 ## Build
 
 ```bash
-cd Packages/PCFoundation && swift test
+swift build && swift test        # from the repository root
 ```
 
-Each package builds the same way from its own directory. Metal shaders ship as `.metal` resources compiled at first
-use (`MetalContext.library(bundle:key:)`), so `swift build` and Xcode build the same sources.
+One package at a time: `swift build --target PCPSD`, `swift test --filter PCPSDTests`. Metal shaders ship as `.metal`
+resources compiled at first use (`MetalContext.library(bundle:key:)`), so `swift build` and Xcode build the same sources.
 
 ## Attribution
 

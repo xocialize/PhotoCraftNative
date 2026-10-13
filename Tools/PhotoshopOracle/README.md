@@ -64,8 +64,8 @@ would have had no shared lock or timeout logic.
 ## Build and run
 
 ```bash
-cd Tools/PhotoshopOracle
-swift build                      # Swift 6, tools 6.2, macOS 26; no warnings
+cd "$(git rev-parse --show-toplevel)"   # the repository root: one Package.swift for every package
+swift build --product ps-oracle   # Swift 6, tools 6.2, macOS 26; no warnings
 B=.build/debug/ps-oracle
 $B ping                          # Photoshop version and open documents
 ```
@@ -159,7 +159,7 @@ To add a file, add a `C.add(name, features, description, builder[, 'psb'])` entr
 
 ## Tests
 
-`swift test` runs the reader and comparison unit tests. The diagnostics are opt-in, and those that
+`swift test --filter PSOracleKitTests` runs the reader and comparison unit tests. The diagnostics are opt-in, and those that
 read the oracle's data (`TypeDiagTests`, `PatternDiagTests`, `RefusalVariantTests`, most of
 `DebugTests`) also skip when the data root is missing. `DebugTests`: with
 `PSO_VARIANTS_OUT=<dir under the data root>` it writes controlled variants of rejected PCPSD

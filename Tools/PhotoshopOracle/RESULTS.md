@@ -793,7 +793,7 @@ changed.
 ## Protocol (for a skill)
 
 **Setup.**
-- `cd Tools/PhotoshopOracle && swift build`; the binary is `.build/debug/ps-oracle`.
+- `swift build --product ps-oracle` from the repository root; the binary is `.build/debug/ps-oracle`.
 - The operator starts Photoshop by hand. ps-oracle never launches it.
 - Every command takes the lock (`ps-oracle.lock` in the data root), and the kernel releases it if the
   holder dies.
