@@ -93,6 +93,13 @@ public enum DocumentIO {
     /// Imports a file from disk. PSD/PSB files are memory-mapped (a multi-gigabyte PSB reads only
     /// its structure until layers decode).
     public static func importFile(contentsOf url: URL, options: IOOptions = IOOptions()) throws -> ImportResult {
+        // Compositor projects are document packages (directories), import-only.
+        if CompImport.isPackage(url) {
+            try options.interrupt.check()
+            var r = try CompImport.importDocument(contentsOf: url, codec: options.codec, interrupt: options.interrupt)
+            r.warnings += TextImport.prepare(&r.document, renderer: options.renderer)
+            return r
+        }
         let data: Data
         do { data = try Data(contentsOf: url, options: [.alwaysMapped]) } catch { throw PCIOError.io("\(error)") }
         let name = url.lastPathComponent

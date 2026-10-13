@@ -16,7 +16,7 @@ SDK frameworks plus the local packages PCFoundation, PCDocument, PCPSD, PCRender
 | `PCIOMaps` | block ⇄ model mappings | `AdjustMap`, `EffectsMap`, `VectorMap`, `PatternMap`, `ChannelMap`, `CompsMap`, `SlicesMap`, `AnnotationsMap` |
 | `PCIOSmart` | smart objects and smart filters | `SmartMap`, `Linked`, `DisplaceMap`, `CameraRawMap` |
 | `PCFormat` | `.pcraft` | `PcraftFormat` (`save`, `load` from bytes/URL/`ByteSource`, `readManifest`, `readThumbnail`, `atomicWrite`, `listRecovery`/`recover`/`discardRecovery`), `SaveOptions`, `LoadOptions`, `FormatError`, `PcraftWriter`, `Autosaver`, `RecoveryStore`, the manifest model |
-| `PCIOFormats` | other layered formats | `OpenRaster`, `Krita`, `PaintDotNet`, `EXRParts`, `LayeredTIFF`, `PSDTIFF`, `SVGImport` |
+| `PCIOFormats` | other layered formats | `OpenRaster`, `Krita`, `PaintDotNet`, `EXRParts`, `LayeredTIFF`, `PSDTIFF`, `SVGImport`, `CompImport` (Compositor `.comp`, import only) |
 | `PCIOAffinity` | Affinity documents (on PCAffinity's reader) | `AffinityImport` |
 | `PCIO` | PSD/PSB import/export, dispatch, default compositor | `DocumentIO.importFile(name:bytes:options:)`, `DocumentIO.importFile(contentsOf:options:)`, `DocumentIO.export(_:as:options:)`, `IOOptions`, `PSDImport.document(_:options:)`, `PSDExport.file(_:options:)`, `PSDExport.export(_:options:)`, `PSDExportOptions`, `RenderCompositor`, `PSDCompositeOracle`, `FlatOrientation` |
 
@@ -63,6 +63,7 @@ photocraft `crates/io/src` → Swift (`Sources/<Target>/…`):
 | psd `tiff.rs`; codecs `tiff.rs` Photoshop tags | `PCIOFormats/TIFFSVG/PSDTIFF*.swift`, `LayeredTIFF.swift` |
 | `affinity.rs` (+ compose gradient handles) | `PCIOAffinity/*.swift` |
 | — (new) | `PCIO/RenderCompositor.swift`, `PCIO/CompositeOracle.swift`, `PCIOCore/Services.swift`, `PCIOCore/BLAKE3.swift`, `PCIOCore/RawBlocks.swift`, `PCIOCore/ByteIO.swift` |
+| — (new; Compositor's IO/ProjectStore.swift, MIT, © 2026 Wonder Assembly LLC) | `PCIOFormats/Compositor/CompManifest.swift` (manifest + version gates), `CompImport.swift` (package, assets, layer tree, clipping), `CompPixels.swift` (placement, masks), `CompMap.swift` (blend modes, adjustments, effects, text, shapes) |
 
 photocraft `crates/format/src` → `Sources/PCFormat/`: `lib.rs` → `PcraftFormat.swift`, `Errors.swift`;
 `manifest.rs` → `Manifest.swift`, `ManifestJSON.swift`; `store.rs` → `Store.swift`, `Codec.swift`,
@@ -108,8 +109,73 @@ import so a document → PSD → document round trip returns the same document.
 | Layered TIFF | Photoshop tags 37724/34377 transcoded to a PSD model in either byte order, then the PSD importer; the TIFF's own ICC/resolution/XMP win | the PSD exporter's layer section and resources in the file's byte order next to the composite; Gray/RGB/CMYK 8/16/32, BigTIFF when needed; Lab and Multichannel save flat with a warning | `TIFFLayers`, `LayeredTIFF`, `PSDTIFF`; corpus: all 36 PSDs transcode to TIFF and back byte-identically in both orders |
 | Multi-part EXR | parts and channel groups listed (`entries`), chosen ones imported as layers with an optional additive precomp; Cryptomatte listing; decoders for NONE/RLE/ZIPS/ZIP/PIZ/PXR24/B44/B44A (DWAA/DWAB/HTJ2K listed but refused) | — | `EXRParts`; NONE/ZIPS/ZIP/PXR24 checked bit-exact against ImageIO on real files |
 | SVG / SVGZ | groups and shape layers (Bézier knots, fill, stroke, gradients), text outlined with CoreText, what shapes can't hold (clip paths, masks, filters, patterns, images, markers) rasterised by CoreSVG with a warning | — | `SVGImport`; photocraft parses with usvg and rasterises with resvg, here XMLParser + CoreGraphics/CoreSVG: a shape's own opacity goes on its layer (no wrapping "Group N"), markers and text on a path are rasterised, CSS is a selector subset, reflect/repeat gradient spreads and nesting past ~256 levels are CoreSVG's limits |
+| Compositor (`.comp`, v1–v13) | the package directory: 8/16-bit PNG and OpenEXR layers, transforms, masks, folders, clipping, the 24 blend modes, 8 of 12 adjustment kinds, the 6 effects, text and shape metadata, guides, resolution (section below) | — (import only, AB-D-0131; `sourceReadOnly`) | `CompImport`; dispatched by `DocumentIO.importFile(contentsOf:)` for a directory |
 | Affinity (`.af`, `.afdesign`, `.afphoto`, `.afpub`) | spreads/artboards, groups, shapes (incl. clipping shapes), text, images as embedded smart objects, pixel layers, layer and vector masks, blend modes; the embedded preview with a warning when the native data can't be read | — (refused by name, as in photocraft) | `AffinityImport` on `Affinity.read`/`Affinity.preview` |
 | Flat images | through the injected `FlatImageCodec` (default `ImageIOCodec`): straight alpha, Gray+alpha, 8/16-bit and half/full float read from the image's own samples, EXIF/XMP/text from the container, EXIF/TIFF orientation applied, EXIF/XMP resolution fallback, linear profile for EXR/HDR, multi-part EXR opened at its most colourful part; `Document.fileEncoding` from the file (JPEG quality from its quantisation tables, WebP lossless/lossy at 75: photocraft `file_encoding`, `SourceEncoding`) | PNG/JPEG/TIFF through the codec (photocraft `export_flat`): a plain single layer at its own model and depth, else the composite (CMYK/Lab as sRGB); alpha dropped when opaque; JPEG matted over white; EXIF/XMP/text/resolution embedded, normalised | the full codec matrix (WebP/AVIF/JPEG XL writing, GIF frames, TGA alpha channel, BMP palettes, JPEG quality estimate, camera raw) is PCPlatform's |
+
+## Compositor `.comp` import (AB-T-0239)
+
+`.comp` stays an import format (bridge decision AB-D-0131): Compositor's document package
+(`manifest.json` + `images/`), versions 1–13, read as Compositor's `ProjectStore` reads it. A
+document opened from one saves as `.pcraft` or PSD (`ImportResult.sourceReadOnly`).
+`DocumentIO.importFile(contentsOf:)` takes it when the URL is a directory named `.comp` or holding a
+`com.compositor.project` manifest; `CompImport.importDocument(_:codec:interrupt:)` takes a
+`CompImport.Package` (a directory, or files in memory). Refusals are
+`PCIOError.format("Compositor", …)` naming the rule.
+
+**Checks, as `ProjectStore`:** the header first (format, then version, so a newer file reports its
+number), then every gate of `validate`: opacity/blend modes v3, layer masks v4, clipping v5, folder
+masks v6, adjustments v7, folder opacity and guides v8, the neighbouring-pixel kinds v9,
+per-letter colours v10 and faces v11, 16-bit PNG v12, OpenEXR v13; image and mask names
+`<id>.png|.exr|.mask.png`, masks 8-bit gray without alpha, the hierarchy (64 levels, no cycles) and
+the clipping graph (no folders or adjustments as sources, chains under 256); every file inside
+the package, a plain file, not a symbolic link, ≤ 4 MiB manifest / 512 MiB per asset; 30,000 px a
+side, 10,000 layers, 800 MP of images and of masks.
+
+**Mapping:**
+
+| Compositor | PCDocument |
+|---|---|
+| layer PNG/EXR + transform (box, clockwise rotation, flips, sampling) | a pixel layer: copied exactly when the grid sits one-to-one on whole pixels; otherwise drawn as `LayerRenderer.draw` draws it (same CTM, interpolation and antialiasing) into a 16-bit context (half float for HDR), with a warning. CoreGraphics' 32-bit float contexts are avoided: scaled with interpolation off they repeat a row's first pixel along the last row |
+| 8-bit / 16-bit PNG / OpenEXR | an 8-bit document; any 16-bit layer makes it 16-bit; an OpenEXR passing white makes it 32-bit linear sRGB (OpenEXR holds linear light) with 8/16-bit layers decoded to linear, warned; an OpenEXR within white is a 16-bit layer, as Compositor loads it |
+| folders | Pass Through groups with their opacity and mask (the mask hides beyond the folder's box). Compositor multiplies a folder's opacity and mask into each layer inside; Photoshop applies them to the folder's result, so overlapping layers inside differ (warned when the folder holds more than one) |
+| layer masks (1×1 uniform, linked, unlinked `maskPlacement`, disabled) | `LayerMask` at the document's depth; beyond its box an unlinked mask keeps the value most of its edge has (`LayerMask.background`) |
+| clipping (`maskSourceID`) | a run of visible layers clipped to the visible layer right below them in the same folder is a Photoshop clipping group (Compositor composites such a run as one stack in the base's mode, as Photoshop's default "Blend Clipped Layers as Group"); hidden layers clipped to the same base may sit in the run. Any other link (base not directly below, hidden or in another folder) has no Photoshop form: the source's coverage (its alpha × effective opacity × its own mask × its own source) is baked into the clipped layer's mask, warned. A clipped adjustment outside a stack is never drawn by Compositor: imported hidden, warned |
+| the 24 blend modes | by name (Compositor uses Photoshop's) |
+| Hue/Saturation (master, six ranges with their bands, colorize) | `.hueSaturation`; "invert range" has no equivalent (warned) |
+| Levels, Exposure, Invert, Black & White (+ tint), Color Balance, Gradient Map | the same adjustment; a tint becomes Photoshop's tint colour (HSL at ½ lightness); Gradient Map reads brightness with Photoshop's weights (warned: Compositor's are Rec. 709's) |
+| Curves | pencil curves holding the 256 levels Compositor's monotone Hermite curves evaluate to (exact at 8 bits; the handles are not kept, warned) |
+| Grain, Add Noise, Gaussian Blur, Motion Blur | no Photoshop adjustment layer: left out with their settings in the warning |
+| stroke, drop shadow, inner shadow, outer glow, inner glow, colour overlay | Photoshop layer styles in Normal (Compositor's renderer), sizes scaled from layer pixels to document pixels; Compositor's own effect shapes differ (its outside stroke is a square dilation) |
+| text metadata | a type layer: runs from the UTF-16 colour/face runs, size and leading in points at the document's resolution, tracking in 1/1000 em, box or point text placed as Compositor lays it out (12 px padding); Compositor's PNG is its rendered pixels until edited |
+| shape metadata | a shape layer (live rectangle/ellipse/line when upright) with Compositor's PNG as its pixels |
+| guides, resolution | `Document.guides`, `resolutionDpi` (72 when missing) |
+
+**Parity with Compositor's own oracle** (`PCIOTests/CompCorpusTests`): every file of the
+CanvasFixtureGenerator set (`PCIO_COMP_FIXTURES`, default `<fixtures>/comp-fixtures`; 43
+documents, 165 files, plus 5 motion fixtures) imports, and PCRender's composite (CPU and Metal) is
+compared with the PNG Compositor exported, premultiplied at 8 bits:
+
+| Set | Fixtures | Max levels (CPU / Metal) | Notes |
+|---|---|---|---|
+| blend | 24 | 19 modes ≤ 1 / ≤ 2 | Hue 3, Saturation 9, Color 4, Hard Mix 255 (74 px), Vivid Light 255 (2 px): the oracle's engine is not Photoshop's (below) |
+| opacity | 1 | 1 / 1 | |
+| mask | 2 | 1 / 2 | |
+| clip | 1 | 1 / 1 | |
+| folder | 1 | 21 / 21 | Pass Through by design; with its opacity and mask pushed into its layers (Compositor's way) 3 levels |
+| effects | 1 | 197 / 197 | layer-style shapes |
+| adjust | 13 | 0 for Curves, Invert, B&W; 3–4 Hue/Sat, Levels, Exposure; 28 Gradient Map (luminance weights); 53 Color Balance (Photoshop's algorithm); the four left-out kinds show the layers below unchanged | |
+
+Compositor's oracle blends through CoreGraphics (14 modes) and Core Image pinned to sRGB (10).
+Run on the layers of Photoshop 27.11's own ps-corpus `blend-*.psd` files
+(`CompCorpusTests.oracleEnginesAgainstPhotoshop`), those engines miss Photoshop by: Hue 4,
+Saturation 8, Color 3, Luminosity 6 (CoreGraphics; PCRender ≤ 1.0 on the same files), Hard Mix 255
+(Core Image gives 0 on every b + s = 255 tie; Photoshop gives 255 when s ≤ 127, 75/75 ties), Vivid
+Light 25, Color Dodge 25 (Core Image); every other mode ≤ 2. The fixtures that miss 2 levels are
+exactly those; the test pins them at what they measure. Measuring them also found PCRender's Hard
+Mix tie rule wrong against Photoshop (fixed in PCRender: blend-hardMix.psd ties 38 → 0 off). Vivid
+Light's two 0/0 ends (base 0 under blend 255, base 255 under blend 0) have no Photoshop sample in
+the corpus; PCRender follows photocraft's psblend expectations there.
 
 ## Corpus round trip (36 Photoshop files)
 
@@ -428,7 +494,7 @@ photocraft-format's, so bundles go both ways:
 ## Tests
 
 `swift build --build-tests` and `swift test` in `Packages/PCIO` (debug and release): zero warnings.
-820 tests in 8 targets (2026-10-13; zero warnings):
+838 tests in 8 targets (2026-10-13; zero warnings):
 
 | Target | Tests | Content |
 |---|---|---|
@@ -437,9 +503,9 @@ photocraft-format's, so bundles go both ways:
 | `PCIOMapsTests` | 91 | adjustment/effects/vector/pattern/channel/comps/slices/annotation maps + corpus |
 | `PCIOSmartTests` | 37 | smart maps, linked files, displace, Camera Raw + corpus (98 `SoLd`) |
 | `PCFormatTests` | 118 | all 115 photocraft-format tests, photocraft-shaped bundle, corruption, autosave/recovery, empty-blob frames |
-| `PCIOFormatsTests` | 125 | ORA, KRA, PDN, EXR (every compression), layered TIFF transcoder (corpus both byte orders), SVG |
+| `PCIOFormatsTests` | 139 | ORA, KRA, PDN, EXR (every compression), layered TIFF transcoder (corpus both byte orders), SVG, Compositor `.comp` (every version gate, deep/HDR layers, transforms, masks, clipping, adjustments, text/shapes) |
 | `PCIOAffinityTests` | 45 | `affinity.rs` and `affinity_artboards.rs` import tests on `PCAffinitySynth` inputs |
-| `PCIOTests` | 296 | photocraft's `crates/io/tests` (roundtrip, psd_structure, block layout/alignment, 32-bit, modes, multichannel, lab16, channels, banded, large PSB (29000² opt-in), thumbnails, progress/cancel, composite, adjust/effects/vector/comps/annotations/patterns, smart objects, type, tiff_layers/pages/corpus, flat/orientation/metadata/resolution/colour/HEIF, container dispatch, Affinity export halves), the inline tests of the PCIO-owned modules, Photoshop record conventions, both corpora (round trip, oracle, `.pcraft`), EXR part selection, flat export, the Photoshop oracle's findings (type-layer completeness, blend modes per mode/depth, 4-alignment, matte order, `Txt2`, patterns), fill pixels against the live composite, adjustment availability per mode/depth (with the oracle run's proof), per-document CMYK |
+| `PCIOTests` | 300 | photocraft's `crates/io/tests` (roundtrip, psd_structure, block layout/alignment, 32-bit, modes, multichannel, lab16, channels, banded, large PSB (29000² opt-in), thumbnails, progress/cancel, composite, adjust/effects/vector/comps/annotations/patterns, smart objects, type, tiff_layers/pages/corpus, flat/orientation/metadata/resolution/colour/HEIF, container dispatch, Affinity export halves), the inline tests of the PCIO-owned modules, Compositor's `.comp` fixtures against its own oracle, Photoshop record conventions, both corpora (round trip, oracle, `.pcraft`), EXR part selection, flat export, the Photoshop oracle's findings (type-layer completeness, blend modes per mode/depth, 4-alignment, matte order, `Txt2`, patterns), fill pixels against the live composite, adjustment availability per mode/depth (with the oracle run's proof), per-document CMYK |
 
 Every PSD/PSB a test exports is checked with PCPSD's linter (`compatibilityIssues(decodeChannels:)`,
 no errors), and, when `PCIO_EXPORT_DIR` is set, saved there for the
@@ -460,6 +526,7 @@ variables, each overriding one folder:
 | `PCIO_PS_CORPUS` | `<fixtures>/ps-corpus` (Photoshop-authored) | ps-corpus round trips, oracle, matte/artboard/adjustment references |
 | `PCIO_M3_DIR` | `<fixtures>/ps-measure/M3` | `PhotoshopLightModeTests` |
 | `PCIO_PS_ORACLE` | `<fixtures>/ps-oracle` | `AdjustmentAvailabilityTests.photoshopOracleRunAgreesWithTheTable` |
+| `PCIO_COMP_FIXTURES` | `<fixtures>/comp-fixtures` (Compositor's CanvasFixtureGenerator output) | `CompCorpusTests` |
 | `PCIO_EXPORT_DIR` | none: nothing written | the oracle drop (set it to write; `none` also disables) |
 | `PCIO_EXR_FIXTURES`, `PCIO_EXR_DIR`, `KRITA_TEST_DIR`, `PDN_TEST_DIR`, `PCIO_BIG_PSB` | none | external corpora and the 12 GB PSB test, opt-in |
 
@@ -527,6 +594,12 @@ tests (PCPlatform), `abr_map` cancellation.
   PCRender `LayerRasterizer` (PCPlatform); without them those layers stay empty with a warning.
 - **Bitmap/Indexed/Duotone PSD export** writes Grayscale/RGB (photocraft's behaviour, warned).
 - **Flattened PSDs** (no layer records) are re-saved with their Background as a layer record.
+- **`.comp` in the engine:** `EngineIO.importPath` reads a file's bytes, so opening a `.comp`
+  package (a directory) from PCEngine needs a directory branch calling
+  `DocumentIO.importFile(contentsOf:)`, and `comp` in its openable lists.
+- **`.comp` adjustments without a Photoshop form** (Grain, Add Noise, Gaussian/Motion Blur) are left
+  out; baking them would need PCAlgo's filters over the composite below.
+- **Vivid Light's 0/0 ends** want one Photoshop measurement (base 0 under 255, base 255 under 0).
 
 ## Change requests for other packages
 
