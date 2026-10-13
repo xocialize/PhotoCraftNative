@@ -1,0 +1,12 @@
+# macOS
+.DS_Store
+
+# Swift Package Manager / Xcode
+.build/
+.swiftpm/
+DerivedData/
+xcuserdata/
+*.xcuserstate
+
+# Test and Photoshop-measurement data lives outside git (see README: PHOTOCRAFT_FIXTURES)
+PhotoCraftNative-Fixtures/

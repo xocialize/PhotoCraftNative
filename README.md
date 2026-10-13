@@ -1,6 +1,6 @@
 # PhotoCraftNative — photocraft on Swift and Metal
 
-A conversion of [photocraft](../../photocraft) (Rust, MIT OR Apache-2.0, ~480K lines) to native Swift and Metal on
+A conversion of [photocraft](../photocraft) (Rust, MIT OR Apache-2.0, ~480K lines) to native Swift and Metal on
 macOS 26+, Apple Silicon. Two rules decide each crate:
 
 - **Replace with the macOS framework** where one already does the job: ColorSync for photocraft's own ICC engine,
@@ -13,6 +13,14 @@ macOS 26+, Apple Silicon. Two rules decide each crate:
 The PSD port also takes PhotoDemon's decode breadth (all nine colour modes, 1–32 bit, spec errata; BSD-2-Clause)
 on top of photocraft's structure, tagged blocks and writer, and adds a check photocraft lacks: every PSD the writer
 produces must open in Apple's ImageIO with the same composite.
+
+## Repository
+
+This repository was split out of `xocialize/MetalPlayground` (`PhotoCraftNative/`, history kept) on 2026-10-13, per bridge decision AB-D-0132.
+- **Consumers:** the engine for **PixelAgencyEditor** (`xocialize/PixelAgencyEditor`; AB-D-0133/0134/0136).
+- **Packaging:** each package still has its own `Package.swift`. A single root `Package.swift` exporting every package as a product, plus the `0.1.0` tag, is task AB-T-0234.
+- **Test data:** the Photoshop-built corpora and measurements live outside git, in `../PhotoCraftNative-Fixtures`, or wherever `PHOTOCRAFT_FIXTURES` points. Tests that need them skip cleanly without them.
+- **Plans:** `PORT-STATUS.md` has the package status, `EVALUATION.md` what isn't native yet, and `WAVE3-PLAN.md` the app plan.
 
 ## Layout
 
