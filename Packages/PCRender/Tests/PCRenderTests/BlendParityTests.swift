@@ -82,6 +82,17 @@ import PCFoundation
         #expect(PSBlend.colorBurn(1 - 1e-6, 0) == 1 && PSBlend.colorDodge(1e-6, 1) == 0)
     }
 
+    /// Photoshop 27.11 on the tie b + s = 255 (ps-corpus blend-hardMix, all 75 tie samples): 255 when
+    /// the blend value is at most 127, else 0.
+    @Test func hardMixTiesFollowPhotoshop() {
+        for s in 0 ... 255 {
+            let b = 255 - s
+            #expect(PSBlend.hardMixPS(Float(b) / 255, Float(s) / 255) == (s <= 127 ? 1 : 0), "b \(b) s \(s)")
+        }
+        // Just off the tie, the sum decides.
+        #expect(PSBlend.hardMixPS(Float(6) / 255, Float(250) / 255) == 1 && PSBlend.hardMixPS(Float(129) / 255, Float(125) / 255) == 0)
+    }
+
     @Test func dissolveIsDeterministicAndStableUnderTiling() throws {
         let src = Self.source()
         let plan = RenderPlan(context: RenderContext(canvas: Self.rect), ops: [

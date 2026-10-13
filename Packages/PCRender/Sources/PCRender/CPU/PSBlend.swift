@@ -71,8 +71,12 @@ public enum PSBlend {
         return min(cb / (2 * (1 - cs)), 1)
     }
 
+    /// Vivid Light thresholded at the middle level. On the tie (cb + cs = 1, where Vivid Light is
+    /// exactly ½) Photoshop rounds the dodge half down and the burn half up: 1 when the blend value
+    /// is below ½, 0 above it (ps-corpus blend-hardMix: all 75 tie samples).
     @inline(__always) static func hardMixPS(_ cb: Float, _ cs: Float) -> Float {
-        vividLightGeneric(cb, cs) >= 0.5 - 1e-6 ? 1 : 0
+        let v = vividLightGeneric(cb, cs)
+        return cs > 0.5 ? (v > 0.5 + 1e-6 ? 1 : 0) : (v >= 0.5 - 1e-6 ? 1 : 0)
     }
 
     /// Soft Light as Photoshop 27 renders it: the W3C definition (ps-corpus soft-light bands at 8

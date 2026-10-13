@@ -216,7 +216,11 @@ inline float3 pcr_blend_rgb_ps(uint mode, float3 cb, float3 cs, bool hdr) {
         case PC_VIVID_LIGHT: return float3(pcr_vivid_light_ps(cb.r, cs.r), pcr_vivid_light_ps(cb.g, cs.g), pcr_vivid_light_ps(cb.b, cs.b));
         case PC_HARD_MIX: {
             float3 o;
-            for (int i = 0; i < 3; i++) o[i] = pcr_vivid_light_generic(cb[i], cs[i]) >= 0.5f - 1e-6f ? 1.0f : 0.0f;
+            // `PSBlend.hardMixPS`: on the tie (cb + cs = 1) 1 below a ½ blend value, 0 above.
+            for (int i = 0; i < 3; i++) {
+                float v = pcr_vivid_light_generic(cb[i], cs[i]);
+                o[i] = cs[i] > 0.5f ? (v > 0.5f + 1e-6f ? 1.0f : 0.0f) : (v >= 0.5f - 1e-6f ? 1.0f : 0.0f);
+            }
             return o;
         }
         case PC_COLOR_BURN: return float3(pcr_color_burn(cb.r, cs.r), pcr_color_burn(cb.g, cs.g), pcr_color_burn(cb.b, cs.b));

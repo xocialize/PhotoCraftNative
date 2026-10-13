@@ -195,18 +195,22 @@ Fixes, each measured on the corpus (photocraft is the spec unless Photoshop disa
 5. **Selective Color**: each range pulls towards its own clamped result, Absolute ink and Black
    combine as (1 + ink)(1 + black) − 1 (photocraft: unclamped sum scaled by min(2v, 1)):
    1.24 → 0.14 mean. The phase-1 Photoshop table still matches.
-6. **Soft effects**: spread/choke blur width = size − round(size × spread), not size × (1 − spread)
+6. **Hard Mix ties** (b + s = 1, where Vivid Light is exactly ½): Photoshop gives 1 when the blend
+   value is below ½ and 0 above it (ps-corpus blend-hardMix: 75 of 75 tie samples; photocraft
+   gives 1 on every tie). blend-hardMix: 38 → 0 ties off, 23 → 0 partly transparent pixels off.
+   Found by AB-T-0239's `.comp` parity work.
+7. **Soft effects**: spread/choke blur width = size − round(size × spread), not size × (1 − spread)
    (fx-drop-shadow, fx-outer-glow, fx-multi, fx-rgb-16, fx-cmyk, text-effects now 0–1.3 % off).
    Shadow / outer-glow knockout `(1 − a)/(1 − fill·a)`.
-7. **Satin**: the offset copies are XORed then blurred, and the contour is read like every other
+8. **Satin**: the offset copies are XORed then blurred, and the contour is read like every other
    (photocraft reads it from the far end; equal only for symmetric contours): fx-all max 26.8 → 7.2.
-8. **Outside strokes** split a covered pixel: the stroke takes 1 − a over the exterior result, the
+9. **Outside strokes** split a covered pixel: the stroke takes 1 − a over the exterior result, the
    layer takes a blended against the exterior result *without* the stroke (combined-rgb-16: Soft
    Light under a gradient mask, 18.5 % → 0 % off). photocraft draws the stroke beneath and blends
    the layer with it. Type keeps the old order (its gamma-blended edges; text-effects).
-9. **Transparency Shapes off + Blend Interior as Group**: grouped interior effects are drawn
+10. **Transparency Shapes off + Blend Interior as Group**: grouped interior effects are drawn
    atop the content (advanced-flags 32 % → 0 %; photocraft paints them over the whole layer).
-10. **Fill layers render at the document's depth** (every channel rounded to the stored depth,
+11. **Fill layers render at the document's depth** (every channel rounded to the stored depth,
     CPU and Metal), and `FillLayerRenderer.render(_:fill:canvas:patterns:format:)` gives a PSD
     writer exactly the pixels the compositor draws (`FillLayerTests`: live = baked ≤ 1e-6 in RGB,
     CMYK, Lab, Gray at 8/16 bits).
