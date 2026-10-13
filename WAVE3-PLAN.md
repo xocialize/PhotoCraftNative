@@ -185,7 +185,7 @@ TIERS bench):
 - **PixelAgencyEditor = image editing and optimization.**
 - **Pixel Agency Desktop = collaboration and file management.**
 
-The Pixel Agency PRD is guidance, not a constraint on the editor. The editor takes over items Desktop
+The Pixel Agency PRD is guidance, not a constraint on the editor. **Desktop loses no features:** it adopts the editor's modules instead of building its own. The editor takes over items Desktop
 planned, builds them, and hands them back to Desktop as embeddable solutions.
 
 | Moves to PixelAgencyEditor (built here, returned as modules) | Stays with Pixel Agency Desktop |
@@ -211,8 +211,10 @@ Both apps follow APP-1…10 and the shared models folder (APP-8).
 | AB-D-0134 | decision | Editor first, package-first (`PixelAgencyEditorKit`); Desktop embeds it later |
 | AB-D-0135 | decision | Pixel Agency documents are a container around an untouched `.pcraft` |
 | AB-D-0136 | decision | Editor = image editing + optimization; Desktop = collaboration + file management. The editor builds the Forge integration and optimization and returns them as modules |
-| AB-T-0243 (P1) | photocraft | ForgeCore integration module: built-in set (OPT-12), memory-tiered generative features, GPU tenancy; returned to Desktop (blocked by 0235, AB-A-0173) |
-| AB-T-0244 (P2) | photocraft | Optimization module on ForgeOptimizerKit (OPT-1…8, 12, 13), compare stage, batch; returned to Desktop (blocked by 0235, 0243) |
+| ~~AB-T-0243~~ | — | Struck: split into 0245 and 0246, so the external bake-off blocks only the generative part |
+| AB-T-0245 (P1) | photocraft | ForgeCore integration module: host setup, the built-in set (OPT-12), memory tiers, GPU tenancy; returned to Desktop (blocked by 0235 only) |
+| AB-T-0246 (P2) | photocraft | Built-in Generative Fill/Expand through ForgeCore, memory-tiered (blocked by 0245, AB-A-0173, AB-A-0166) |
+| AB-T-0244 (P2) | photocraft | Optimization module on ForgeOptimizerKit (OPT-1…8, 12, 13), compare stage, batch; returned to Desktop (blocked by 0235, 0245) |
 | AB-A-0165, AB-A-0166 | mlx-forge | (earlier) Kit seams; Generative Fill provider |
 | AB-T-0234 (P1) | photocraft | PhotoCraftNative in its own repo, root `Package.swift`, tag 0.1.0 |
 | AB-T-0235 (P1) | photocraft | PixelAgencyEditor repo from the Compositor history; rename; App Store entitlements (APP-1–10); remove Sparkle. **Unblocked** |
@@ -224,5 +226,5 @@ Both apps follow APP-1…10 and the shared models folder (APP-8).
 | AB-T-0241 (P3) | photocraft | Decide the Camera Raw tables before release |
 | AB-T-0242 (P2) | photocraft | Adopt DesignScaffold tokens; app-local editor controls (blocked by AB-A-0168, 0235) |
 
-Can start now: AB-T-0234 (repo split), AB-T-0235 (app repo), AB-T-0239 (`.comp` importer). AB-T-0240
+Repos created 2026-10-13 (private): `xocialize/PhotoCraftNative` and `xocialize/PixelAgencyEditor` (GitHub Actions off). Can start now: AB-T-0234 (root `Package.swift` and tag), AB-T-0235 (rename, identity, package-first), AB-T-0239 (`.comp` importer). AB-T-0240
 (`.pcraft` v2) can start too; its scope no longer depends on mlx-apps.
