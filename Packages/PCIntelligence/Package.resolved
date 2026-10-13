@@ -1,0 +1,87 @@
+{
+  "originHash" : "f656465e50401824a22f4d83042929f5698378f85701248106dbf4389bbbcec7",
+  "pins" : [
+    {
+      "identity" : "colorizekit",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/xocialize/ColorizeKit.git",
+      "state" : {
+        "revision" : "51a77c5c73323a9f49335c662dd5bcddd4599cd9",
+        "version" : "0.1.1"
+      }
+    },
+    {
+      "identity" : "erasekit",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/xocialize/EraseKit.git",
+      "state" : {
+        "revision" : "9d8e8e385ed47f37a1827fda9cb022ddef8c43ab",
+        "version" : "0.2.0"
+      }
+    },
+    {
+      "identity" : "extractkit",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/xocialize/ExtractKit.git",
+      "state" : {
+        "revision" : "47eb6a7ce5e184566a0e6f0cdd8cdc44d210b154",
+        "version" : "0.1.1"
+      }
+    },
+    {
+      "identity" : "forgelightkit",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/xocialize/ForgeLightKit.git",
+      "state" : {
+        "revision" : "8404078cd047bdbe15295ec4d97f8046bf7055e8",
+        "version" : "0.3.0"
+      }
+    },
+    {
+      "identity" : "forgepixelbridge",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/xocialize/ForgePixelBridge.git",
+      "state" : {
+        "revision" : "7a54c673ab2af48fdadebca03b989bb299f65889",
+        "version" : "0.1.0"
+      }
+    },
+    {
+      "identity" : "forgerestorekit",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/xocialize/ForgeRestoreKit.git",
+      "state" : {
+        "revision" : "902cf7be530993e0e83bf962f36baca4312c9140",
+        "version" : "0.11.0"
+      }
+    },
+    {
+      "identity" : "maskkit",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/xocialize/MaskKit.git",
+      "state" : {
+        "revision" : "5447fa2ab17e2e2e2d1d8aa5048f684d53b072dd",
+        "version" : "0.4.1"
+      }
+    },
+    {
+      "identity" : "matroska-swift",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/xocialize/matroska-swift.git",
+      "state" : {
+        "revision" : "7baa8a635259bc9bd2b7f3a3dffff6bcd700e453",
+        "version" : "0.2.0"
+      }
+    },
+    {
+      "identity" : "media-bridge",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/xocialize/media-bridge.git",
+      "state" : {
+        "revision" : "34c28725586febdebe6cb7c18e330d92ba876553",
+        "version" : "0.40.0"
+      }
+    }
+  ],
+  "version" : 3
+}

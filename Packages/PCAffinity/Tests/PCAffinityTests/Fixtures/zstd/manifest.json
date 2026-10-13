@@ -1,0 +1,147 @@
+[
+ {
+  "file": "bigtext.btultra2.zst",
+  "size": 200000,
+  "crc32": 1170035859
+ },
+ {
+  "file": "bigtext.long.zst",
+  "size": 200000,
+  "crc32": 1170035859
+ },
+ {
+  "file": "mixed.fast5.zst",
+  "size": 86019,
+  "crc32": 992714919
+ },
+ {
+  "file": "mixed.l1.zst",
+  "size": 86019,
+  "crc32": 992714919
+ },
+ {
+  "file": "mixed.l19.zst",
+  "size": 86019,
+  "crc32": 992714919
+ },
+ {
+  "file": "mixed.l3.zst",
+  "size": 86019,
+  "crc32": 992714919
+ },
+ {
+  "file": "mixed.nocheck.zst",
+  "size": 86019,
+  "crc32": 992714919
+ },
+ {
+  "file": "pattern.fast5.zst",
+  "size": 200000,
+  "crc32": 4034710309
+ },
+ {
+  "file": "pattern.l1.zst",
+  "size": 200000,
+  "crc32": 4034710309
+ },
+ {
+  "file": "pattern.l19.zst",
+  "size": 200000,
+  "crc32": 4034710309
+ },
+ {
+  "file": "pattern.l3.zst",
+  "size": 200000,
+  "crc32": 4034710309
+ },
+ {
+  "file": "ramp16.fast5.zst",
+  "size": 24576,
+  "crc32": 702374425
+ },
+ {
+  "file": "ramp16.l19.zst",
+  "size": 24576,
+  "crc32": 702374425
+ },
+ {
+  "file": "small.fast5.zst",
+  "size": 210,
+  "crc32": 2614971444
+ },
+ {
+  "file": "small.l1.zst",
+  "size": 210,
+  "crc32": 2614971444
+ },
+ {
+  "file": "small.l19.zst",
+  "size": 210,
+  "crc32": 2614971444
+ },
+ {
+  "file": "small.l3.zst",
+  "size": 210,
+  "crc32": 2614971444
+ },
+ {
+  "file": "text.fast5.zst",
+  "size": 126567,
+  "crc32": 3841223786
+ },
+ {
+  "file": "text.l1.zst",
+  "size": 126567,
+  "crc32": 3841223786
+ },
+ {
+  "file": "text.l19.zst",
+  "size": 126567,
+  "crc32": 3841223786
+ },
+ {
+  "file": "text.l3.zst",
+  "size": 126567,
+  "crc32": 3841223786
+ },
+ {
+  "file": "text.multi.zst",
+  "size": 126567,
+  "crc32": 3841223786
+ },
+ {
+  "file": "text.stdin.zst",
+  "size": 126567,
+  "crc32": 3841223786
+ },
+ {
+  "file": "tile.fast5.zst",
+  "size": 4,
+  "crc32": 1989126404
+ },
+ {
+  "file": "tile.l1.zst",
+  "size": 4,
+  "crc32": 1989126404
+ },
+ {
+  "file": "tile.l19.zst",
+  "size": 4,
+  "crc32": 1989126404
+ },
+ {
+  "file": "tile.l3.zst",
+  "size": 4,
+  "crc32": 1989126404
+ },
+ {
+  "file": "lowalpha.l19.zst",
+  "size": 12000,
+  "crc32": 435985523
+ },
+ {
+  "file": "vocab.l6.zst",
+  "size": 308295,
+  "crc32": 1332582352
+ }
+]

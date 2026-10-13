@@ -1,0 +1,33 @@
+{
+  "originHash" : "0116fe9f1ac914b66e8d0cf928b64bf160c16abd8efa85c886d1dca532346d31",
+  "pins" : [
+    {
+      "identity" : "matroska-swift",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/xocialize/matroska-swift.git",
+      "state" : {
+        "revision" : "7baa8a635259bc9bd2b7f3a3dffff6bcd700e453",
+        "version" : "0.2.0"
+      }
+    },
+    {
+      "identity" : "media-bridge",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/xocialize/media-bridge.git",
+      "state" : {
+        "revision" : "34c28725586febdebe6cb7c18e330d92ba876553",
+        "version" : "0.40.0"
+      }
+    },
+    {
+      "identity" : "webp-swift",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/xocialize/webp-swift.git",
+      "state" : {
+        "revision" : "6aee33350834febf1b5b2e84324fc06c79d2a0b4",
+        "version" : "0.1.0"
+      }
+    }
+  ],
+  "version" : 3
+}
