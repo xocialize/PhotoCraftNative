@@ -197,6 +197,12 @@ planned, builds them, and hands them back to Desktop as embeddable solutions.
 
 Both apps follow APP-1…10 and the shared models folder (APP-8).
 
+**Desktop has already built the optimization and ForgeCore pieces** (D1.2, D1.3, D1.4 in pixel-agency-desktop's
+`docs/BUILD-PLAN.md`). The editor's modules are **extracted from that code, not rewritten**: AB-T-0244 from D1.3's
+`OptimizerService`/`OptimizerWorkspace`/`TicketEnhancer` and the copied compare stage; AB-T-0245 from D1.2's normalizer
+over a ForgeCore-only catalog on MESInProcess. Desktop then links them back. Its build plans record this
+(pixel-agency-desktop 36a05aa).
+
 ## Filed on the bridge
 
 | Record | To / owner | What |
