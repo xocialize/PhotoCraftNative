@@ -1,6 +1,6 @@
 ---
 name: photoshop-oracle
-description: Safely use real Adobe Photoshop as the acceptance oracle for PSD/PSB files — does Photoshop open what our code wrote, does its layer tree and composite match, why did it refuse or crash. Covers the ps-oracle harness (research/MetalPlayground/PhotoCraftNative/Tools/PhotoshopOracle), the offline pre-screens that keep known crash/modal classes away from Photoshop, the one-strike crash/modal policy, the catalogue of measured Photoshop rejection causes, and how to diagnose a new one. Use it whenever a task involves opening files in Photoshop, scripting Photoshop (osascript, `do javascript`, ExtendScript, Action Manager), checking a PSD writer's output against Photoshop, generating Photoshop-authored test PSDs, comparing a compositor against Photoshop's composite, or reacting to a Photoshop crash report or "open options are incorrect" / "unsupported blending mode" dialog — even if the user only says "check it in Photoshop" or "why won't Photoshop open this".
+description: Safely use real Adobe Photoshop as the acceptance oracle for PSD/PSB files — does Photoshop open what our code wrote, does its layer tree and composite match, why did it refuse or crash. Covers the ps-oracle harness (research/PhotoCraftNative/Tools/PhotoshopOracle (repo xocialize/PhotoCraftNative)), the offline pre-screens that keep known crash/modal classes away from Photoshop, the one-strike crash/modal policy, the catalogue of measured Photoshop rejection causes, and how to diagnose a new one. Use it whenever a task involves opening files in Photoshop, scripting Photoshop (osascript, `do javascript`, ExtendScript, Action Manager), checking a PSD writer's output against Photoshop, generating Photoshop-authored test PSDs, comparing a compositor against Photoshop's composite, or reacting to a Photoshop crash report or "open options are incorrect" / "unsupported blending mode" dialog — even if the user only says "check it in Photoshop" or "why won't Photoshop open this".
 ---
 
 # Photoshop oracle
@@ -12,7 +12,7 @@ human clicks. One bad sweep on 2026-10-12 cost the operator three crash dialogs 
 they had to click through. So the whole approach is: **learn as much as possible offline, open as
 little as possible, and stop at the first sign of trouble.**
 
-The harness is `ps-oracle` in `research/MetalPlayground/PhotoCraftNative/Tools/PhotoshopOracle`
+The harness is `ps-oracle` in `research/PhotoCraftNative/Tools/PhotoshopOracle (repo xocialize/PhotoCraftNative)`
 (README.md there for every command; RESULTS.md for the measured findings). It links PCPSD, so its
 checks read files the same way our writer's tests do.
 

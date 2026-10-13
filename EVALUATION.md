@@ -15,8 +15,8 @@ evaluate what isn't possible". This is that evaluation, as of 2026-10-12. Source
 | Our compositor vs Photoshop's own composite | **141 / 150** Photoshop-authored files; Unity corpus 36 / 36 |
 | GPU speed-ups (Release, 4096²) | filters 18–110× (Gaussian 18×, Radial Blur 91×, Smart Blur 112×), painting ~20×, compositing 24–36× |
 
-Nothing is committed yet: `PhotoCraftNative/` is untracked in the MetalPlayground repo, and the
-Compositor v1.5 merge (`94f5c46`) is local and unpushed.
+The code is committed in `xocialize/PhotoCraftNative` (private; split out of MetalPlayground on 2026-10-13), and the
+Compositor v1.5 merge (`94f5c46`) is on `xocialize/Compositor` `main`.
 
 ## 1. Possible natively, not built yet
 
