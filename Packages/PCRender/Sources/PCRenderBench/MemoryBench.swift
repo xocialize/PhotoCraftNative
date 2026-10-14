@@ -199,8 +199,9 @@ func closedDocumentsBench(size: Int, closed: Int, runs: Int, chunk: Int) throws 
     }
 
     let requested = 128 << 20
-    var elapsed: [Double] = [], waited: [Double] = [], released: [Double] = []
+    var elapsed: [Double] = [], waited: [Double] = [], drops: [Double] = [], released: [Double] = []
     var offscreen: [Int] = [], freed: [Int] = [], shed: [Int] = [], fell: [Int] = []
+    var reached = 0
     var last: Relief?
     for _ in 0..<runs {
         try reopen()
@@ -208,19 +209,32 @@ func closedDocumentsBench(size: Int, closed: Int, runs: Int, chunk: Int) throws 
         offscreen.append(fp.pages + fp.leafImages + fp.gatherPages - fp.visiblePages)
         let dev0 = settled(device)
         let r = metal.relieve(requested: requested, reason: .admission)
+        elapsed.append(r.elapsed); waited.append(r.waited)
+        var f = r.freed
+        // The off-screen drop is what this case measures. When idle heaps met the request at
+        // `scratch`, take the rung on its own (wall time, lock included: `relieve(_:)` reports bytes).
+        if r.rungs.contains(where: { $0.level == .offscreen }) {
+            reached += 1
+            drops.append(r.elapsed)
+        } else {
+            let t = now()
+            f += metal.relieve(.offscreen)
+            drops.append(now() - t)
+        }
         // What the release queue still had to do once relieve answered.
-        let t0 = Double(DispatchTime.now().uptimeNanoseconds) / 1e9
+        let t0 = now()
         metal.waitForReleases()
-        released.append(Double(DispatchTime.now().uptimeNanoseconds) / 1e9 - t0)
-        elapsed.append(r.elapsed); waited.append(r.waited); freed.append(r.freed)
-        shed.append(fp.persistent - r.footprint.persistent)
+        released.append(now() - t0)
+        freed.append(f)
+        shed.append(fp.persistent - metal.footprint.persistent)
         fell.append(dev0 - settled(device))
         last = r
     }
     func mean(_ xs: [Int]) -> Int { xs.reduce(0, +) / max(xs.count, 1) }
     print("off-screen pages before the request: mean \(mib(mean(offscreen))) (min \(mib(offscreen.min() ?? 0)))")
     print("relieve(requested: 128 MiB, .admission), \(runs) runs: p50 \(ms(quantile(elapsed, 0.5))), p99 \(ms(quantile(elapsed, 0.99))), max \(ms(elapsed.max() ?? 0)) under the lock (lock wait max \(ms(waited.max() ?? 0)))")
-    print("  rungs: \(last.map { $0.rungs.map { "\($0.level) \(mib($0.freed))" }.joined(separator: ", ") } ?? "")")
+    print("  took offscreen in \(reached) of \(runs) runs (scratch met the request in the rest); last run's rungs: \(last.map { $0.rungs.map { "\($0.level) \(mib($0.freed))" }.joined(separator: ", ") } ?? "")")
+    print("  the off-screen drop: p50 \(ms(quantile(drops, 0.5))), max \(ms(drops.max() ?? 0)) (the ladder's time under the lock, or relieve(.offscreen)'s wall time when the ladder stopped before it)")
     print("  declaration fell by \(mib(mean(freed))) (persistent \(mib(mean(shed)))); the device count by \(mib(mean(fell))) once released")
     print("  release after the lock: p50 \(ms(quantile(released, 0.5))), max \(ms(released.max() ?? 0)) still to go when relieve answered; load average \(load())")
 }

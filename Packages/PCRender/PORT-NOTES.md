@@ -623,6 +623,13 @@ The rest of `--memory --runs 200`, back to back at load 26–45:
   is still 932.6 MiB floor + transient, and low-footprint pixels are still identical. A warm
   whole-document render took 42.3 ms vs 0.3.0's 42.0 ms.
 
+On main with levels of detail (AB-T-0256), `scratch` alone nets 180.5 MiB: idle heaps beyond the
+open view's. That meets the 128 MiB request in most runs, 19 of 20 at load 43–57; on 0.3.0 it
+netted 0 in every run.
+The case then takes `offscreen` on its own, so the 2.6 GB drop is still timed: 0.3 ms max, wall
+time with the lock. The admission itself took 0.8 ms max under the lock, and the release ran up to
+82 ms after it.
+
 No quiet-machine figure: the load never fell below 18 during this work. Nothing left under the lock
 scales with bytes, so the quiet case is expected at or under the 0.2 ms seen at every load. To
 re-measure: `swift run -c release PCRenderBench --memory --closed-only`.
