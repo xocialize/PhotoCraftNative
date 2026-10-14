@@ -503,8 +503,19 @@ photocraft-format's, so bundles go both ways:
 - **Manifest version.** `pcraftFormatVersion` is 2, and version 1 migrates to 2 unchanged. Format 2
   changes the container, not the document schema. A writer writes 1 (photocraft's) unless the
   single file needs ZIP64, so photocraft opens every package and every single file it could open
-  before. A ZIP64 single file says 2, and photocraft can't open it either way. `saveZip` checksums
-  new objects on all cores and keeps their CRCs with the compressed objects.
+  before. A ZIP64 single file says 2, and photocraft can't open it either way. New objects are
+  compressed and checksummed on all cores.
+- **Streamed, never whole (AB-T-0249).** `PcraftWriter.save(_:to:as: .singleFile)` writes the
+  archive into the atomic save's temporary file entry by entry (`ZipStreamWriter` over a file
+  sink), compressing 32 MiB of objects on all cores while the previous batch is written. The
+  manifest goes first as format 1 and is rewritten in place as format 2, the same length, when the
+  archive turns out to need ZIP64. The bytes are `saveZip`'s, and 2e24b80's: 36 saves compared by
+  hash, covering classic, forced ZIP64, 66,000 entries, several batches, previews and resaves.
+  `PcraftFormat.load(contentsOf:)` reads a single file through `ZipFileReader`: the end records and
+  central directory, then each entry with `pread`, from all cores. The ZIP-mode object cache keeps
+  at most `setZipCacheBudget` (64 MiB by default, 256 bytes counted per entry); one-off saves keep
+  none. PCEngine's Save, Save a Copy and Open of a local single file use these paths; other file
+  systems still go through whole bytes.
 - **Types** (`DocumentTypes.swift`). The package is `com.xocialize.pcraft.package`, conforming to
   `com.apple.package` and `public.composite-content`; the app exports it. The single file is
   photocraft's `ai.storyteller.photocraft.document` (`public.data`, `public.image`); the app imports
@@ -521,25 +532,40 @@ photocraft-format's, so bundles go both ways:
   Automation sessions (`Headless`) write new `.pcraft` files as single files. A file system without
   local folders always does.
 - **The >4 GiB receipt** is opt-in: `PCRAFT_ZIP64_BIG=1 swift test -c release --filter
-  PCFormatTests.Zip64BigTests`. It holds about 20 GB and deletes its temp file afterwards.
-  Receipt, 2026-10-13: a 4,835,768,048-byte (4.50 GiB) single file of 9,217 entries (96 × 96 tiles
-  of RGBA16 noise, 512 KiB each, incompressible). Save took 2.54 s, load 1.63 s (reopened equal),
-  and Info-ZIP's `unzip -t` 14.8 s (all CRCs good). Peak RSS was 20.1 GB. Release build on a Mac
-  Studio (Mac17,14, M5 Max, 128 GB, macOS 27.2), with another worktree's tests running alongside.
+  PCFormatTests.Zip64BigTests`. It holds the 4.5 GiB document twice (saved and reloaded), about
+  10 GB, and deletes its temp file afterwards. `PCRAFT_ZIP64_BIG_SIDE`, `_KEEP`, `_LOAD` and
+  `_REPORT` pick the size, keep the file for a load in a fresh process, and log JSON
+  (`Zip64BigTests.swift`).
+  Receipt, 2026-10-13 (AB-R-0526): a 4,835,768,048-byte (4.50 GiB) single file of 9,217 entries
+  (96 × 96 tiles of RGBA16 noise, 512 KiB each, incompressible). Save took 2.54 s, load 1.63 s
+  (reopened equal), and Info-ZIP's `unzip -t` 14.8 s (all CRCs good).
+  Memory, 2026-10-14 (AB-T-0249), release, the same Mac:
+
+  | file | save: peak over the RSS with the document loaded (6 runs) | load in a fresh process: peak over the loaded document |
+  |---|---|---|
+  | 0.50 GiB | 173–225 MB (2e24b80: 1,692 MB) | 0 MB |
+  | 4.50 GiB | 212–248 MB (2e24b80: 15,074 MB) | 0 MB (2e24b80: 4,903 MB) |
+  | 12.51 GiB | 249–293 MB | 0 MB |
+
+  About 190 MB is fixed: two 32 MiB batches, the 64 MiB cache and the codec buffers. The rest
+  grows with the tile count, about 2–3 KB per tile, and comes from building the manifest, which the
+  archive's first entry must hold whole (Foundation's `JSONEncoder` per layer, then `JSONTree`).
+  Heap in use after a save is back where it started (+0.1 MB). Process peak at 4.50 GiB is 10.1 GB
+  (was 20.1 GB).
 
 
 ## Tests
 
 `swift build --build-tests` and `swift test` in `Packages/PCIO` (debug and release): zero warnings.
-854 tests in 8 targets (2026-10-13, after `.comp` import and `.pcraft` format 2; zero warnings):
+866 tests in 8 targets (2026-10-14, after streamed single files; zero warnings):
 
 | Target | Tests | Content |
 |---|---|---|
-| `PCIOCoreTests` | 63 | ZIP (ZIP64 written only when needed, read from any writer, Info-ZIP interop both ways), deflate/CRC, BLAKE3 vectors, blocks/pixels/gradient bake (Smooth against Photoshop's composite), `ImageIOCodec` (straight alpha, Gray+alpha, 16-bit, float), container metadata, source encoding (JPEG quality, WebP) |
+| `PCIOCoreTests` | 68 | ZIP (ZIP64 written only when needed, read from any writer, Info-ZIP interop both ways; the streaming writer and the file reader agree with the in-memory ones, damaged archives included), deflate/CRC, BLAKE3 vectors, blocks/pixels/gradient bake (Smooth against Photoshop's composite), `ImageIOCodec` (straight alpha, Gray+alpha, 16-bit, float), container metadata, source encoding (JPEG quality, WebP) |
 | `PCIOTextTests` | 52 | TySh/EngineData/Txt2 read/write, styles, corpus (64/64 EngineData, 13/13 `Txt2` byte-exact) |
 | `PCIOMapsTests` | 91 | adjustment/effects/vector/pattern/channel/comps/slices/annotation maps + corpus |
 | `PCIOSmartTests` | 37 | smart maps, linked files, displace, Camera Raw + corpus (98 `SoLd`) |
-| `PCFormatTests` | 127 | all 115 photocraft-format tests, photocraft-shaped bundle, corruption, autosave/recovery, empty-blob frames, format 2 (versions per form, migration, forced ZIP64, package types, only new tiles written; the >4 GiB round trip is opt-in) |
+| `PCFormatTests` | 134 | all 115 photocraft-format tests, photocraft-shaped bundle, corruption, autosave/recovery, empty-blob frames, format 2 (versions per form, migration, forced ZIP64, package types, only new tiles written), streamed single files (the in-memory archive's bytes, format 2 decided at the end, a bounded cache, a failed save changes nothing, file loads fail as memory loads); the >4 GiB round trip and the load measurement are opt-in |
 | `PCIOFormatsTests` | 139 | ORA, KRA, PDN, EXR (every compression), layered TIFF transcoder (corpus both byte orders), SVG, Compositor `.comp` (every version gate, deep/HDR layers, transforms, masks, clipping, adjustments, text/shapes) |
 | `PCIOAffinityTests` | 45 | `affinity.rs` and `affinity_artboards.rs` import tests on `PCAffinitySynth` inputs |
 | `PCIOTests` | 300 | photocraft's `crates/io/tests` (roundtrip, psd_structure, block layout/alignment, 32-bit, modes, multichannel, lab16, channels, banded, large PSB (29000² opt-in), thumbnails, progress/cancel, composite, adjust/effects/vector/comps/annotations/patterns, smart objects, type, tiff_layers/pages/corpus, flat/orientation/metadata/resolution/colour/HEIF, container dispatch, Affinity export halves), the inline tests of the PCIO-owned modules, Compositor's `.comp` fixtures against its own oracle, Photoshop record conventions, both corpora (round trip, oracle, `.pcraft`), EXR part selection, flat export, the Photoshop oracle's findings (type-layer completeness, blend modes per mode/depth, 4-alignment, matte order, `Txt2`, patterns), fill pixels against the live composite, adjustment availability per mode/depth (with the oracle run's proof), per-document CMYK |
