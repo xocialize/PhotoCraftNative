@@ -337,30 +337,34 @@ final class ResidencyCache: @unchecked Sendable {
             let fallback = ReducedBlock.defaultBlock(s, side: side, fmt: fmt, values: values, direct: direct != nil)
             let job = work
             let (format, x0, y0) = (s.format, Int(area.x0), Int(area.y0))
-            DispatchQueue.concurrentPerform(iterations: job.count) { i in
-                let (c, t, _) = job[i]
-                let dst = base.value + (Int(c.ty) * side - y0) * rowBytes + (Int(c.tx) * side - x0) * bpp
-                func copy(_ packed: UnsafeRawPointer) {
-                    for r in 0..<side { (dst + r * rowBytes).copyMemory(from: packed + r * blockRow, byteCount: blockRow) }
-                }
-                guard let t else { fallback.withUnsafeBytes { copy($0.baseAddress!) }; return }
-                if direct != nil {
-                    // A sampled block costs less to make than a look-up.
-                    if !sampled, let hit = ReducedTiles.shared.cached(t, format: format, level: level) {
-                        hit.withUnsafeBytes { copy($0.baseAddress!) }
-                    } else {
-                        t.bytes.withUnsafeBytes { TileReduction.block($0.baseAddress!, format: format, level: level, sampled: sampled, into: dst, rowBytes: rowBytes) }
+            // Blocks in runs (a coarse level's are a few bytes: one task each would cost more than the work).
+            let run = max(1, min(job.count / (ProcessInfo.processInfo.activeProcessorCount * 4), 4096 >> (2 * max(0, 6 - level))))
+            DispatchQueue.concurrentPerform(iterations: (job.count + run - 1) / run) { part in
+                for i in (part * run)..<min(job.count, (part + 1) * run) {
+                    let (c, t, _) = job[i]
+                    let dst = base.value + (Int(c.ty) * side - y0) * rowBytes + (Int(c.tx) * side - x0) * bpp
+                    func copy(_ packed: UnsafeRawPointer) {
+                        for r in 0..<side { (dst + r * rowBytes).copyMemory(from: packed + r * blockRow, byteCount: blockRow) }
                     }
-                } else {
-                    let block = ReducedTiles.shared.cached(t, format: format, level: level, sampled: sampled)
-                        ?? [UInt8](unsafeUninitializedCapacity: side * side * format.bytesPerPixel) { buf, made in
-                            t.bytes.withUnsafeBytes {
-                                TileReduction.block($0.baseAddress!, format: format, level: level, sampled: sampled, into: UnsafeMutableRawPointer(buf.baseAddress!),
-                                                    rowBytes: side * format.bytesPerPixel)
-                            }
-                            made = side * side * format.bytesPerPixel
+                    guard let t else { fallback.withUnsafeBytes { copy($0.baseAddress!) }; continue }
+                    if direct != nil {
+                        // A sampled block costs less to make than a look-up.
+                        if !sampled, let hit = ReducedTiles.shared.cached(t, format: format, level: level) {
+                            hit.withUnsafeBytes { copy($0.baseAddress!) }
+                        } else {
+                            t.bytes.withUnsafeBytes { TileReduction.block($0.baseAddress!, format: format, level: level, sampled: sampled, into: dst, rowBytes: rowBytes) }
                         }
-                    ReducedBlock.converted(block, format: format, side: side, values: values).withUnsafeBytes { copy($0.baseAddress!) }
+                    } else {
+                        let block = ReducedTiles.shared.cached(t, format: format, level: level, sampled: sampled)
+                            ?? [UInt8](unsafeUninitializedCapacity: side * side * format.bytesPerPixel) { buf, made in
+                                t.bytes.withUnsafeBytes {
+                                    TileReduction.block($0.baseAddress!, format: format, level: level, sampled: sampled, into: UnsafeMutableRawPointer(buf.baseAddress!),
+                                                        rowBytes: side * format.bytesPerPixel)
+                                }
+                                made = side * side * format.bytesPerPixel
+                            }
+                        ReducedBlock.converted(block, format: format, side: side, values: values).withUnsafeBytes { copy($0.baseAddress!) }
+                    }
                 }
             }
             for (_, t, k) in work { e.grid[k] = t?.generation ?? 0 }
