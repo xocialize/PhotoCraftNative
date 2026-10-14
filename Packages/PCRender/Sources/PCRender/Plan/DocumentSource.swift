@@ -76,7 +76,7 @@ public final class DocumentLeafCache: @unchecked Sendable {
         let bytes: Int
         switch leaf {
         case .image(let img, _, _): bytes = img.data.count * 4
-        case .surface: bytes = 0
+        case .surface, .reduced: bytes = 0
         }
         lock.lock(); defer { lock.unlock() }
         tick += 1
@@ -161,13 +161,29 @@ public final class DocumentLeafCache: @unchecked Sendable {
 public final class DocumentRenderSource: RenderSource, @unchecked Sendable {
     /// How a derived leaf is built (`self` gives access to the other leaves and nested renders).
     typealias Recipe = @Sendable (DocumentRenderSource) throws -> RenderLeaf
+    /// How a derived leaf is built at a level of detail (in level pixels, from the other leaves at
+    /// that level, sampled for a preview): LevelOfDetail.swift.
+    typealias LevelRecipe = @Sendable (DocumentRenderSource, Int, Bool) throws -> RenderLeaf
+
+    /// A derived leaf that is the alpha of a program over a region (effect shapes): the GPU renders
+    /// it itself instead of building it with the recipe (MetalEffects.swift).
+    struct AlphaProgram: Sendable {
+        let ops: [DrawOp]
+        let region: PixelRect
+    }
 
     final class Derived: @unchecked Sendable {
         let version: UInt64
         let recipe: Recipe
+        let levelRecipe: LevelRecipe?
+        let program: AlphaProgram?
         let lock = NSLock()
         var value: RenderLeaf?
-        init(version: UInt64, recipe: @escaping Recipe) { self.version = version; self.recipe = recipe }
+        let levelLock = NSLock()
+        var levels: [Int: RenderLeaf] = [:]
+        init(version: UInt64, recipe: @escaping Recipe, levelRecipe: LevelRecipe?, program: AlphaProgram?) {
+            self.version = version; self.recipe = recipe; self.levelRecipe = levelRecipe; self.program = program
+        }
     }
 
     public let context: RenderContext
@@ -189,9 +205,11 @@ public final class DocumentRenderSource: RenderSource, @unchecked Sendable {
 
     func register(_ id: LeafID, _ leaf: RenderLeaf) { direct[id] = leaf }
 
-    func register(_ id: LeafID, version: UInt64, _ recipe: @escaping Recipe) {
+    /// Registers a derived leaf; `level` builds it at a level of detail (without one, a level reduces
+    /// the full-resolution leaf).
+    func register(_ id: LeafID, version: UInt64, level: LevelRecipe? = nil, program: AlphaProgram? = nil, _ recipe: @escaping Recipe) {
         if let d = derived[id], d.version == version { return }
-        derived[id] = Derived(version: version, recipe: recipe)
+        derived[id] = Derived(version: version, recipe: recipe, levelRecipe: level, program: program)
     }
 
     func isRegistered(_ id: LeafID) -> Bool { direct[id] != nil || derived[id] != nil }
@@ -216,6 +234,34 @@ public final class DocumentRenderSource: RenderSource, @unchecked Sendable {
     public func leafVersion(_ id: LeafID) -> UInt64? {
         if let l = direct[id] { return LeafReader.version(l) }
         return derived[id]?.version
+    }
+
+    /// `id` at a level of detail (`LevelSource`): surfaces reduced, derived leaves built by their
+    /// level recipe (else reduced from the full-resolution leaf), cached in the leaf cache.
+    /// `sampled` (previews): surfaces sampled; derived leaves are built as at the level (from averaged
+    /// leaves) but kept apart.
+    func leaf(_ id: LeafID, level: Int, sampled: Bool = false) -> RenderLeaf? {
+        if level <= 0 { return leaf(id) }
+        if let l = direct[id] { return LevelOfDetail.reduce(l, level: level, sampled: sampled) }
+        guard let d = derived[id] else { return nil }
+        d.levelLock.lock(); defer { d.levelLock.unlock() }
+        let slot = level | (sampled ? 1 << 8 : 0)
+        if let v = d.levels[slot] { return v }
+        let version = LevelOfDetail.version(d.version, level, sampled: sampled)
+        let key = DocumentLeafCache.LeafKey(id: id, version: version)
+        if let hit = cache.leaf(key) { d.levels[slot] = hit; return hit }
+        var made: RenderLeaf
+        if let lr = d.levelRecipe {
+            guard let m = try? lr(self, level, sampled) else { return nil }
+            made = m
+        } else {
+            guard let full = leaf(id) else { return nil }
+            made = LevelOfDetail.reduce(full, level: level, sampled: sampled)
+        }
+        if case let .image(img, outside, _) = made { made = .image(img, outside: outside, version: version) }
+        cache.store(key, made)
+        d.levels[slot] = made
+        return made
     }
 
     public func pattern(id: String, name: String) -> PatternTile? {
@@ -245,6 +291,17 @@ public final class DocumentRenderSource: RenderSource, @unchecked Sendable {
     func alpha(of ops: [DrawOp], over rect: PixelRect) throws -> [Float] {
         if rect.isEmpty { return [] }
         let b = try subRenderer.render(RenderPlan(context: context, ops: ops), region: rect, source: self)
+        return b.px.map(\.w)
+    }
+
+    /// `alpha(of:over:)` at a level of detail: the program at the level over the level pixels
+    /// covering `rect` (`LevelOfDetail.region`), from the leaves at that level.
+    func alpha(of ops: [DrawOp], over rect: PixelRect, level: Int, sampled: Bool = false) throws -> [Float] {
+        if level <= 0 { return try alpha(of: ops, over: rect) }
+        let r = LevelOfDetail.region(rect, level: level)
+        if r.isEmpty { return [] }
+        let b = try subRenderer.render(RenderPlan(context: context, ops: ops).atLevel(level), region: r,
+                                       source: LevelSource(self, level: level, sampled: sampled))
         return b.px.map(\.w)
     }
 }
@@ -391,5 +448,26 @@ enum DerivedLeaves {
             }
         }
         return out
+    }
+}
+
+/// Sources whose effect shapes the GPU can render itself: the alpha of a plan over a region.
+protocol AlphaProgramSource {
+    /// The plan, region and leaf source whose composite's alpha is leaf `id`; nil when `id` isn't one.
+    func alphaProgram(_ id: LeafID) -> (plan: RenderPlan, region: PixelRect, source: any RenderSource)?
+}
+
+extension DocumentRenderSource: AlphaProgramSource {
+    func alphaProgram(_ id: LeafID) -> (plan: RenderPlan, region: PixelRect, source: any RenderSource)? {
+        guard let p = derived[id]?.program else { return nil }
+        return (RenderPlan(context: context, ops: p.ops), p.region, self)
+    }
+}
+
+extension LevelSource: AlphaProgramSource {
+    /// The program at the level, over the level pixels covering its region (the level recipe's).
+    func alphaProgram(_ id: LeafID) -> (plan: RenderPlan, region: PixelRect, source: any RenderSource)? {
+        guard let d = base as? DocumentRenderSource, let p = d.derived[id]?.program else { return nil }
+        return (RenderPlan(context: d.context, ops: p.ops).atLevel(level), LevelOfDetail.region(p.region, level: level), self)
     }
 }

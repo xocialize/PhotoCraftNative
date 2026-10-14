@@ -193,7 +193,9 @@ final class PlanEmitter {
         let nid = id.native(native.plane)
         let version = ContentBounds.fingerprint(s) ^ (native.plane << 60)
         let space = native
-        source.register(nid, version: version) { _ in NativeConvert.image(s, space, version: version) }
+        source.register(nid, version: version, level: { _, l, _ in
+            NativeConvert.image(TileReduction.surface(s, level: l), space, version: LevelOfDetail.version(version, l))
+        }) { _ in NativeConvert.image(s, space, version: version) }
         return nid
     }
 
@@ -265,7 +267,11 @@ final class PlanEmitter {
         var fp = Fingerprint()
         fp.mix(hashable: vm)
         fp.mix(area)
-        source.register(id, version: fp.value) { src in DerivedLeaves.vectorMask(vm, area: area, rasterizer: src.rasterizer) }
+        source.register(id, version: fp.value, level: { src, l, _ in
+            var scaled = vm
+            scaled.path = vm.path.atLevel(l)
+            return DerivedLeaves.vectorMask(scaled, area: LevelOfDetail.region(area, level: l), rasterizer: src.rasterizer)
+        }) { src in DerivedLeaves.vectorMask(vm, area: area, rasterizer: src.rasterizer) }
         return id
     }
 
@@ -348,7 +354,11 @@ final class PlanEmitter {
             fp.mix(area)
             for ch in doc.channels { fp.mix(ContentBounds.fingerprint(ch.surface)); fp.mix(hashable: ch.spot) }
             let (d, r) = (doc, area)
-            source.register(id, version: fp.value) { _ in DerivedLeaves.inks(d, r) }
+            source.register(id, version: fp.value, level: { _, l, _ in
+                var dl = d
+                for i in dl.channels.indices { dl.channels[i].surface = TileReduction.surface(d.channels[i].surface, level: l) }
+                return DerivedLeaves.inks(dl, LevelOfDetail.region(r, level: l))
+            }) { _ in DerivedLeaves.inks(d, r) }
             ops.append(.drawTiles(DrawTiles(leaf: id)))
         } else {
             ops.append(.pushTransparent)
@@ -583,16 +593,29 @@ final class PlanEmitter {
             return id
         }
         @Sendable func image(_ v: [Float]) -> RenderLeaf { .image(FloatImage(rect: region, channels: 1, data: v), outside: .zero, version: version) }
+        // At a level: over the level pixels covering the region (the region of the level EffectsSpec).
+        @Sendable func image(_ v: [Float], level l: Int) -> RenderLeaf {
+            .image(FloatImage(rect: LevelOfDetail.region(region, level: l), channels: 1, data: v), outside: .zero, version: LevelOfDetail.version(version, l))
+        }
         if !src.advanced.transparencyShapes {
             let prog: [DrawOp] = [.pushMaskShape(maskSpec(src))]
-            source.register(id, version: version) { s in image(try s.alpha(of: prog, over: region)) }
+            source.register(id, version: version, level: { s, l, sampled in image(try s.alpha(of: prog, over: region, level: l, sampled: sampled), level: l) },
+                            program: .init(ops: prog, region: region)) { s in
+                image(try s.alpha(of: prog, over: region))
+            }
             return id
         }
         let content = subProgram(rect: region) { if !self.renderContent(src) { self.ops.append(.pushTransparent) } }
         if let path = LayerGeometry.effectOutline(src) {
             let alphaProg: [DrawOp] = [.drawTiles(DrawTiles(leaf: contentLeaf(src)))]
             let maskProg: [DrawOp]? = maskSpec(src).map { [.pushMaskShape($0)] }
-            source.register(id, version: version) { s in
+            source.register(id, version: version, level: { s, l, sampled in
+                let r = LevelOfDetail.region(region, level: l), p = path.atLevel(l)
+                let cov = s.rasterizer.coverage(of: p, in: r).flatMap { $0.count == r.area ? $0 : nil } ?? PathCoverage.coverage(of: p, in: r)
+                let a = try s.alpha(of: alphaProg, over: region, level: l, sampled: sampled)
+                let mv = try maskProg.map { try s.alpha(of: $0, over: region, level: l, sampled: sampled) }
+                return image(DerivedLeaves.outlineShape(alpha: a, coverage: cov, mask: mv, w: r.width, h: r.height), level: l)
+            }) { s in
                 let cov = s.rasterizer.coverage(of: path, in: region).flatMap { $0.count == region.area ? $0 : nil }
                     ?? PathCoverage.coverage(of: path, in: region)
                 let a = try s.alpha(of: alphaProg, over: region)
@@ -601,7 +624,10 @@ final class PlanEmitter {
             }
             return id
         }
-        source.register(id, version: version) { s in image(try s.alpha(of: content, over: region)) }
+        source.register(id, version: version, level: { s, l, sampled in image(try s.alpha(of: content, over: region, level: l, sampled: sampled), level: l) },
+                        program: .init(ops: content, region: region)) { s in
+            image(try s.alpha(of: content, over: region))
+        }
         return id
     }
 
@@ -643,7 +669,10 @@ final class PlanEmitter {
             var fp = Fingerprint()
             fp.mix(hashable: f); fp.mix(frame); fp.mix(area); fp.mix(UInt64(depth.bytes))
             let d = depth
-            source.register(id, version: fp.value) { _ in
+            source.register(id, version: fp.value, level: { _, l, _ in
+                DerivedLeaves.cmykFill(f, rect: LevelOfDetail.region(area, level: l), frame: LevelOfDetail.layout(frame, level: l), depth: d)
+                    ?? .image(FloatImage(rect: .empty, channels: 4), outside: .zero, version: 0)
+            }) { _ in
                 DerivedLeaves.cmykFill(f, rect: area, frame: frame, depth: d) ?? .image(FloatImage(rect: .empty, channels: 4), outside: .zero, version: 0)
             }
             ops.append(.drawTiles(DrawTiles(leaf: id, mask: mask)))

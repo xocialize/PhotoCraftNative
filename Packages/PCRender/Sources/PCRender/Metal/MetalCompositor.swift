@@ -90,6 +90,20 @@ public final class MetalCompositor: @unchecked Sendable {
         /// What rebuilding each of its effect maps and masks takes (held + intermediates).
         var fxRebuild: [CPUCompositor.FxKey: Int]
         var maskRebuild: [CPUCompositor.MaskKey: Int]
+
+        /// This record and a later render's of the same view drawn in parts: what either used.
+        func adding(_ r: ViewRecord) -> ViewRecord {
+            var m = r
+            m.pages.formUnion(pages); m.fx.formUnion(fx); m.masks.formUnion(masks)
+            m.region = region.union(r.region)
+            m.outputBytes = max(outputBytes, r.outputBytes)
+            m.poolBytes = max(poolBytes, r.poolBytes)
+            m.accumulatorArea = max(accumulatorArea, r.accumulatorArea)
+            m.buildBytes = max(buildBytes, r.buildBytes)
+            m.fxRebuild.merge(fxRebuild) { a, _ in a }
+            m.maskRebuild.merge(maskRebuild) { a, _ in a }
+            return m
+        }
     }
     var views: [RenderView: ViewRecord] = [:]
     var budgetBytes: Int?
@@ -114,8 +128,10 @@ public final class MetalCompositor: @unchecked Sendable {
 
     /// Bytes held by resident leaf pages.
     public var residentBytes: Int { residency.residentBytes }
-    /// Tiles uploaded since creation.
+    /// Tiles uploaded since creation (a reduced block counts as one).
     public var tilesUploaded: Int { residency.tilesUploaded }
+    /// Source tiles reduced into level pages since creation.
+    public var blocksReduced: Int { locked { residency.blocksReduced } }
 
     /// Drops every cached texture.
     public func purge() {
@@ -147,18 +163,46 @@ public final class MetalCompositor: @unchecked Sendable {
     /// Composites `plan` over `region` on the GPU into a new region-sized texture.
     /// `into`: a texture of at least the region's size to composite into (reused across frames:
     /// a fresh 4096² float texture costs its page mapping on every render); nil allocates one.
+    /// `at`: where in `into` the region's corner goes.
     /// `view`: the canvas view this render draws (what it uses counts as visible until the view's
-    /// next render; see CanvasMemory.swift).
+    /// next render; see CanvasMemory.swift). `addingToView`: what it uses is added to what the view's
+    /// earlier renders used, for a composite a view draws in parts (tiles, damage); the next render
+    /// without it starts the view's set again.
     public func render(_ plan: RenderPlan, region: PixelRect, source: any RenderSource,
                        outputFormat: MTLPixelFormat = .rgba32Float, outputStorage: MTLStorageMode = .private,
-                       into target: (any MTLTexture)? = nil, view: RenderView? = nil) throws -> MetalRenderResult {
+                       into target: (any MTLTexture)? = nil, at origin: SIMD2<Int> = .zero, view: RenderView? = nil,
+                       addingToView: Bool = false) throws -> MetalRenderResult {
+        try render(plan, region: region, level: 0, source: source, outputFormat: outputFormat, outputStorage: outputStorage,
+                   into: target, at: origin, view: view, addingToView: addingToView)
+    }
+
+    /// Composites `plan` (planned over the document pixels `region`) at level of detail `level`
+    /// (LevelOfDetail.swift): `plan.atLevel(level)` over the level pixels covering `region`
+    /// (`LevelOfDetail.region`, the result's `rect`), from `source`'s leaves at that level
+    /// (`LevelSource`). Level 0 is the full-resolution render; levels past
+    /// `LevelOfDetail.maxLevel` clamp to it. Align `region` to 2^level so every level pixel's block
+    /// lies inside the region the plan was made for.
+    ///
+    /// `sampled`: a quick preview whose surfaces are sampled (one pixel per block) rather than
+    /// averaged, so a cold render reads one pixel in 4^level of the document instead of all of it.
+    public func render(_ plan: RenderPlan, region docRegion: PixelRect, level requested: Int, sampled: Bool = false, source docSource: any RenderSource,
+                       outputFormat: MTLPixelFormat = .rgba32Float, outputStorage: MTLStorageMode = .private,
+                       into target: (any MTLTexture)? = nil, at origin: SIMD2<Int> = .zero, view: RenderView? = nil,
+                       addingToView: Bool = false) throws -> MetalRenderResult {
         func clock() -> Double { Double(DispatchTime.now().uptimeNanoseconds) / 1e9 }
         var stats = MetalRenderStats()
         var t = clock()
         func lap(_ k: WritableKeyPath<MetalRenderStats, Double>) { let n = clock(); stats[keyPath: k] += n - t; t = n }
+        let level = LevelOfDetail.clamp(requested)
+        let plan = level == 0 ? plan : plan.atLevel(level)
+        let region = LevelOfDetail.region(docRegion, level: level)
+        let source: any RenderSource = level == 0 ? docSource : LevelSource(docSource, level: level, sampled: sampled)
         do { try plan.validate() } catch { throw MetalCompositorError.gpu(error.description) }
         if let why = unsupportedReason(plan) { throw MetalCompositorError.unsupported(why) }
-        let reused = target.flatMap({ $0.width >= region.width && $0.height >= region.height ? $0 : nil })
+        let at = SIMD2(max(origin.x, 0), max(origin.y, 0))
+        let reused = target.flatMap({ $0.width >= at.x + region.width && $0.height >= at.y + region.height ? $0 : nil })
+        // A target too small for the region (at `at`) is not used: a new texture is made instead.
+        let origin = reused == nil ? .zero : at
         guard !region.isEmpty,
               let out = reused
                 ?? context.makeTexture(width: region.width, height: region.height, pixelFormat: outputFormat,
@@ -168,14 +212,14 @@ public final class MetalCompositor: @unchecked Sendable {
         lock.lock()
         applyForgotten()
         lap(\.output)
-        residency.beginFrame()
+        residency.beginFrame(level: level)
         let frame = residency.currentFrame
         pool.frame = frame
         pool.frameIsView = view != nil
         frameFx.removeAll(); frameMasks.removeAll()
         let result: MetalRenderResult
         do {
-            result = try renderLocked(plan, region: region, source: source, out: out, lap: lap)
+            result = try renderLocked(plan, region: region, source: source, out: out, origin: SIMD2(Int32(origin.x), Int32(origin.y)), lap: lap)
             lastStats = stats
         } catch {
             let fp = finishFrame()
@@ -189,10 +233,11 @@ public final class MetalCompositor: @unchecked Sendable {
             for k in frameMasks { if let m = maskCache[k]?.mask { maskRebuild[k] = m.allocated + m.buildBytes } }
             let build = max(frameFx.compactMap { fxCache[$0]?.maps.buildBytes }.max() ?? 0,
                             frameMasks.compactMap { maskCache[$0]?.mask.buildBytes }.max() ?? 0)
-            views[view] = ViewRecord(frame: frame, pages: residency.keys(usedIn: frame), fx: frameFx, masks: frameMasks, region: region,
-                                     outputBytes: reused == nil ? out.allocatedSize : 0,
-                                     poolBytes: pool.bytes(touchedIn: frame), accumulatorArea: accumulatorArea(region, side: renderCell),
-                                     buildBytes: build, fxRebuild: fxRebuild, maskRebuild: maskRebuild)
+            let record = ViewRecord(frame: frame, pages: residency.keys(usedIn: frame), fx: frameFx, masks: frameMasks, region: region,
+                                    outputBytes: reused == nil ? out.allocatedSize : 0,
+                                    poolBytes: pool.bytes(touchedIn: frame), accumulatorArea: accumulatorArea(region, side: renderCell),
+                                    buildBytes: build, fxRebuild: fxRebuild, maskRebuild: maskRebuild)
+            views[view] = addingToView ? views[view].map { $0.adding(record) } ?? record : record
         }
         let fp = finishFrame()
         lock.unlock()
@@ -200,23 +245,22 @@ public final class MetalCompositor: @unchecked Sendable {
         return result
     }
 
-    /// `format`: the accumulators' (default: `precision`'s for the plan; a backdrop filter's
-    /// program takes its plan's).
-    func renderLocked(_ plan: RenderPlan, region: PixelRect, source: any RenderSource, out: any MTLTexture, format: MTLPixelFormat? = nil,
+    /// `origin`: where in `out` the region's corner goes. `format`: the accumulators' (default:
+    /// `precision`'s for the plan; a backdrop filter's program takes its plan's). `alphaOnly`: the
+    /// result's alpha into an r32Float `out` (an effect shape), on float accumulators.
+    func renderLocked(_ plan: RenderPlan, region: PixelRect, source: any RenderSource, out: any MTLTexture, origin: SIMD2<Int32> = .zero,
+                      format: MTLPixelFormat? = nil, alphaOnly: Bool = false,
                       lap: (WritableKeyPath<MetalRenderStats, Double>) -> Void) throws -> MetalRenderResult {
-        let accFormat = format ?? precision.format(for: plan)
+        let accFormat = alphaOnly ? .rgba32Float : format ?? precision.format(for: plan)
         var gpuTime = 0.0
-        // Effect maps and feathered masks first (their own command buffer; the cells read them).
-        // Command buffers are committed back to back and waited for once: the queue runs them in
-        // order, and textures recycled between cells are hazard-tracked. Backdrop filters' programs
-        // render (and wait) before that, so what they build is complete when the cells read it.
+        // Effect maps and feathered masks first (their own command buffers, committed by `prepare`;
+        // the cells read them). Command buffers are committed back to back and waited for once: the
+        // queue runs them in order, and textures recycled between cells are hazard-tracked. Backdrop
+        // filters' programs render (and wait) before that, so what they build is complete when the
+        // cells read it.
         let prepared = try prepare(plan, region: region, source: source, format: accFormat)
         lap(\.prepare)
-        var committed: [any MTLCommandBuffer] = []
-        if let cb = prepared.commandBuffer {
-            cb.commit()
-            committed.append(cb)
-        }
+        var committed: [any MTLCommandBuffer] = prepared.commandBuffers
         let cells = cellRects(region, side: renderCell)
         for cell in cells {
             guard let cb = context.queue.makeCommandBuffer() else { throw MetalCompositorError.gpu("command buffer") }
@@ -225,8 +269,9 @@ public final class MetalCompositor: @unchecked Sendable {
             var run = CellRun(compositor: self, plan: plan, prepared: prepared, source: source, cell: cell, enc: enc, format: accFormat)
             let root = try run.execute()
             var o = run.baseOp()
-            o.aux = SIMD2(cell.x0 - region.x0, cell.y0 - region.y0)
-            kernels.dispatch(enc, try kernels.pipeline("pcr_copy_out"), op: o, grid: (cell.width, cell.height), textures: [Slot.a: root.texture, Slot.out: out])
+            o.aux = SIMD2(cell.x0 - region.x0, cell.y0 - region.y0) &+ origin
+            kernels.dispatch(enc, try kernels.pipeline(alphaOnly ? "pcr_copy_alpha" : "pcr_copy_out"), op: o, grid: (cell.width, cell.height),
+                             textures: [Slot.a: root.texture, Slot.out: out])
             enc.endEncoding()
             cb.commit()
             committed.append(cb)
@@ -244,10 +289,11 @@ public final class MetalCompositor: @unchecked Sendable {
         return MetalRenderResult(texture: out, rect: region, gpuTime: gpuTime, cells: cells.count)
     }
 
-    /// Renders and reads the composite back (tests, export).
-    public func renderBuffer(_ plan: RenderPlan, region: PixelRect, source: any RenderSource) throws -> RGBABuffer {
-        let r = try render(plan, region: region, source: source, outputFormat: .rgba32Float, outputStorage: .shared)
-        let img = context.readImage(r.texture, rect: region, channels: 4)
+    /// Renders and reads the composite back (tests, export); at a level, over the level pixels
+    /// covering `region`.
+    public func renderBuffer(_ plan: RenderPlan, region: PixelRect, level: Int = 0, sampled: Bool = false, source: any RenderSource) throws -> RGBABuffer {
+        let r = try render(plan, region: region, level: level, sampled: sampled, source: source, outputFormat: .rgba32Float, outputStorage: .shared)
+        let img = context.readImage(r.texture, rect: r.rect, channels: 4)
         return RGBABuffer(img)
     }
 
@@ -285,7 +331,33 @@ public final class MetalCompositor: @unchecked Sendable {
         var masks: [MaskSpec: GPUMask] = [:]
         var adjustments: [Int: GPUAdjustment] = [:]
         var backdrops: [Int: GPUBackdrop] = [:]
-        var commandBuffer: (any MTLCommandBuffer)?
+        /// The preparation's command buffers, committed in order.
+        var commandBuffers: [any MTLCommandBuffer] = []
+    }
+
+    /// Where map building is encoded: one command buffer at a time, committed (`flush`) before a
+    /// nested render (an effect shape) or a read-back needs what is encoded so far to have run.
+    final class PrepareStream {
+        let queue: any MTLCommandQueue
+        private var cb: (any MTLCommandBuffer)?
+        private var enc: (any MTLComputeCommandEncoder)?
+        private(set) var committed: [any MTLCommandBuffer] = []
+        init(queue: any MTLCommandQueue) { self.queue = queue }
+
+        func encoder() throws -> any MTLComputeCommandEncoder {
+            if let enc { return enc }
+            guard let b = queue.makeCommandBuffer(), let e = b.makeComputeCommandEncoder() else { throw MetalCompositorError.gpu("prepare encoder") }
+            b.label = "PCRender prepare"
+            cb = b; enc = e
+            return e
+        }
+
+        /// Commits what is encoded; `wait`: and waits for it.
+        func flush(wait: Bool = false) {
+            enc?.endEncoding(); enc = nil
+            if let cb { cb.commit(); committed.append(cb); if wait { cb.waitUntilCompleted() } }
+            cb = nil
+        }
     }
 
     private func prepare(_ plan: RenderPlan, region: PixelRect, source: any RenderSource, format: MTLPixelFormat) throws -> Prepared {
@@ -294,24 +366,16 @@ public final class MetalCompositor: @unchecked Sendable {
         for (i, op) in plan.ops.enumerated() {
             if case .backdropFilter(let b) = op { p.backdrops[i] = try gpuBackdrop(b, ctx: ctx, region: region, source: source, format: format) }
         }
-        var enc: (any MTLComputeCommandEncoder)?
-        func encoder() throws -> any MTLComputeCommandEncoder {
-            if let enc { return enc }
-            guard let cb = context.queue.makeCommandBuffer(), let e = cb.makeComputeCommandEncoder() else { throw MetalCompositorError.gpu("prepare encoder") }
-            cb.label = "PCRender prepare"
-            p.commandBuffer = cb
-            enc = e
-            return e
-        }
+        let stream = PrepareStream(queue: context.queue)
         func needMask(_ m: MaskSpec?) throws {
             guard let m, m.hasFeather, p.masks[m] == nil else { return }
-            p.masks[m] = try gpuMask(m, ctx: ctx, source: source, encoder: encoder)
+            p.masks[m] = try gpuMask(m, ctx: ctx, source: source, encoder: stream.encoder)
         }
         for (i, op) in plan.ops.enumerated() {
             switch op {
             case .adjust(let a): p.adjustments[i] = GPUAdjustment(a, ctx, kernels: kernels)
             case .effect(let spec, _):
-                p.maps[i] = try gpuMaps(spec, ctx: ctx, source: source, encoder: encoder)
+                p.maps[i] = try gpuMaps(spec, ctx: ctx, source: source, stream: stream)
                 try needMask(spec.vectorStrokeMask)
             case .drawTiles(let d): try needMask(d.mask)
             case .fill(let f): try needMask(f.mask)
@@ -323,7 +387,8 @@ public final class MetalCompositor: @unchecked Sendable {
             default: break
             }
         }
-        enc?.endEncoding()
+        stream.flush()
+        p.commandBuffers = stream.committed
         evictCaches()
         return p
     }

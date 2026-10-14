@@ -157,20 +157,41 @@ extension MetalCompositor {
         }
     }
 
-    /// The layer's effect maps on the GPU (built into `encoder`, cached by layer state).
-    func gpuMaps(_ spec: EffectsSpec, ctx: RenderContext, source: any RenderSource,
-                 encoder: () throws -> any MTLComputeCommandEncoder) throws -> GPUFxMaps {
+    /// The layer's effect maps on the GPU (built into `stream`, cached by layer state). An effect shape
+    /// that is the alpha of a program (`AlphaProgramSource`: a layer's content, a Transparency Shapes
+    /// Layer mask) is rendered here by a nested plan, at a level too; the CPU builds the others, and
+    /// gets the GPU's back only for what needs it (distance fields, sharp edges, stroke frames).
+    func gpuMaps(_ spec: EffectsSpec, ctx: RenderContext, source: any RenderSource, stream: PrepareStream) throws -> GPUFxMaps {
         guard let shapeVersion = source.leafVersion(spec.shape) else { throw MetalCompositorError.gpu(PlanError.missingLeaf(spec.shape).description) }
         let key = CPUCompositor.FxKey(layer: spec.layerID, shapeVersion: shapeVersion, effects: spec.effects, region: spec.region,
                                       light: ctx.globalLight, vectorShape: spec.vectorShape, outline: spec.outline)
         if let hit = fxCache[key] { fxCache[key] = (hit.maps, nextTick()); frameFx.insert(key); return hit.maps }
         let allocatedBefore = mapBytesAllocated
-        guard let shapeLeaf = source.leaf(spec.shape) else { throw MetalCompositorError.gpu(PlanError.missingLeaf(spec.shape).description) }
         let region = spec.region
-        let shapeCPU = region.isEmpty ? [] : LeafReader.values(shapeLeaf, region)
-        let s = FxMap(w: region.width, h: region.height, v: shapeCPU)
-        let me = MapEncoder(c: self, enc: try encoder(), region: region)
-        let shapeTex = try me.upload(shapeCPU)
+        let shapeTex: any MTLTexture
+        var cpuShape: FxMap?
+        if !region.isEmpty, let prog = (source as? AlphaProgramSource)?.alphaProgram(spec.shape), prog.region == region,
+           let t = context.makeTexture(width: region.width, height: region.height, pixelFormat: .r32Float, usage: [.shaderRead, .shaderWrite], storage: .shared) {
+            mapBytesAllocated += t.allocatedSize
+            // What this preparation encoded so far runs first (the shape's plan may read its masks).
+            stream.flush()
+            _ = try renderLocked(prog.plan, region: region, source: prog.source, out: t, origin: .zero, alphaOnly: true) { _ in }
+            shapeTex = t
+        } else {
+            guard let shapeLeaf = source.leaf(spec.shape) else { throw MetalCompositorError.gpu(PlanError.missingLeaf(spec.shape).description) }
+            let v = region.isEmpty ? [] : LeafReader.values(shapeLeaf, region)
+            cpuShape = FxMap(w: region.width, h: region.height, v: v)
+            shapeTex = try MapEncoder(c: self, enc: try stream.encoder(), region: region).upload(v)
+        }
+        /// The shape on the CPU (read back from the GPU's, which its nested render has finished).
+        func shape() -> FxMap {
+            if let cpuShape { return cpuShape }
+            let m = FxMap(w: region.width, h: region.height,
+                          v: context.readImage(shapeTex, rect: PixelRect(x: 0, y: 0, width: region.width, height: region.height), channels: 1).data)
+            cpuShape = m
+            return m
+        }
+        let me = MapEncoder(c: self, enc: try stream.encoder(), region: region)
         let light = ctx.globalLight
         let items = spec.effects.items.filter(\.isEnabled)
         var bevelPaint = [EffectMath.BevelPaint](repeating: .inner, count: items.count)
@@ -189,6 +210,7 @@ extension MetalCompositor {
                     var m = try me.shift(shapeTex, dx, dy, outside: outside, invert: inner)
                     let (r, bw) = EffectMath.spreadSplit(sh.size, sh.spread)
                     if r > 0 {
+                        let s = shape()
                         let src = inner ? s.map { 1 - $0 } : s
                         let d = DistanceFields.distOutside(src.shifted(dx, dy, outside: outside), .chamfer)
                         m = try me.dilate(m, try me.upload(d), r)
@@ -201,6 +223,7 @@ extension MetalCompositor {
                     var m: any MTLTexture
                     switch g.technique {
                     case .precise:
+                        let s = shape()
                         let d = inner ? DistanceFields.distInside(s, .euclidean) : DistanceFields.distOutside(s, .euclidean)
                         let solid = g.size * g.spread
                         var o = me.op(); o.p0 = SIMD4(solid, max(g.size + 1 - solid, 1e-3), 0, 0)
@@ -209,6 +232,7 @@ extension MetalCompositor {
                         m = inner ? try me.shift(shapeTex, 0, 0, outside: 0, invert: true) : shapeTex
                         let (r, bw) = EffectMath.spreadSplit(g.size, g.spread)
                         if r > 0 {
+                            let s = shape()
                             let d = DistanceFields.distOutside(inner ? s.map { 1 - $0 } : s, .chamfer)
                             m = try me.dilate(m, try me.upload(d), r)
                         }
@@ -230,7 +254,7 @@ extension MetalCompositor {
                     let b = try contoured(try me.tent(try me.shift(shapeTex, -dx, -dy, outside: 0, invert: false), st.size))
                     per.append([try me.finish(a, b: b, invertBefore: st.invert, shape: shapeTex)])
                 case .bevelEmboss(let b):
-                    let (maps, paint) = try bevelMaps(me, s, shapeTex, b, light, spec, source)
+                    let (maps, paint) = try bevelMaps(me, shape, shapeTex, b, light, spec, source)
                     bevelPaint[i] = paint
                     per.append(maps)
                 default:
@@ -241,6 +265,7 @@ extension MetalCompositor {
         let hasStroke = items.contains { if case .stroke = $0 { return true } else { return false } }
         var din: (any MTLTexture)?, dout: (any MTLTexture)?, vdout: (any MTLTexture)?
         if hasStroke && !region.isEmpty {
+            let s = shape()
             din = try me.upload(DistanceFields.distInside(s, .chamfer))
             dout = try me.upload(DistanceFields.distOutside(s, .chamfer))
             if spec.vectorShape && !spec.outline { vdout = try me.upload(DistanceFields.distOutside(DistanceFields.localCoverage(s), .chamfer)) }
@@ -249,7 +274,7 @@ extension MetalCompositor {
         for e in items {
             if case .stroke(let st) = e, case .gradient = st.paint {
                 let outW = EffectMath.strokeWidths(st).outer
-                if !frames.contains(where: { $0.0 == outW.bitPattern }) { frames.append((outW.bitPattern, EffectMath.strokeFrame(s, outW, region))) }
+                if !frames.contains(where: { $0.0 == outW.bitPattern }) { frames.append((outW.bitPattern, EffectMath.strokeFrame(shape(), outW, region))) }
             }
         }
         let maps = GPUFxMaps(region: region, shape: shapeTex, per: per, bevelPaint: bevelPaint, din: din, dout: dout, vdout: vdout,
@@ -260,7 +285,7 @@ extension MetalCompositor {
         return maps
     }
 
-    private func bevelMaps(_ me: MapEncoder, _ s: FxMap, _ shapeTex: any MTLTexture, _ b: Bevel, _ light: GlobalLight, _ spec: EffectsSpec,
+    private func bevelMaps(_ me: MapEncoder, _ shape: () -> FxMap, _ shapeTex: any MTLTexture, _ b: Bevel, _ light: GlobalLight, _ spec: EffectsSpec,
                            _ source: any RenderSource) throws -> ([any MTLTexture], EffectMath.BevelPaint) {
         let g = EffectMath.bevelGeom(b)
         let size = max(b.size, 1)
@@ -268,6 +293,7 @@ extension MetalCompositor {
         if b.technique == .smooth {
             h = try me.tent(shapeTex, g.width)
         } else {
+            let s = shape()
             let sharp = DistanceFields.sharpEdges(s)
             let din = try me.upload(DistanceFields.bevelDistInside(s, sharp, size))
             let dout = try me.upload(DistanceFields.bevelDistOutside(s, sharp, size))
@@ -777,15 +803,9 @@ extension MetalCompositor {
 
     /// The GPU effect maps of `spec` (tests): every map read back, in `FxMaps.per` order.
     func debugMaps(_ spec: EffectsSpec, ctx: RenderContext, source: any RenderSource) throws -> [[[Float]]] {
-        var cb: (any MTLCommandBuffer)?
-        var enc: (any MTLComputeCommandEncoder)?
-        let maps = try gpuMaps(spec, ctx: ctx, source: source) {
-            if let enc { return enc }
-            cb = context.queue.makeCommandBuffer()
-            enc = cb!.makeComputeCommandEncoder()
-            return enc!
-        }
-        enc?.endEncoding(); cb?.commit(); cb?.waitUntilCompleted()
+        let stream = PrepareStream(queue: context.queue)
+        let maps = try gpuMaps(spec, ctx: ctx, source: source, stream: stream)
+        stream.flush(wait: true)
         return try maps.per.map { try $0.map { try readMap($0) } }
     }
 }

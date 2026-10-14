@@ -26,6 +26,14 @@ kernel void pcr_copy_out(PCR_ARGS, PCR_IN a [[texture(0)]], PCR_OUT out [[textur
     out.write(a.read(t), uint2(int2(t) + op.aux));
 }
 
+/// The cell's alpha into a region-sized r32Float output at texel offset aux (effect shapes rendered
+/// on the GPU: MetalEffects.swift).
+kernel void pcr_copy_alpha(PCR_ARGS, PCR_IN a [[texture(0)]], PCR_OUT out [[texture(7)]]) {
+    uint2 t; int2 d;
+    if (!pcr_coords(op, gid, t, d)) return;
+    out.write(float4(a.read(t).a), uint2(int2(t) + op.aux));
+}
+
 /// A leaf (layer pixels) with its masks: `.drawTiles`, solid fills (outside value = the colour).
 kernel void pcr_draw_leaf(PCR_ARGS, PCR_IN mtex [[texture(4)]], PCR_IN vtex [[texture(5)]], PCR_IN leaf [[texture(6)]],
                           PCR_OUT out [[texture(7)]]) {

@@ -17,6 +17,8 @@ enum LeafReader {
         switch leaf {
         case .surface(let s):
             return s.readRGBA(rect)
+        case let .reduced(s, level, sampled):
+            return TileReduction.surface(s, level: level, over: rect, sampled: sampled).readRGBA(rect)
         case let .image(img, outside, _):
             var out = [SIMD4<Float>](repeating: outside, count: rect.area)
             let inter = img.rect.intersect(rect)
@@ -47,6 +49,8 @@ enum LeafReader {
             if s.channels == 1 { return s.readRegion(rect) }
             let raw = s.readRegion(rect), ch = s.channels
             return (0..<rect.area).map { raw[$0 * ch] }
+        case let .reduced(s, level, sampled):
+            return values(.surface(TileReduction.surface(s, level: level, over: rect, sampled: sampled)), rect)
         case let .image(img, outside, _):
             var out = [Float](repeating: outside.x, count: rect.area)
             let inter = img.rect.intersect(rect)
@@ -63,7 +67,7 @@ enum LeafReader {
     /// Default (outside) value of a mask / coverage leaf.
     static func outsideValue(_ leaf: RenderLeaf) -> Float {
         switch leaf {
-        case .surface(let s): s.defaultPixelValue.first ?? 0
+        case .surface(let s), .reduced(let s, _, _): s.defaultPixelValue.first ?? 0
         case .image(_, let outside, _): outside.x
         }
     }
@@ -72,6 +76,7 @@ enum LeafReader {
     static func extent(_ leaf: RenderLeaf) -> PixelRect {
         switch leaf {
         case .surface(let s): ContentBounds.of(s)
+        case let .reduced(s, level, _): LevelOfDetail.region(ContentBounds.of(s), level: level)
         case .image(let img, _, _): img.rect
         }
     }
@@ -80,6 +85,7 @@ enum LeafReader {
     static func version(_ leaf: RenderLeaf) -> UInt64 {
         switch leaf {
         case .surface(let s): return ContentBounds.fingerprint(s)
+        case let .reduced(s, level, sampled): return LevelOfDetail.version(ContentBounds.fingerprint(s), level, sampled: sampled)
         case .image(_, _, let v): return v
         }
     }

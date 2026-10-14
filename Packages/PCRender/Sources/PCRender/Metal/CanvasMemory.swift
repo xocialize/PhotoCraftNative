@@ -24,8 +24,12 @@ public struct RenderView: Hashable, Sendable {
 
 /// What `MetalCompositor` holds on the GPU, by cache (bytes).
 public struct CompositorFootprint: Sendable, Equatable {
-    /// Residency pages of document surfaces (one per leaf, page cell and role).
+    /// Residency pages of document surfaces (one per leaf, page cell and role), at full resolution
+    /// and at levels of detail.
     public var pages = 0
+    /// Of `pages`: those at a level of detail (reduced sources, AB-T-0256). Shed like any page: an
+    /// off-screen one at `ReliefLevel.offscreen`, a visible one never.
+    public var levelPages = 0
     /// Derived leaves uploaded whole (vector-mask coverage, effect shapes, inks).
     public var leafImages = 0
     /// Pages bound to build feathered masks (a warm frame doesn't read them).
@@ -353,7 +357,7 @@ extension MetalCompositor {
     func footprintLocked(withoutEffects: Bool = false) -> CompositorFootprint {
         var f = CompositorFootprint()
         let all = residency.bytes()
-        f.pages = all.pages; f.leafImages = all.images; f.gatherPages = all.gather
+        f.pages = all.pages; f.leafImages = all.images; f.gatherPages = all.gather; f.levelPages = all.levelPages
         f.effectMaps = withoutEffects ? 0 : fxCache.values.reduce(0) { $0 + $1.maps.heldBytes }
         f.masks = withoutEffects ? 0 : maskCache.values.reduce(0) { $0 + $1.mask.allocated }
         f.patterns = patternCache.values.reduce(0) { $0 + $1.texture.allocatedSize }

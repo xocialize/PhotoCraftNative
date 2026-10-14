@@ -36,6 +36,12 @@ public enum RenderLeaf: Sendable {
     /// Pixels rendered over `image.rect` (1–4 channels: grey, grey+alpha, RGB, RGBA); `outside`
     /// beyond it (RGBA for content, `.x` for masks and shapes). `version` changes with the pixels.
     case image(FloatImage, outside: SIMD4<Float>, version: UInt64)
+    /// A surface at a level of detail: pixel (x, y) is the block mean of the surface over
+    /// [x·2^level, (x+1)·2^level) × [y·2^level, (y+1)·2^level) (TileReduction.swift), reduced lazily
+    /// per tile where it is read, and GPU-resident per (leaf, level cell) by tile generation.
+    /// `sampled`: the block's centre pixel instead of its mean (a quick preview that reads one pixel
+    /// in 4^level).
+    case reduced(Surface, level: Int, sampled: Bool = false)
 }
 
 /// Supplies the leaves and patterns a plan references (phase 2: a PCDocument adaptor).

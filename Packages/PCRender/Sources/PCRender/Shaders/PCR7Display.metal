@@ -93,13 +93,15 @@ kernel void pcr_display_kernel(constant PCRDisplay& u [[buffer(0)]], texture2d<f
 /// is straight alpha.
 kernel void pcr_display_halve(constant PCROp& op [[buffer(0)]], texture2d<float, access::read> src [[texture(0)]],
                               texture2d<float, access::write> dst [[texture(7)]], uint2 gid [[thread_position_in_grid]]) {
-    if (gid.x >= dst.get_width() || gid.y >= dst.get_height()) return;
+    // `op.offset`: the first output texel (a partial update of the chain).
+    int2 g = int2(gid) + op.offset;
+    if (g.x >= int(dst.get_width()) || g.y >= int(dst.get_height())) return;
     int2 sz = int2(src.get_width(), src.get_height());
     float4 acc = float4(0.0f);
     float n = 0.0f;
     for (int dy = 0; dy < 2; dy++) {
         for (int dx = 0; dx < 2; dx++) {
-            int2 p = int2(gid) * 2 + int2(dx, dy);
+            int2 p = g * 2 + int2(dx, dy);
             if (p.x < sz.x && p.y < sz.y) {
                 float4 c = src.read(uint2(p));
                 acc += op.aux.x == 1 ? float4(c.rgb * c.a, c.a) : c;
@@ -107,5 +109,5 @@ kernel void pcr_display_halve(constant PCROp& op [[buffer(0)]], texture2d<float,
             }
         }
     }
-    dst.write(acc / max(n, 1.0f), gid);
+    dst.write(acc / max(n, 1.0f), uint2(g));
 }

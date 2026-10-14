@@ -67,6 +67,15 @@ public final class CPUCompositor: @unchecked Sendable {
         return held - bytes
     }
 
+    /// Composites `plan` (planned over the document pixels `region`) at level of detail `level`: the
+    /// reference for `MetalCompositor.render(_:region:level:source:)`, over the level pixels covering
+    /// `region` (LevelOfDetail.swift).
+    public func render(_ plan: RenderPlan, region: PixelRect, level: Int, sampled: Bool = false, source: any RenderSource) throws -> RGBABuffer {
+        let l = LevelOfDetail.clamp(level)
+        if l == 0 { return try render(plan, region: region, source: source) }
+        return try render(plan.atLevel(l), region: LevelOfDetail.region(region, level: l), source: LevelSource(source, level: l, sampled: sampled))
+    }
+
     /// Composites `plan` over `region` (straight-alpha RGBA).
     public func render(_ plan: RenderPlan, region: PixelRect, source: any RenderSource) throws -> RGBABuffer {
         try plan.validate()

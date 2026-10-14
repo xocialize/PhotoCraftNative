@@ -174,6 +174,57 @@ public final class DocumentCompositor: @unchecked Sendable {
     /// The whole canvas.
     public func flatten(_ doc: Document) throws -> RGBABuffer { try render(doc, region: doc.bounds) }
 
+    // MARK: Levels of detail
+
+    /// The composite of `doc` over `region` at level of detail `level` (LevelOfDetail.swift): the
+    /// plan of `region` composited over the level pixels covering it from reduced sources, straight
+    /// RGBA with its rect in level pixels. An approximation of `renderReduced` at 2^-level for
+    /// ~4^-level of the work; PORT-NOTES.md states the parity. Lab and CMYK documents composite in
+    /// their own model and are converted for display, as `render` converts them.
+    public func render(_ doc: Document, region: PixelRect, level: Int, backend: Backend? = nil) throws -> RGBABuffer {
+        let l = LevelOfDetail.clamp(level)
+        if l == 0 { return try render(doc, region: region) }
+        if region.isEmpty { return RGBABuffer(transparent: .empty) }
+        let p = plan(doc, region: region)
+        return try display(try runNative(p, backend: backend ?? self.backend, level: l), p)
+    }
+
+    /// `render(_:region:level:)` on the GPU as a texture (level pixels from (0, 0)). Lab and CMYK
+    /// documents composite natively on the GPU and are converted for display on the CPU.
+    public func renderMetal(_ doc: Document, region: PixelRect, level: Int, outputFormat: MTLPixelFormat = .rgba32Float,
+                            outputStorage: MTLStorageMode = .private) throws -> MetalRenderResult {
+        guard let metal else { throw MetalCompositorError.noMetal }
+        let p = plan(doc, region: region)
+        if p.native == .none {
+            return try metal.render(p.plan, region: region, level: level, source: p.source, outputFormat: outputFormat, outputStorage: outputStorage)
+        }
+        let out = try display(try runNative(p, backend: .metal, level: LevelOfDetail.clamp(level)), p)
+        let r = out.rect
+        guard let tex = metal.context.makeTexture(width: r.width, height: r.height, pixelFormat: .rgba32Float,
+                                                   usage: [.shaderRead, .shaderWrite], storage: .shared) else {
+            throw MetalCompositorError.gpu("output texture \(r)")
+        }
+        out.px.withUnsafeBytes { tex.replace(region: MTLRegionMake2D(0, 0, r.width, r.height), mipmapLevel: 0, withBytes: $0.baseAddress!,
+                                             bytesPerRow: r.width * 16) }
+        return MetalRenderResult(texture: tex, rect: r, gpuTime: 0, cells: 0)
+    }
+
+    /// `runNative` at a level of detail.
+    func runNative(_ p: DocumentPlan, backend: Backend, level: Int) throws -> NativeResult {
+        if level == 0 { return try runNative(p, backend: backend) }
+        func one(_ plan: RenderPlan, _ source: DocumentRenderSource) throws -> RGBABuffer {
+            if backend != .cpu, let metal, metal.unsupportedReason(plan) == nil {
+                do { return try metal.renderBuffer(plan, region: p.region, level: level, source: source) } catch MetalCompositorError.unsupported {
+                    // Fall through to the CPU.
+                }
+            }
+            return try cpu.render(plan, region: p.region, level: level, source: source)
+        }
+        let a = try one(p.plan, p.source)
+        let k = try p.black.map { try one($0.plan, $0.source) }
+        return NativeResult(native: p.native, buffer: a, black: k)
+    }
+
     /// `band_rows_for`: `requested` rounded up to whole render tiles, or ≈ `bandPixels` per band.
     public static func bandRows(width: Int, requested: Int32) -> Int32 {
         let want = requested > 0 ? Int64(requested) : Int64(bandPixels / max(width, 1))

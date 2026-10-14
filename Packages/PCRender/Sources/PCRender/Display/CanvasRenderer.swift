@@ -87,7 +87,7 @@ public final class CanvasRenderer: @unchecked Sendable {
     public private(set) var composite: (any MTLTexture)?
     public private(set) var compositeRect: PixelRect = .empty
     /// Premultiplied 2× reductions of the composite (level 1…).
-    private var levels: [any MTLTexture] = []
+    var levels: [any MTLTexture] = []
     public var view = CanvasViewTransform()
     public var displayLUT: DisplayLUT?
     /// Checkerboard square in view pixels.
@@ -120,34 +120,73 @@ public final class CanvasRenderer: @unchecked Sendable {
 
     /// Sets the composite (straight RGBA of `rect`) and rebuilds the reduction chain.
     public func setComposite(_ texture: any MTLTexture, rect: PixelRect) throws {
+        guard let cb = context.queue.makeCommandBuffer() else { throw MetalCompositorError.gpu("display chain") }
+        try setComposite(texture, rect: rect, chainInto: cb)
+        cb.commit()
+        cb.waitUntilCompleted()
+    }
+
+    /// Sets the composite without waiting for the GPU (a canvas whose composite is rendered off the
+    /// main thread): its reduction chain is encoded into `commandBuffer`, after what the buffer
+    /// already holds (commit it to the queue the composite was rendered on, or after that render).
+    /// nil leaves the chain out: the display then samples the composite itself at every zoom until
+    /// `updateChain(into:damage:)` builds it. A chain of the same sizes is reused.
+    public func setComposite(_ texture: any MTLTexture, rect: PixelRect, chainInto commandBuffer: (any MTLCommandBuffer)?) throws {
+        let sameSize = composite.map { $0.width == texture.width && $0.height == texture.height } ?? false
         composite = texture
         compositeRect = rect
-        levels.removeAll()
-        guard let cb = context.queue.makeCommandBuffer(), let enc = cb.makeComputeCommandEncoder() else { throw MetalCompositorError.gpu("display chain") }
+        if !sameSize { levels.removeAll() }
+        guard let commandBuffer else { levels.removeAll(); return }
+        try updateChain(into: commandBuffer)
+    }
+
+    /// Brings the reduction chain up to the composite where `damage` (composite pixels from its
+    /// corner; nil: everywhere) changed, encoded into `commandBuffer` (not committed).
+    public func updateChain(into commandBuffer: any MTLCommandBuffer, damage: PixelRect? = nil) throws {
+        guard let texture = composite else { return }
+        guard let enc = commandBuffer.makeComputeCommandEncoder() else { throw MetalCompositorError.gpu("display chain") }
+        defer { enc.endEncoding() }
+        // A chain made for another size starts again (whole).
+        let whole = PixelRect(x: 0, y: 0, width: texture.width, height: texture.height)
+        var area = levels.isEmpty ? whole : (damage ?? whole).intersect(whole)
         var src = texture
         var (w, h) = (texture.width, texture.height)
         for i in 1...CanvasRenderer.maxLevel {
             if w <= 1 && h <= 1 { break }
             (w, h) = ((w + 1) / 2, (h + 1) / 2)
-            guard let dst = context.makeTexture(width: w, height: h, pixelFormat: .rgba16Float, usage: [.shaderRead, .shaderWrite], storage: .private) else { break }
+            area = PixelRect(x0: area.x0 >> 1, y0: area.y0 >> 1, x1: (area.x1 + 1) >> 1, y1: (area.y1 + 1) >> 1)
+                .intersect(PixelRect(x: 0, y: 0, width: w, height: h))
+            if area.isEmpty { break }
+            let dst: any MTLTexture
+            if i - 1 < levels.count {
+                dst = levels[i - 1]
+            } else {
+                guard let t = context.makeTexture(width: w, height: h, pixelFormat: .rgba16Float, usage: [.shaderRead, .shaderWrite], storage: .private) else { break }
+                levels.append(t)
+                dst = t
+            }
             var op = PCROp()
             op.aux.x = i == 1 ? 1 : 0
-            kernels.dispatch(enc, try kernels.pipeline("pcr_display_halve"), op: op, grid: (w, h), textures: [Slot.a: src, Slot.out: dst])
-            levels.append(dst)
+            op.offset = SIMD2(area.x0, area.y0)
+            kernels.dispatch(enc, try kernels.pipeline("pcr_display_halve"), op: op, grid: (area.width, area.height), textures: [Slot.a: src, Slot.out: dst])
             src = dst
         }
-        enc.endEncoding()
-        cb.commit()
-        cb.waitUntilCompleted()
     }
 
     /// Composites `plan` with `compositor` and shows it (the usual refresh). The render is this
     /// canvas's view render: what it uses stays through a run-level shrink.
     public func show(_ plan: RenderPlan, region: PixelRect, source: any RenderSource, compositor: MetalCompositor) throws {
+        try show(plan, region: region, level: 0, source: source, compositor: compositor)
+    }
+
+    /// `show` at a level of detail (`MetalCompositor.render(_:region:level:…)`): the composite is in
+    /// level pixels, so place it with `view.zoom` = zoom × 2^level.
+    public func show(_ plan: RenderPlan, region: PixelRect, level: Int, sampled: Bool = false, source: any RenderSource,
+                     compositor: MetalCompositor) throws {
         if let old = lastCompositor, old !== compositor { old.forgetView(renderView) }
         lastCompositor = compositor
-        let r = try compositor.render(plan, region: region, source: source, outputFormat: .rgba16Float, view: renderView)
-        try setComposite(r.texture, rect: region)
+        let r = try compositor.render(plan, region: region, level: level, sampled: sampled, source: source, outputFormat: .rgba16Float, view: renderView)
+        try setComposite(r.texture, rect: r.rect)
     }
 
     func uniforms() -> (PCRDisplayUniforms, any MTLTexture)? {
