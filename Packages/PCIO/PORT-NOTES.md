@@ -507,6 +507,12 @@ photocraft-format's, so bundles go both ways:
   (`FilterAdjustmentPSDTests`, both record conventions, PCPSD's linter clean). Rasterizing them
   instead would stamp the filtered backdrop as pixels, which needs the backdrop of each layer
   rendered inside PSD export; not done.
+- **Photoshop 27.11 opens them** (receipt AB-R-0539, `ps-oracle sweep`): the four
+  `filter-adjustments-*.psd` the test drops (8 and 16 bits, both conventions) and PCEngine's Save a
+  Copy, 5 of 5, with no dialog. Trees match: each filter layer reads as an empty pixel layer with its
+  name, blend mode, opacity, mask and clipping. Layer pixels are within 0.012 levels. Photoshop's
+  composite equals the layers without the filters (0 levels at 8 bits, 0.01 at 16), 209 levels off
+  our merged image, which keeps them.
 
 ### Format 2: ZIP64, the package type, Save (AB-T-0240, AB-D-0131)
 
