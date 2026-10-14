@@ -12,6 +12,7 @@
 import Foundation
 import Metal
 import PCFoundation
+import Synchronization
 
 /// Frame uniforms shared by every PCAlgo kernel (MSL `pca_frame`, buffer 0). Document
 /// coordinates: texel (0, 0) of the source is `srcOrigin`, of the destination `outOrigin`.
@@ -148,112 +149,195 @@ public final class AlgoGPU: @unchecked Sendable {
 
     init(metal: MetalContext, library: any MTLLibrary) {
         self.metal = metal; self.library = library
+        textureCacheBudget = min(4 << 30, Int(metal.device.recommendedMaxWorkingSetSize / 4))
         pressure = MemoryPressureRelay.shared.register("PCAlgo reusable textures") { [weak self] in self?.trimCaches($0) ?? 0 }
+        Self.settings.withLock { $0.live = self }
     }
 
     /// Keeps the reusable textures and staging buffers registered with `MemoryPressureRelay.shared`.
     private var pressure: MemoryPressureRegistration?
 
+    /// The share of `memoryBudget` the cross-run cache may hold.
+    public static let cacheShare = 0.05
+
+    private struct Settings {
+        var budget: Int?
+        /// The instance, once something has made it (setting a budget doesn't compile the library).
+        var live: AlgoGPU?
+    }
+    private static let settings = Mutex(Settings())
+
+    /// The host's GPU memory budget in bytes (an engine's `memoryBudgetBytes`), for the process like
+    /// the instance. It caps the cross-run cache, textures and staging buffers together, at
+    /// `cacheShare` of it, and trims a fuller cache at once. nil (the default) keeps the caps from
+    /// before: min(4 GiB, ¼ of the working set) of textures, and the four largest staging buffers.
+    /// Setting it doesn't compile the shader library.
+    public static var memoryBudget: Int? {
+        get { settings.withLock { $0.budget } }
+        set {
+            let gpu = settings.withLock { (s: inout Settings) -> AlgoGPU? in
+                s.budget = newValue.map { max($0, 0) }
+                return s.live
+            }
+            gpu?.fitCache()
+        }
+    }
+
+    /// Bytes the cross-run cache may hold now: `cacheShare` of `memoryBudget` for textures and
+    /// staging buffers together; without a budget, min(4 GiB, ¼ of the working set) for textures.
+    public var cacheLimit: Int { limit(Self.memoryBudget) }
+
+    private func limit(_ budget: Int?) -> Int { budget.map { Int(Double($0) * Self.cacheShare) } ?? textureCacheBudget }
+
     /// Bytes of private textures and staging buffers kept for reuse across runs (GPU memory outside
     /// any canvas declaration; it counts in the process's footprint).
     public var cachedBytes: Int {
-        textureLock.lock(); let t = textureCacheBytes; textureLock.unlock()
-        stagingLock.lock(); let s = staging.reduce(0) { $0 + $1.length }; stagingLock.unlock()
-        return t + s
+        cacheLock.withLock { textureCacheBytes + stagingBytes }
     }
 
     /// Trims the reusable textures (oldest first) to half on a warning; drops them and the staging
     /// buffers when critical. In-flight runs are unaffected (they hold their own). Returns the
-    /// bytes freed.
+    /// bytes freed. What it drops is let go of on a utility queue, so the call doesn't wait for
+    /// Metal's deallocation (up to 23 ms for 2.9 GB under load); the memory follows a few
+    /// milliseconds later.
     @discardableResult
     public func trimCaches(_ level: MemoryPressureRelay.Level) -> Int {
-        textureLock.lock()
-        let held = textureCacheBytes
-        let target = level == .critical ? 0 : held / 2
-        while textureCacheBytes > target, !textureCache.isEmpty {
-            let t = textureCache.removeFirst()
-            textureCacheBytes -= t.width * t.height * 16
-        }
-        var freed = held - textureCacheBytes
-        textureLock.unlock()
+        var dropped: [AnyObject] = []
+        cacheLock.lock()
+        let held = textureCacheBytes + stagingBytes
+        let target = level == .critical ? 0 : textureCacheBytes / 2
+        while textureCacheBytes > target, !textureCache.isEmpty { dropped.append(dropOldestTexture()) }
         if level == .critical {
-            stagingLock.lock()
-            freed += staging.reduce(0) { $0 + $1.length }
+            dropped += staging.map { $0 as AnyObject }
             staging.removeAll()
-            stagingLock.unlock()
         }
+        let freed = held - (textureCacheBytes + stagingBytes)
+        cacheLock.unlock()
+        Self.discard(consume dropped)
         return freed
     }
 
     public var device: any MTLDevice { metal.device }
 
-    private let stagingLock = NSLock()
+    /// Guards the cross-run cache: the textures and the staging buffers.
+    private let cacheLock = NSLock()
     private var staging: [any MTLBuffer] = []
+    private var stagingBytes: Int { staging.reduce(0) { $0 + $1.length } }
 
     /// A shared staging buffer of at least `length` bytes (reused across runs; contents undefined).
     func stagingBuffer(length: Int) throws -> any MTLBuffer {
-        stagingLock.lock()
+        cacheLock.lock()
         if let i = staging.firstIndex(where: { $0.length >= length && $0.length <= 2 * length + (1 << 20) }) {
             let b = staging.remove(at: i)
-            stagingLock.unlock()
+            cacheLock.unlock()
             return b
         }
-        stagingLock.unlock()
+        cacheLock.unlock()
         guard let b = device.makeBuffer(length: max(length, 16), options: .storageModeShared) else {
             throw FilterError.gpuUnavailable("staging buffer \(length)")
         }
         return b
     }
 
-    /// Returns a staging buffer once the GPU and the CPU are done with it (keeps the four largest).
+    /// Returns a staging buffer once the GPU and the CPU are done with it (keeps the four largest,
+    /// within `cacheLimit` under a budget).
     func returnStaging(_ b: any MTLBuffer) {
-        stagingLock.lock(); defer { stagingLock.unlock() }
+        cacheLock.lock()
         staging.append(b)
         staging.sort { $0.length > $1.length }
-        if staging.count > 4 { staging.removeLast(staging.count - 4) }
+        var dropped: [AnyObject] = []
+        while staging.count > 4 { dropped.append(staging.removeLast()) }
+        dropped += fitLocked()
+        cacheLock.unlock()
+        Self.discard(consume dropped)
     }
 
     public func pipeline(_ name: String, constants: MTLFunctionConstantValues? = nil, constantsKey: String = "") throws -> any MTLComputePipelineState {
         try metal.pipeline(name, in: library, constants: constants, constantsKey: constantsKey)
     }
 
-    private let textureLock = NSLock()
     private var textureCache: [any MTLTexture] = []
     private var textureCacheBytes = 0
-    /// Bytes of private textures kept for reuse across runs (fresh private textures must be
-    /// zero-filled by the OS on first use, which costs more than many kernels).
-    private lazy var textureCacheBudget: Int = min(4 << 30, Int(device.recommendedMaxWorkingSetSize / 4))
+    /// Bytes of private textures kept for reuse across runs without a `memoryBudget` (fresh private
+    /// textures must be zero-filled by the OS on first use, which costs more than many kernels).
+    private let textureCacheBudget: Int
 
     /// A private float4 texture from the cross-run cache: exactly `width × height` when `exact`,
     /// else at least that size (and not much larger).
     func cachedTexture(width: Int, height: Int, exact: Bool) throws -> any MTLTexture {
         let w = max(width, 1), h = max(height, 1)
-        textureLock.lock()
+        cacheLock.lock()
         let i = textureCache.firstIndex { t in
             exact ? (t.width == w && t.height == h) : (t.width >= w && t.height >= h && t.width * t.height <= 2 * w * h + 4096)
         }
         if let i {
             let t = textureCache.remove(at: i)
             textureCacheBytes -= t.width * t.height * 16
-            textureLock.unlock()
+            cacheLock.unlock()
             return t
         }
-        textureLock.unlock()
+        cacheLock.unlock()
         return try privateTexture(width: w, height: h)
     }
 
     /// Hands textures back to the cross-run cache once their command buffer has completed.
     func releaseTextures(_ ts: [any MTLTexture]) {
-        textureLock.lock(); defer { textureLock.unlock() }
+        cacheLock.lock()
         for t in ts where !textureCache.contains(where: { $0 === t }) {
             textureCache.append(t)
             textureCacheBytes += t.width * t.height * 16
         }
-        while textureCacheBytes > textureCacheBudget, !textureCache.isEmpty {
-            let t = textureCache.removeFirst()
-            textureCacheBytes -= t.width * t.height * 16
-        }
+        let dropped = fitLocked()
+        cacheLock.unlock()
+        Self.discard(consume dropped)
     }
+
+    /// Trims the cache to `cacheLimit` (after a budget change).
+    private func fitCache() {
+        cacheLock.lock()
+        let dropped = fitLocked()
+        cacheLock.unlock()
+        Self.discard(consume dropped)
+    }
+
+    /// Drops what the cache holds over `cacheLimit`: the oldest textures, then under a budget the
+    /// smallest staging buffers. Returns them for `discard`, outside the lock.
+    private func fitLocked() -> [AnyObject] {
+        let budget = Self.memoryBudget, cap = limit(budget)
+        var held: Int { textureCacheBytes + (budget == nil ? 0 : stagingBytes) }
+        var dropped: [AnyObject] = []
+        while held > cap, !textureCache.isEmpty { dropped.append(dropOldestTexture()) }
+        while held > cap, !staging.isEmpty { dropped.append(staging.removeLast()) }
+        return dropped
+    }
+
+    private func dropOldestTexture() -> any MTLTexture {
+        let t = textureCache.removeFirst()
+        textureCacheBytes -= t.width * t.height * 16
+        return t
+    }
+
+    /// Where dropped textures and buffers are let go of: Metal's deallocation scales with the bytes,
+    /// and whoever dropped them (an engine's shrink, a run's completion) shouldn't wait for it.
+    private static let releaseQueue = DispatchQueue(label: "PCAlgo.AlgoGPU.releases", qos: .utility,
+                                                    autoreleaseFrequency: .workItem)
+
+    /// Lets go of `objects` on `releaseQueue`.
+    private static func discard(_ objects: consuming [AnyObject]) {
+        if objects.isEmpty { return }
+        let dropped = Dropped(consume objects)
+        releaseQueue.async { dropped.objects.removeAll() }
+    }
+
+    /// Dropped textures and buffers on their way to `releaseQueue`.
+    private final class Dropped: @unchecked Sendable {
+        var objects: [AnyObject]
+        init(_ objects: consuming [AnyObject]) { self.objects = objects }
+    }
+
+    /// Waits until everything dropped so far has been let go of, so the device's allocation count
+    /// follows (tests, benches; PCRender's `MetalCompositor.waitForReleases` likewise).
+    public static func waitForReleases() { releaseQueue.sync {} }
 
     /// A private float4 texture (intermediate results).
     func privateTexture(width: Int, height: Int) throws -> any MTLTexture {
