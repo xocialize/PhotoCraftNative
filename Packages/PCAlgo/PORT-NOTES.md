@@ -68,6 +68,17 @@ order of operations and edge semantics) and a **Metal compute path that must mat
 * **Memory.** Intermediates come from a per-pass pool and a cross-run cache (fresh private
   textures must be zero-filled by the OS, which cost more than most kernels); staging buffers are
   reused; uploads/readbacks are parallel copies. A 4096² RGBA float image round-trips in ~3–5 ms.
+* **Cache budget (AB-T-0261).** `AlgoGPU.cachedBytes` (textures and staging buffers) is capped at
+  min(4 GiB, ¼ of the working set) of textures plus the four largest staging buffers. A host sets
+  `AlgoGPU.memoryBudget` (process-wide, as its engine's `memoryBudgetBytes`; setting it doesn't
+  compile the library) to cap both together at `cacheShare` (5 %) of it: 606.2 MiB on a 16 GB Mac's
+  12.713 GB budget. Over the cap, the oldest textures go first, then the smallest staging buffers.
+  Unbudgeted, PixelAgencyEditor's drill blurs (a 4096² RGBA layer, a 2048² one, then 4096² down to
+  1024² in steps of 512) fill it to 1,557.0, 1,951.5 and 3,060.6 MiB; with the 16 GB budget it stays
+  at or under 603 MiB (`AlgoCacheBudgetTests`). Anything dropped (a trim, a fit to the cap) is
+  let go of on a utility queue, outside the cache's lock: Metal's deallocation of gigabytes took up
+  to 23 ms under load, and an engine's shrink shouldn't wait for it. The memory follows a few
+  milliseconds later (`AlgoGPU.waitForReleases()`; PCRender's shrinks do the same, AB-T-0260).
 * **CPU.** References run rows in parallel (`DispatchQueue.concurrentPerform`), results never
   depend on scheduling, and they are bit-identical whatever the tiling (photocraft's contract,
   tested at tile sizes 7 and 256). The GPU is tile-independent to float rounding (≤ 2e-6).

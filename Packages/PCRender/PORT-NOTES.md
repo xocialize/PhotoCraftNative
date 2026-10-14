@@ -592,7 +592,8 @@ Outside this declaration: PCAlgo's cross-run texture cache (`AlgoGPU.cachedBytes
 min(4 GiB, ¼ of `recommendedMaxWorkingSetSize`), so roughly 2.7 GB on a 16 GB Mac, an estimate not
 measured here) is GPU memory too. It trims on memory
 pressure, and a host can add it to its declaration and call `trimCaches(.critical)` from its
-shedder (its own lock, never the compositor's).
+shedder (its own lock, never the compositor's). A host sizes it from the same budget with
+`AlgoGPU.memoryBudget` (5 % of it, AB-T-0261; PCAlgo's PORT-NOTES).
 
 ### Releasing after the lock (AB-T-0260)
 
