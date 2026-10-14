@@ -166,6 +166,12 @@ flipped at 200 % from a fractional origin, and turned a quarter and flipped, at 
 - PCRender composites them (their rendered pixels) on the GPU within 2 levels of the CPU reference,
   at full resolution and at levels 1 and 2.
 
+Encoding the image is the mapping's one real cost: through ImageIO, a 4000 × 3000 layer took
+0.8 s at 8 bits and 2.7 s at 16 (1000² 31 ms; an M5 Max at load average ~120, so pessimistic).
+`CompImport.Package.embeddedFile` lets a caller that maps the same images again and again (the
+editor maps a layer on every change) keep the file per image and format, so a changed transform
+doesn't encode it again.
+
 Photoshop 27.11 (`ps-oracle sweep`, 2026-10-14, after the offline pre-screens) opens the 8- and
 16-bit PSDs of that document with the layer tree matching, the four layers as smart objects
 (`layerKind` 5), and its composite within 1 level (mean 0.003) at 8 bits and 0.012 levels at 16.

@@ -322,6 +322,40 @@ enum CompKit {
         #expect(!r.warnings.contains { $0.contains("applied to the pixels") })
     }
 
+    /// A package's `embeddedFile` can keep the files it embeds: imported again with a changed
+    /// transform (as the editor maps a layer on every change), an image isn't encoded again.
+    @Test func embeddedFilesCanBeKeptAcrossImports() throws {
+        final class Kept: @unchecked Sendable {
+            let lock = NSLock()
+            var files: [String: [UInt8]] = [:]
+            var encoded = 0
+        }
+        let kept = Kept()
+        let (m, images) = Self.transformed()
+        var package = K.package(m, images)
+        package.embeddedFile = { path, format, encode in
+            let key = "\(path) \(format)"
+            if let file = kept.lock.withLock({ kept.files[key] }) { return file }
+            let file = try encode()
+            kept.lock.withLock { kept.files[key] = file; kept.encoded += 1 }
+            return file
+        }
+        let first = try CompImport.load(package, codec: ImageIOCodec(), interrupt: .none).document
+        #expect(kept.encoded == 3)
+        // The scaled layer drawn at 3×3 instead: the same image, a new transform.
+        var moved = String(decoding: m, as: UTF8.self)
+        moved = moved.replacingOccurrences(of: #""size":[4,4]"#, with: #""size":[3,3]"#)
+        var again = K.package(Array(moved.utf8), images)
+        again.embeddedFile = package.embeddedFile
+        let second = try CompImport.load(again, codec: ImageIOCodec(), interrupt: .none).document
+        #expect(kept.encoded == 3, "an image was encoded again")
+        guard case .smart(let a) = first.layers[0].content, case .smart(let b) = second.layers[0].content else {
+            Issue.record("not smart objects")
+            return
+        }
+        #expect(a.source == b.source && b.transform == .scale(1.5))
+    }
+
     @Test func transformsCanStillBeAppliedToThePixels() throws {
         let (m, images) = Self.transformed()
         let r = try CompImport.load(K.package(m, images), codec: ImageIOCodec(), interrupt: .none, transformedLayers: .pixels)

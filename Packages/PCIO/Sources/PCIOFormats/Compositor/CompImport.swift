@@ -41,6 +41,14 @@ public enum CompImport {
     public struct Package: Sendable {
         public let name: String
         let read: @Sendable (_ path: String, _ maxBytes: Int) throws(CompError) -> [UInt8]
+        /// The file a transformed layer's smart object embeds (`TransformedLayers.smartObjects`)
+        /// for the image at `path` in the package, its pixels in `format` (the document's): by
+        /// default what `encode` makes. A caller importing the same images again and again (the
+        /// editor maps one layer at a time, on every change) can keep what `encode` made for an
+        /// image and format and return it, so a changed transform doesn't encode the image again.
+        public var embeddedFile: @Sendable (_ path: String, _ format: PixelFormat, _ encode: () throws -> [UInt8]) throws -> [UInt8] = { _, _, encode in
+            try encode()
+        }
 
         public init(name: String, read: @escaping @Sendable (_ path: String, _ maxBytes: Int) throws(CompError) -> [UInt8]) {
             self.name = name
@@ -223,6 +231,7 @@ public enum CompImport {
         let m = try manifest(try package.read(manifestName, CompManifest.maxManifestBytes))
         let (images, masks) = try decodeAssets(m, package, codec, interrupt)
         var b = Builder(m: m, images: images, masks: masks, interrupt: interrupt, transformedLayers: transformedLayers)
+        b.embeddedFile = package.embeddedFile
         let doc = try b.build(name: package.name)
         interrupt.progress(1)
         return ImportResult(document: doc, warnings: b.warnings.list, sourceReadOnly: true)
@@ -241,6 +250,9 @@ public enum CompImport {
         let masks: [UUID: Mask]
         let interrupt: Interrupt
         let transformedLayers: TransformedLayers
+        var embeddedFile: @Sendable (_ path: String, _ format: PixelFormat, _ encode: () throws -> [UInt8]) throws -> [UInt8] = { _, _, encode in
+            try encode()
+        }
         var warnings = Warnings()
 
         let byID: [UUID: CompLayer]
@@ -526,9 +538,11 @@ public enum CompImport {
             let grid = PixelRect(x: 0, y: 0, width: img.width, height: img.height)
             let type: FlatImageType = format.sample == .f32 ? .tiff : .png
             let bytes: [UInt8]
+            let (icc, dpi) = (iccProfile, m_resolution)
             do {
-                bytes = try ImageIOCodec().encode(source, rect: grid, as: type, quality: nil, iccProfile: iccProfile, metadata: FlatMetadata.Metadata(),
-                                                  dpi: m_resolution)
+                bytes = try embeddedFile("images/\(r.imageFile ?? "")", format) {
+                    try ImageIOCodec().encode(source, rect: grid, as: type, quality: nil, iccProfile: icc, metadata: FlatMetadata.Metadata(), dpi: dpi)
+                }
             } catch {
                 throw CompError.missingImage("layer \"\(r.name)\"'s image can't be embedded in its smart object (\(error))")
             }
