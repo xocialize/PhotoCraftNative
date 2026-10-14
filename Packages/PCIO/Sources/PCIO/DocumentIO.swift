@@ -315,14 +315,11 @@ public enum DocumentIO {
         case "ora":
             return try OpenRaster.export(doc, compositor: options.compositor, codec: options.codec)
         case PcraftFormat.fileExtension:
-            let thumbnail = try preview(doc, side: 256, options)
-            try options.interrupt.check()
-            options.interrupt.progress(0.15)
-            let composite = try preview(doc, side: 1024, options)
+            let previews = try previews(doc, options, progress: 0.3).options
             try options.interrupt.check()
             options.interrupt.progress(0.4)
             do {
-                return ExportResult(bytes: try PcraftFormat.save(doc, options: SaveOptions(thumbnail: thumbnail, composite: composite)))
+                return ExportResult(bytes: try PcraftFormat.save(doc, options: previews))
             } catch { throw PCIOError.format("pcraft", error.description) }
         case "psd", "psb":
             return try PSDExport.export(doc, options: options.psdExportOptions(forcePSB: options.forcePSB || ext == "psb", interrupt: options.interrupt))
@@ -341,15 +338,59 @@ public enum DocumentIO {
     /// The previews a `.pcraft` save embeds, a 256-px thumbnail and a 1024-px composite, rendered
     /// as the single-file export renders them: for package saves (`PcraftWriter.save(_:to:as:_:)`).
     public static func pcraftPreviews(_ doc: Document, options: IOOptions) throws -> SaveOptions {
-        try cmykScope(doc.iccProfile, doc.mode, options) {
-            SaveOptions(thumbnail: try preview(doc, side: 256, options), composite: try preview(doc, side: 1024, options))
-        }
+        try pcraftPreviews(doc, options: options, updating: nil).options
     }
 
-    /// The composite reduced to fit `side`, as an RGBA8 preview (photocraft `compose::thumbnail`).
-    static func preview(_ doc: Document, side: Int, _ options: IOOptions) throws -> RGBA8Image? {
-        guard doc.size.width > 0, doc.size.height > 0 else { return nil }
-        let (px, w, h) = try PSDThumbnail.thumbnailRGBA(doc, compositor: options.compositor, side: side)
+    /// `pcraftPreviews` with the reduction they come from. With `updating` (previews of the
+    /// document before an edit, and the pixels that edit can have changed: `PCEngine`'s
+    /// `TransactionBuilder.damage`), only the composite preview's cells meeting the damage are
+    /// composited again, and the thumbnail is reduced from the result.
+    public static func pcraftPreviews(_ doc: Document, options: IOOptions, updating: (previews: PcraftPreviews, damage: PixelRect)?) throws -> PcraftPreviews {
+        try cmykScope(doc.iccProfile, doc.mode, options) { try previews(doc, options, updating: updating) }
+    }
+
+    /// Longest side of the `.pcraft` composite preview and of its thumbnail.
+    static let compositeSide = 1024, thumbnailSide = 256
+
+    /// The `.pcraft` previews from one composite (photocraft `compose::thumbnail`): the canvas
+    /// reduced to fit 1024 px (`DocumentCompositor.reduced`), and that reduced to fit 256 px.
+    /// Both are converted to sRGB through the document's profile, as RGBA8. `progress` is reported
+    /// once the composite is reduced (an export's share of the work so far).
+    static func previews(_ doc: Document, _ options: IOOptions, updating: (previews: PcraftPreviews, damage: PixelRect)? = nil,
+                         progress: Float? = nil) throws -> PcraftPreviews {
+        guard doc.size.width > 0, doc.size.height > 0 else { return PcraftPreviews(options: SaveOptions(), reduction: [], width: 0, height: 0) }
+        let (cw, ch) = previewSize(doc, side: compositeSide), (tw, th) = previewSize(doc, side: thumbnailSide)
+        var composite: [SIMD4<Float>]
+        if let (last, damage) = updating, last.width == cw, last.height == ch, last.reduction.count == cw * ch {
+            composite = last.reduction
+            let (rect, pixels) = try options.compositor.reduced(doc, width: cw, height: ch, damage: damage)
+            if rect.isEmpty { return last }
+            guard rect.x0 >= 0, rect.y0 >= 0, Int(rect.x1) <= cw, Int(rect.y1) <= ch, pixels.count == rect.area else {
+                throw PCIOError.codec("compositor reduced \(rect) to \(pixels.count) pixels")
+            }
+            ReducedComposite.patch(&composite, width: cw, rect, pixels)
+        } else {
+            composite = try options.compositor.reduced(doc, width: cw, height: ch)
+        }
+        guard composite.count == cw * ch else { throw PCIOError.codec("compositor reduced to \(composite.count) pixels for \(cw) × \(ch)") }
+        if let progress {
+            try options.interrupt.check()
+            options.interrupt.progress(progress)
+        }
+        let thumbnail = ReducedComposite.reduce(composite, width: cw, height: ch, of: doc.size, to: tw, th)
+        let saved = SaveOptions(thumbnail: rgba8(PSDThumbnail.srgb(thumbnail, tw, th, doc), tw, th), composite: rgba8(PSDThumbnail.srgb(composite, cw, ch, doc), cw, ch))
+        return PcraftPreviews(options: saved, reduction: composite, width: cw, height: ch)
+    }
+
+    /// The size of a preview fitting `side`, aspect kept (never enlarged).
+    static func previewSize(_ doc: Document, side: Int) -> (Int, Int) {
+        let W = doc.size.width, H = doc.size.height
+        let scale = min(1, Double(side) / Double(max(W, H)))
+        return (max(1, Int((Double(W) * scale).rounded())), max(1, Int((Double(H) * scale).rounded())))
+    }
+
+    /// Straight RGBA as an RGBA8 image.
+    static func rgba8(_ px: [SIMD4<Float>], _ w: Int, _ h: Int) -> RGBA8Image {
         var data = [UInt8](repeating: 0, count: w * h * 4)
         for i in 0 ..< w * h {
             for c in 0 ..< 4 { data[i * 4 + c] = PSDExport.q255(px[i][c]) }
@@ -622,5 +663,35 @@ enum TextImport {
             }
         }
         return []
+    }
+}
+
+/// A `.pcraft` save's previews and the reduction of the canvas they come from
+/// (`DocumentIO.pcraftPreviews(_:options:updating:)`).
+public struct PcraftPreviews: Sendable {
+    /// The thumbnail and composite to save.
+    public var options: SaveOptions
+    /// The composite preview's reduction of the canvas (`DocumentCompositor.reduced`) before its
+    /// conversion to sRGB, row-major straight RGBA: what a later save updates where it changed.
+    public var reduction: [SIMD4<Float>]
+    public var width: Int
+    public var height: Int
+
+    public init(options: SaveOptions, reduction: [SIMD4<Float>], width: Int, height: Int) {
+        self.options = options; self.reduction = reduction; self.width = width; self.height = height
+    }
+
+    /// The previews a `.pcraft` holds of `doc`, as a save would update them: nil unless they have
+    /// the sizes a save writes and `doc` needs no conversion to show them (it has no profile of its
+    /// own), so their pixels are the reduction itself, to within a level.
+    public init?(stored: SaveOptions, of doc: Document) {
+        let (cw, ch) = DocumentIO.previewSize(doc, side: DocumentIO.compositeSide), (tw, th) = DocumentIO.previewSize(doc, side: DocumentIO.thumbnailSide)
+        guard doc.size.width > 0, doc.size.height > 0, !PSDThumbnail.convertsToSRGB(doc),
+              let c = stored.composite, c.width == cw, c.height == ch, c.data.count == cw * ch * 4,
+              let t = stored.thumbnail, t.width == tw, t.height == th, t.data.count == tw * th * 4 else { return nil }
+        options = stored
+        reduction = (0 ..< cw * ch).map { i in SIMD4(Float(c.data[i * 4]), Float(c.data[i * 4 + 1]), Float(c.data[i * 4 + 2]), Float(c.data[i * 4 + 3])) / 255 }
+        width = cw
+        height = ch
     }
 }

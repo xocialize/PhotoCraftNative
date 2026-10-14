@@ -50,4 +50,30 @@ public final class RenderCompositor: PCIOCore.DocumentCompositor, @unchecked Sen
         }
         return out
     }
+
+    /// PCRender's own reduction for an RGB document, whose composite reads back as rendered (no
+    /// round trip through the document's samples); the band-by-band default for the others.
+    public func reduced(_ document: Document, width: Int, height: Int) throws -> [SIMD4<Float>] {
+        guard document.pixelFormat.mode == .rgb else { return try ReducedComposite.reduce(document, width: width, height: height, compositor: self) }
+        do {
+            return try lock.withLock { try compositor.renderReduced(document, width: width, height: height) }.px
+        } catch {
+            throw PCIOError.codec("composite failed: \(error)")
+        }
+    }
+
+    /// PCRender's reduction of only the damaged cells, for an RGB document (the default, which
+    /// reduces the whole canvas, for the others).
+    public func reduced(_ document: Document, width: Int, height: Int, damage: PixelRect) throws -> (rect: PixelRect, pixels: [SIMD4<Float>]) {
+        guard document.pixelFormat.mode == .rgb else {
+            let rect = ReducedComposite.cells(meeting: damage, canvas: document.size, width: width, height: height)
+            return rect.isEmpty ? (rect, []) : (rect, ReducedComposite.crop(try reduced(document, width: width, height: height), width: width, rect))
+        }
+        do {
+            let b = try lock.withLock { try compositor.renderReduced(document, width: width, height: height, damage: damage) }
+            return (b.rect, b.px)
+        } catch {
+            throw PCIOError.codec("composite failed: \(error)")
+        }
+    }
 }

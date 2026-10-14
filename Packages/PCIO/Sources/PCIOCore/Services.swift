@@ -29,6 +29,20 @@ public protocol DocumentCompositor: Sendable {
     /// model (CMYK as ink 0...1, Lab as stored 0...1, Gray, RGB) followed by alpha; straight (not
     /// premultiplied) and not matted. Photoshop's merged image of the whole canvas.
     func composite(_ document: Document, rect: PixelRect) throws -> [Float]
+
+    /// The whole canvas area-averaged (premultiplied) to `width` × `height` (at most the canvas),
+    /// row-major straight RGBA: the composite's samples as `Surface.readRGBA` reads them (RGB and
+    /// Gray as they are, CMYK and Lab converted). Output column `x` averages canvas columns
+    /// `x·W/width ..< (x+1)·W/width`, rounded down, and rows likewise (PCRender's
+    /// `renderReduced`). The `.pcraft` previews. The default composites a band at a time through
+    /// `composite(_:rect:)` (`ReducedComposite`).
+    func reduced(_ document: Document, width: Int, height: Int) throws -> [SIMD4<Float>]
+
+    /// `reduced` for only the output pixels whose canvas spans meet `damage`: their rect, in
+    /// output pixels from (0, 0) (empty when `damage` misses the canvas), and their pixels, with
+    /// the values the whole reduction gives them. A preview kept from an earlier save is updated
+    /// with it where an edit can have changed the composite. The default reduces the whole canvas.
+    func reduced(_ document: Document, width: Int, height: Int, damage: PixelRect) throws -> (rect: PixelRect, pixels: [SIMD4<Float>])
 }
 
 /// A compositor from a closure producing straight sRGB RGBA (photocraft `render_bands`' output),

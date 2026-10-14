@@ -239,12 +239,25 @@ public enum PSDThumbnail {
             let a = acc[k].w / cnt[k]
             out[k] = a > 0 ? SIMD4(acc[k].x / acc[k].w, acc[k].y / acc[k].w, acc[k].z / acc[k].w, a) : .zero
         }
-        // Into sRGB through the document's own RGB/gray profile.
-        if let icc = doc.iccProfile, fmt.mode == .rgb || fmt.mode == .grayscale, let space = CGColorSpace(iccData: Data(icc) as CFData),
-           space.model == (fmt.mode == .rgb ? .rgb : .monochrome), let srgb = CGColorSpace(name: CGColorSpace.sRGB) {
-            out = convert(out, tw, th, from: space, gray: fmt.mode == .grayscale, to: srgb)
-        }
-        return (out, tw, th)
+        return (srgb(out, tw, th, doc), tw, th)
+    }
+
+    /// A `w` × `h` reduction of `doc`'s composite into sRGB through the document's own RGB/gray
+    /// profile (unchanged without one).
+    static func srgb(_ px: [SIMD4<Float>], _ w: Int, _ h: Int, _ doc: Document) -> [SIMD4<Float>] {
+        guard let space = profileSpace(doc), let srgb = CGColorSpace(name: CGColorSpace.sRGB) else { return px }
+        return convert(px, w, h, from: space, gray: doc.pixelFormat.mode == .grayscale, to: srgb)
+    }
+
+    /// Whether `srgb` converts `doc`'s reductions (it has an RGB or gray profile of its own).
+    static func convertsToSRGB(_ doc: Document) -> Bool { profileSpace(doc) != nil && CGColorSpace(name: CGColorSpace.sRGB) != nil }
+
+    /// The colour space of `doc`'s own RGB or gray profile.
+    static func profileSpace(_ doc: Document) -> CGColorSpace? {
+        let mode = doc.pixelFormat.mode
+        guard let icc = doc.iccProfile, mode == .rgb || mode == .grayscale, let space = CGColorSpace(iccData: Data(icc) as CFData),
+              space.model == (mode == .rgb ? .rgb : .monochrome) else { return nil }
+        return space
     }
 
     static func convert(_ px: [SIMD4<Float>], _ w: Int, _ h: Int, from: CGColorSpace, gray: Bool, to: CGColorSpace) -> [SIMD4<Float>] {
