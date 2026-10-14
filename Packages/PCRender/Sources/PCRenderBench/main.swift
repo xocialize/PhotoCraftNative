@@ -2,6 +2,7 @@
 //
 //   swift run -c release PCRenderBench [--size 4096] [--cpu-runs 3] [--gpu-runs 12] [--scene effects4|realistic20|all]
 //   swift run -c release PCRenderBench --memory [--size 4096] [--runs 200] (MemoryBench.swift)
+//   swift run -c release PCRenderBench --level [--size 30000] [--drawable 5120x2880] [--parity] (LevelBench.swift)
 //
 // For each scene: planning time, the CPU reference (cold = first render, building effect maps and
 // effect shapes; warm = min of the following runs) and Metal (cold; warm = min over the last half
@@ -35,6 +36,16 @@ func timed<T>(_ body: () throws -> T) rethrows -> (T, Double) {
 
 guard let device = MTLCreateSystemDefaultDevice() else { print("no Metal device"); exit(1) }
 print("PCRender bench — \(device.name), \(ProcessInfo.processInfo.activeProcessorCount) cores, size \(size)², release build")
+if CommandLine.arguments.contains("--reduce") {
+    reductionBench()
+    exit(0)
+}
+if CommandLine.arguments.contains("--level") {
+    let dims = arg("--drawable", "5120x2880").split(separator: "x").compactMap { Int($0) }
+    try levelBench(size: Int(arg("--size", "30000")) ?? 30000, drawable: (dims.first ?? 5120, dims.last ?? 2880),
+                   parity: CommandLine.arguments.contains("--parity"))
+    exit(0)
+}
 if CommandLine.arguments.contains("--memory") {
     try memoryBench(size: size, runs: Int(arg("--runs", "200")) ?? 200, chunk: Int(arg("--chunk", "2048")) ?? 2048,
                     lowCell: Int(arg("--low-cell", "512")) ?? 512)
