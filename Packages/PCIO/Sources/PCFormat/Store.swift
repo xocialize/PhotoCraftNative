@@ -138,6 +138,35 @@ struct ZipSource: ConcurrentByteSource {
     }
 }
 
+/// Entries of a ZIP bundle in a file, read as the load asks for them (from several threads at
+/// once): the archive is never in memory whole.
+struct ZipFileSource: ConcurrentByteSource {
+    let zip: ZipFileReader
+
+    init(_ url: URL) throws(FormatError) {
+        let fd = open(url.path, O_RDONLY | O_CLOEXEC)
+        if fd < 0 { throw .io(IOError.last(url.path)) }
+        var st = stat()
+        if fstat(fd, &st) == 0, st.st_mode & S_IFMT == S_IFDIR {
+            close(fd)
+            throw .io(IOError(errno: EISDIR, url.path))
+        }
+        do {
+            zip = try ZipFileReader(fileDescriptor: fd)
+        } catch {
+            throw FormatError.wrap(error)
+        }
+    }
+
+    func get(_ path: String, max: Int) throws(FormatError) -> [UInt8] {
+        do {
+            return try zip.read(named: path, max: max)
+        } catch {
+            throw FormatError.wrap(error)
+        }
+    }
+}
+
 /// Entries of a directory bundle.
 public struct DirSource: ConcurrentByteSource {
     public let root: URL
@@ -343,6 +372,14 @@ enum StoreObject: Sendable {
 
     var isTile: Bool { if case .tile = self { true } else { false } }
 
+    /// The length of `content`, without making it.
+    var contentSize: Int {
+        switch self {
+        case .tile(let t, _): t.bytes.count
+        case .blob(let b): b.count
+        }
+    }
+
     var compressed: [UInt8] { PcraftCodec.compress(content) }
 }
 
@@ -353,6 +390,12 @@ struct StoredObject: Sendable {
 
     init(data: [UInt8], crc: UInt32) { self.data = data; self.crc = crc }
     init(data: [UInt8]) { self.init(data: data, crc: CRC32.checksum(data)) }
+}
+
+/// A batch of objects `PcraftWriter.writeZip` compressed in the background (nil: reused from its
+/// cache). Read only after the batch's dispatch group has finished.
+final class CompressedBatch: @unchecked Sendable {
+    var objects: [StoredObject?] = []
 }
 
 /// What a file looked like when it was verified. Any change means "verify again".
@@ -391,6 +434,10 @@ struct Prepared {
 /// re-read per directory save.
 public let defaultReverifyBudget: UInt64 = 16 * 1024 * 1024
 
+/// Default for `PcraftWriter.setZipCacheBudget`: compressed bytes of objects a writer keeps
+/// between ZIP saves.
+public let defaultZipCacheBudget = 64 << 20
+
 /// Incremental `.pcraft` writer. Keep one per open document: it remembers tile hashes (by tile
 /// generation), compressed objects, and objects it has verified in the current directory, so
 /// repeated saves stay cheap.
@@ -405,8 +452,9 @@ public let defaultReverifyBudget: UInt64 = 16 * 1024 * 1024
 /// rewritten.
 public final class PcraftWriter {
     var hashCache: [UInt64: Hash] = [:]
-    /// Compressed objects by bundle path (ZIP mode).
+    /// Compressed objects by bundle path (ZIP mode), costing at most `zipCacheBudget`.
     var compressedObjects: [String: StoredObject] = [:]
+    var zipCacheBudget = defaultZipCacheBudget
     /// Writes every ZIP64 field (and a format 2 manifest) even when classic ZIP fits: tests of
     /// format 2 without multi-gigabyte documents.
     var forceZip64 = false
@@ -426,6 +474,23 @@ public final class PcraftWriter {
     /// re-checks (oldest-checked first; at least one object when the budget is non-zero). `0`
     /// trusts unchanged signatures entirely; `.max` re-verifies everything on every save.
     public func setReverifyBudget(_ bytes: UInt64) { reverifyBudget = bytes }
+
+    /// How many bytes of compressed objects the writer keeps between ZIP saves, so the next one
+    /// reuses them instead of compressing them again (in archive order, as many as fit; each
+    /// costs its bytes and `zipCacheEntryCost`). A ZIP save holds at most this much beyond the
+    /// document, its manifest and two batches being compressed and written; `0` keeps nothing (a
+    /// one-off save).
+    public func setZipCacheBudget(_ bytes: Int) {
+        zipCacheBudget = max(0, bytes)
+        var kept = 0
+        compressedObjects = compressedObjects.filter { _, o in
+            kept += o.data.count + PcraftWriter.zipCacheEntryCost
+            return kept <= zipCacheBudget
+        }
+    }
+
+    /// What a cached object costs beyond its bytes: its path and its dictionary entry.
+    static let zipCacheEntryCost = 256
 
     /// Generator string written into manifests.
     public static let generator = "photocraft-format 0.1.0 (PhotoCraftNative PCFormat)"
@@ -477,57 +542,105 @@ public final class PcraftWriter {
 
     /// Saves as a ZIP bundle in memory: classic ZIP with a format 1 manifest when it fits (what
     /// photocraft reads), ZIP64 with a format 2 manifest when it doesn't (over 4 GiB or 65,535
-    /// entries).
+    /// entries). `save(_:to:as:)` writes a single file without holding it.
     public func saveZip(_ doc: Document, _ opts: SaveOptions = SaveOptions()) throws(FormatError) -> ([UInt8], SaveStats) {
-        var p = try prepare(doc, opts)
+        let p = try prepare(doc, opts)
+        var sink = ZipMemorySink()
+        // Room for the objects uncompressed: never regrown and copied, and pages that compression
+        // saved are never touched.
+        sink.bytes.reserveCapacity(p.manifest.count + p.previews.reduce(0) { $0 + $1.data.count }
+            + p.objects.reduce(0) { $0 + $1.object.contentSize + $1.object.contentSize / 64 + 128 + $1.path.utf8.count } + 4096)
+        let (out, stats) = try writeZip(p, into: sink)
+        return (out.bytes, stats)
+    }
+
+    /// Uncompressed bytes of objects compressed together, on all cores, while the batch before
+    /// them is written.
+    static let zipBatchBytes = 32 << 20
+
+    /// Writes prepared bundle `p` as a ZIP archive into `sink`, entry by entry: manifest, previews,
+    /// then the objects in path order, compressed a batch at a time. The manifest is written as
+    /// format 1 and rewritten in place as format 2 (the same length) if the archive turns out to
+    /// need ZIP64. Holds the central directory and at most two batches beyond the document.
+    func writeZip<Sink: ZipSink>(_ p: Prepared, into sink: Sink) throws(FormatError) -> (Sink, SaveStats) {
+        var model = p.model
+        var manifest = p.manifest
         var stats = p.stats
-        // New objects are compressed and checksummed on all cores first (compression dominates a
-        // full save, and one CRC pass over gigabytes would be next).
-        let todo = p.objects.filter { compressedObjects[$0.path] == nil }
-        let fresh = Parallel.map(todo.count) { i -> StoredObject in
-            let data = todo[i].object.compressed
-            return StoredObject(data: data, crc: CRC32.checksum(data))
+        if forceZip64 {
+            model.formatVersion = pcraftFormatVersion
+            manifest = try ManifestJSON.encode(model)
         }
-        var freshByPath: [String: StoredObject] = [:]
-        for (i, o) in todo.enumerated() { freshByPath[o.path] = fresh[i] }
-        var next: [String: StoredObject] = [:]
-        next.reserveCapacity(p.objects.count)
-        var stored: [(path: String, object: StoredObject)] = []
-        stored.reserveCapacity(p.objects.count)
-        for (path, obj) in p.objects {
-            let o: StoredObject
-            if let d = compressedObjects[path] {
-                if obj.isTile { stats.tilesReused += 1 }
-                o = d
-            } else {
-                if obj.isTile { stats.tilesWritten += 1 } else { stats.blobsWritten += 1 }
-                o = freshByPath[path] ?? StoredObject(data: obj.compressed)
-            }
-            stored.append((path, o))
-            next[path] = o
-        }
-        // The archive's layout, in writing order: manifest, previews, objects.
-        let layout = [(Store.manifest.utf8.count, p.manifest.count)] + p.previews.map { ($0.name.utf8.count, $0.data.count) }
-            + stored.map { ($0.path.utf8.count, $0.object.data.count) }
-        let zip64 = forceZip64 || !ZipWriter.fitsClassic(layout.map { (nameLength: $0.0, size: $0.1) })
-        if zip64 {
-            // Same length as the version 1 JSON: the layout above still holds.
-            p.model.formatVersion = pcraftFormatVersion
-            p.manifest = try ManifestJSON.encode(p.model)
-        }
-        var z = ZipWriter(forceZip64: forceZip64)
-        z.reserveCapacity(layout.reduce(0) { $0 + 30 + 20 + $1.0 + $1.1 })
+        var z = ZipStreamWriter(sink, forceZip64: forceZip64)
         do {
-            try z.add(Store.manifest, p.manifest)
+            try z.add(Store.manifest, manifest)
             for (name, data) in p.previews { try z.add(name, data) }
-            for (path, o) in stored { try z.addStored(path, o.data, crc: o.crc) }
         } catch {
             throw FormatError.wrap(error)
         }
-        assert(z.usesZip64 == zip64, "the manifest's version must match the container")
-        compressedObjects = next
+        // Batches of objects, by the bytes they compress.
+        let objects = p.objects, cached = compressedObjects
+        var batches: [Range<Int>] = []
+        var start = 0, bytes = 0
+        for (i, o) in objects.enumerated() where cached[o.path] == nil {
+            bytes += o.object.contentSize
+            if bytes >= PcraftWriter.zipBatchBytes {
+                batches.append(start ..< i + 1)
+                (start, bytes) = (i + 1, 0)
+            }
+        }
+        if start < objects.count || batches.isEmpty { batches.append(start ..< objects.count) }
+        // New objects of a batch, compressed and checksummed on all cores (compression dominates a
+        // save, and one CRC pass over gigabytes would be next), in the background.
+        func compress(_ range: Range<Int>) -> (DispatchGroup, CompressedBatch) {
+            let group = DispatchGroup(), out = CompressedBatch()
+            DispatchQueue.global(qos: .userInitiated).async(group: group) {
+                out.objects = Parallel.map(range.count) { k -> StoredObject? in
+                    let o = objects[range.lowerBound + k]
+                    if cached[o.path] != nil { return nil }
+                    let data = o.object.compressed
+                    return StoredObject(data: data, crc: CRC32.checksum(data))
+                }
+            }
+            return (group, out)
+        }
+        var next: [String: StoredObject] = [:]
+        var kept = 0
+        var pending = compress(batches[0])
+        // No compression outlives the save, whichever way it ends.
+        defer { pending.0.wait() }
+        for b in batches.indices {
+            let (group, batch) = pending
+            group.wait()
+            if b + 1 < batches.count { pending = compress(batches[b + 1]) }
+            for (k, i) in batches[b].enumerated() {
+                let (path, obj) = objects[i]
+                let o: StoredObject
+                if let d = cached[path] {
+                    if obj.isTile { stats.tilesReused += 1 }
+                    o = d
+                } else {
+                    if obj.isTile { stats.tilesWritten += 1 } else { stats.blobsWritten += 1 }
+                    o = batch.objects[k] ?? StoredObject(data: obj.compressed)
+                }
+                do { try z.addStored(path, o.data, crc: o.crc) } catch { throw FormatError.wrap(error) }
+                let cost = o.data.count + PcraftWriter.zipCacheEntryCost
+                if kept + cost <= zipCacheBudget {
+                    next[path] = o
+                    kept += cost
+                }
+            }
+            batch.objects = []
+        }
         do {
-            return (try z.finish(), stats)
+            if z.usesZip64 && model.formatVersion != pcraftFormatVersion {
+                model.formatVersion = pcraftFormatVersion
+                let v2 = try ManifestJSON.encode(model)
+                guard v2.count == manifest.count else { throw FormatError.unsupported("manifest: format 2 changes its length") }
+                try z.replaceStored(0, v2, crc: CRC32.checksum(v2))
+            }
+            let out = try z.finish()
+            compressedObjects = next
+            return (out, stats)
         } catch {
             throw FormatError.wrap(error)
         }
@@ -631,14 +744,53 @@ public final class PcraftWriter {
         case .package:
             return try saveDir(doc, url, opts)
         case .singleFile:
-            let (bytes, stats) = try saveZip(doc, opts)
-            do throws(IOError) {
-                try AtomicSave.atomicWrite(url, bytes)
-            } catch {
-                throw .io(error)
+            let p = try prepare(doc, opts)
+            var stats = SaveStats()
+            try AtomicSave.atomicWriteStreaming(url) { fd throws(FormatError) in
+                stats = try writeZip(p, into: FileZipSink(fd: fd, path: url.path)).1
             }
             return stats
         }
+    }
+}
+
+/// A ZIP archive streamed into an open file. Headers and other small entries are gathered into
+/// one write; large entries go straight to the file.
+struct FileZipSink: ZipSink {
+    let fd: Int32
+    let path: String
+    private var buffer: [UInt8] = []
+    static let bufferSize = 1 << 20
+
+    init(fd: Int32, path: String) {
+        self.fd = fd
+        self.path = path
+        buffer.reserveCapacity(FileZipSink.bufferSize)
+    }
+
+    mutating func write(_ bytes: UnsafeRawBufferPointer) throws {
+        if buffer.count + bytes.count > FileZipSink.bufferSize { try flush() }
+        if bytes.count >= FileZipSink.bufferSize / 4 {
+            try flush()
+            try AtomicSave.writeAll(fd, bytes, path)
+        } else {
+            buffer.append(contentsOf: bytes.assumingMemoryBound(to: UInt8.self))
+        }
+    }
+
+    mutating func overwrite(_ bytes: UnsafeRawBufferPointer, at offset: Int) throws {
+        try flush()
+        try AtomicSave.writeAll(fd, bytes, at: offset, path)
+    }
+
+    mutating func flush() throws {
+        if buffer.isEmpty { return }
+        let failure: IOError? = buffer.withUnsafeBytes { b in
+            do throws(IOError) { try AtomicSave.writeAll(fd, b, path) } catch { return error }
+            return nil
+        }
+        if let failure { throw failure }
+        buffer.removeAll(keepingCapacity: true)
     }
 }
 

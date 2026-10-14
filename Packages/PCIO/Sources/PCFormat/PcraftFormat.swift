@@ -7,10 +7,12 @@
 //   composite/preview.png    optional flattened preview (caller-rendered)
 //
 // A bundle is either a ZIP archive (STORE entries) or a directory with the same layout. Saving is
-// incremental: `PcraftWriter` remembers what it already compressed/wrote, so only new tiles are
-// encoded. Directory saves verify existing content-addressed objects once per writer and folder,
-// rechecking files whose size or modification time changes; they replace damaged or missing
-// objects and garbage-collect unreferenced ones.
+// incremental: `PcraftWriter` remembers what it wrote, and (up to a budget) what it compressed, so
+// only new tiles are encoded. Directory saves verify existing content-addressed objects once per
+// writer and folder, rechecking files whose size or modification time changes; they replace
+// damaged or missing objects and garbage-collect unreferenced ones. A ZIP file is written entry by
+// entry into its temporary file and read entry by entry through its central directory, so it is
+// never in memory whole.
 //
 // This module sits next to the compositor, so it does not render: callers pass previews in
 // `SaveOptions`.
@@ -96,9 +98,12 @@ public enum PcraftFormat {
         return (try? ZipReader(bytes))?.find(Store.manifest) != nil
     }
 
-    /// Saves to an in-memory ZIP bundle (one-shot; use `PcraftWriter` for incremental saves).
+    /// Saves to an in-memory ZIP bundle (one-shot; use `PcraftWriter` for incremental saves, and
+    /// `PcraftWriter.save(_:to:as:)` to write a file without holding it).
     public static func save(_ doc: Document, options: SaveOptions = SaveOptions()) throws(FormatError) -> [UInt8] {
-        try PcraftWriter().saveZip(doc, options).0
+        let w = PcraftWriter()
+        w.setZipCacheBudget(0)
+        return try w.saveZip(doc, options).0
     }
 
     /// Loads a ZIP bundle from memory.
@@ -106,12 +111,11 @@ public enum PcraftFormat {
         try Store.load(try ZipSource(bytes), options)
     }
 
-    /// Loads a bundle from a file URL: a directory bundle or a ZIP file.
+    /// Loads a bundle from a file URL: a directory bundle or a ZIP file. A ZIP file is read entry
+    /// by entry through its central directory, never whole.
     public static func load(contentsOf url: URL, options: LoadOptions = LoadOptions()) throws(FormatError) -> Document {
         if FS.isDir(url.path) { return try Store.load(DirSource(root: url), options) }
-        let bytes: [UInt8]
-        do throws(IOError) { bytes = try FileRead.readFile(url) } catch { throw .io(error) }
-        return try load(bytes, options: options)
+        return try Store.load(try ZipFileSource(url), options)
     }
 
     /// Loads from any byte source (a directory behind a capability handle, an archive, a test

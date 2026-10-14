@@ -44,8 +44,17 @@ import PCAffinity
 import PCIOCore
 
 enum PcraftCodec {
-    /// A zstd frame of `data`.
-    static func compress(_ data: [UInt8]) -> [UInt8] { ZstdEncoder.compress(data) }
+    /// A zstd frame of `data`, in an array no larger than it needs: the encoder reserves half the
+    /// input for its output, and compressed objects are kept (a writer's cache, a save's batch), so
+    /// a 64 KiB tile that compresses to 100 bytes must not hold 32 KiB.
+    static func compress(_ data: [UInt8]) -> [UInt8] {
+        let z = ZstdEncoder.compress(data)
+        guard z.capacity > z.count + z.count / 8 + 64 else { return z }
+        return [UInt8](unsafeUninitializedCapacity: z.count) { buf, n in
+            z.withUnsafeBufferPointer { _ = buf.initialize(fromContentsOf: $0) }
+            n = z.count
+        }
+    }
 
     /// The content address: lower-case hex BLAKE3 of the uncompressed bytes.
     static func hash(_ data: [UInt8]) -> Hash { Convert.hex(BLAKE3.hash(data)) }

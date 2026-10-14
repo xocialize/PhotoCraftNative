@@ -124,15 +124,7 @@ public enum AtomicSave {
 
     public static func atomicWriteWithProgress(_ fs: some AtomicFS, _ retry: RenameRetry, _ path: String, _ bytes: [UInt8],
                                                _ progress: (Float) -> Void) throws(IOError) {
-        let target = resolveSymlink(path)
-        let ns = target as NSString
-        let name = ns.lastPathComponent
-        guard !target.isEmpty, !name.isEmpty, name != "/", !target.hasSuffix("/") else {
-            throw IOError(.invalidInput, "\(path): not a file path")
-        }
-        var dir = ns.deletingLastPathComponent
-        if dir.isEmpty { dir = "." }
-        try FS.createDirAll(dir)
+        let (target, dir, name) = try destination(path)
 
         // A fresh temporary file next to the target (same directory, so the rename never crosses a
         // device). The name is unique per process and call; retry a few on collisions.
@@ -151,7 +143,60 @@ public enum AtomicSave {
             }
         }
         guard let tmp else { throw IOError(.alreadyExists, "\(dir): could not create a temporary file") }
+        try publish(fs, retry, tmp, target: target, path: path, dir: dir)
+    }
 
+    /// `atomicWrite` for a file written as it is produced: `write` streams the new bytes into the
+    /// temporary file's descriptor (and may rewrite bytes it wrote earlier), so they are never all
+    /// in memory. The full flush, permissions, rename and directory sync are `atomicWrite`'s; if
+    /// `write` throws, the temporary file is removed and the destination keeps its bytes.
+    static func atomicWriteStreaming(_ url: URL, _ write: (Int32) throws(FormatError) -> Void) throws(FormatError) {
+        let path = url.path
+        let fs = RealFS()
+        let target: String, dir: String, name: String
+        do throws(IOError) { (target, dir, name) = try destination(path) } catch { throw .io(error) }
+        var created: (path: String, fd: Int32)?
+        for _ in 0 ..< 8 {
+            let candidate = (dir as NSString).appendingPathComponent(tempName(name))
+            let fd = open(candidate, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0o666)
+            if fd >= 0 {
+                created = (candidate, fd)
+                break
+            }
+            if errno == EEXIST { continue }
+            throw .io(writeError(IOError.last(candidate), path, dir))
+        }
+        guard let (tmp, fd) = created else { throw .io(IOError(.alreadyExists, "\(dir): could not create a temporary file")) }
+        do throws(FormatError) {
+            try write(fd)
+            do throws(IOError) { try syncFile(fd) } catch { throw .io(error) }
+        } catch {
+            close(fd)
+            try? fs.remove(tmp)
+            if case .io(let e) = error { throw .io(writeError(e, path, dir)) }
+            throw error
+        }
+        close(fd)
+        do throws(IOError) { try publish(fs, .platform, tmp, target: target, path: path, dir: dir) } catch { throw .io(error) }
+    }
+
+    /// The file a save to `path` replaces (a symlink's target), its folder (created if needed)
+    /// and its name.
+    static func destination(_ path: String) throws(IOError) -> (target: String, dir: String, name: String) {
+        let target = resolveSymlink(path)
+        let ns = target as NSString
+        let name = ns.lastPathComponent
+        guard !target.isEmpty, !name.isEmpty, name != "/", !target.hasSuffix("/") else {
+            throw IOError(.invalidInput, "\(path): not a file path")
+        }
+        var dir = ns.deletingLastPathComponent
+        if dir.isEmpty { dir = "." }
+        try FS.createDirAll(dir)
+        return (target, dir, name)
+    }
+
+    /// Puts the complete, flushed temporary file `tmp` in place of `target`.
+    static func publish(_ fs: some AtomicFS, _ retry: RenameRetry, _ tmp: String, target: String, path: String, dir: String) throws(IOError) {
         // Keep the existing file's mode (e.g. 0600) instead of the process default.
         if FileManager.default.fileExists(atPath: target) { try? fs.copyPermissions(target, tmp) }
 
@@ -258,9 +303,20 @@ public enum AtomicSave {
 
     /// Writes `n` bytes of `bytes` from `offset`, retrying short writes and `EINTR`.
     static func writeAll(_ fd: Int32, _ bytes: [UInt8], _ offset: Int, _ n: Int, _ what: String) throws(IOError) {
+        let failure: IOError? = bytes.withUnsafeBytes { p in
+            do throws(IOError) { try writeAll(fd, UnsafeRawBufferPointer(rebasing: p[offset ..< offset + n]), what) } catch { return error }
+            return nil
+        }
+        if let failure { throw failure }
+    }
+
+    /// Writes all of `bytes` at the file position (or, with `at`, at that offset, leaving the
+    /// position alone), retrying short writes and `EINTR`.
+    static func writeAll(_ fd: Int32, _ bytes: UnsafeRawBufferPointer, at offset: Int? = nil, _ what: String) throws(IOError) {
         var done = 0
-        while done < n {
-            let w = bytes.withUnsafeBytes { p in Darwin.write(fd, p.baseAddress.map { $0 + offset + done }, n - done) }
+        while done < bytes.count {
+            let p = bytes.baseAddress.map { $0 + done }, n = bytes.count - done
+            let w = offset.map { pwrite(fd, p, n, off_t($0 + done)) } ?? Darwin.write(fd, p, n)
             if w < 0 {
                 if errno == EINTR { continue }
                 throw IOError.last(what)
