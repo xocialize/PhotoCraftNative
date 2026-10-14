@@ -489,7 +489,8 @@ photocraft-format's, so bundles go both ways:
 - Deviations (format porter): manifest keys written sorted; tile hashes cached by tile
   generation; hashing/decoding in parallel with errors surfacing in photocraft's order; layers
   coded iteratively (a 100-deep tree in 512 KiB of stack); directory bundles fall back to `fsync`
-  where `F_FULLFSYNC` is refused (SMB), which photocraft fails on.
+  where `F_FULLFSYNC` is refused (SMB), which photocraft fails on; a directory save fully flushes
+  once, with its manifest, where photocraft's `write_bundle_file` flushes every object (AB-T-0259).
 
 ### Format 3: filter adjustment layers (AB-T-0258)
 
@@ -540,6 +541,47 @@ photocraft-format's, so bundles go both ways:
   at most `setZipCacheBudget` (64 MiB by default, 256 bytes counted per entry); one-off saves keep
   none. PCEngine's Save, Save a Copy and Open of a local single file use these paths; other file
   systems still go through whole bytes.
+- **Saves without the wait (AB-T-0259).** At 0.3.0 a package save of PCRender's realistic20 at
+  4096² spent 4.45 s on its previews alone in PixelAgencyEditor (a full-resolution composite each,
+  averaged on one core), and a first save seconds more flushing each of its 1,235 objects to stable
+  storage. Now:
+  - **One reduced composite.** `DocumentCompositor.reduced(_:width:height:)` (PCIOCore) is the
+    canvas area-averaged to a size. PCRender's `renderReduced` gives it for an RGB document
+    (`RenderCompositor`, and PCEngine's `EngineRenderer`), whose composite reads back as rendered;
+    the default composites a band at a time and reads it as `Surface.readRGBA` does (CMYK, Lab,
+    Gray). `pcraftPreviews` renders the 1024 px composite once and reduces the 256 px thumbnail from
+    it (`ReducedComposite.reduce(_:width:height:of:to:_:)`: exact where the cells fall on each
+    other, as from 4096² to 1024² and 256²). The PSD thumbnail resource (160 px) is unchanged.
+  - **Updated, not redrawn.** `pcraftPreviews(_:options:updating:)` takes the last previews
+    (`PcraftPreviews`, which keep their reduction before sRGB) and the pixels an edit can have
+    changed, and composites again only the cells meeting them
+    (`DocumentCompositor.reduced(_:width:height:damage:)`: PCRender's `renderReduced(damage:)`, the
+    same values the whole reduction gives them). PCEngine's `SaveSlot` keeps the previews, reuses
+    them while nothing they show changes, and takes the damage from its transaction builder;
+    `PcraftPreviews(stored:of:)` lets a just-opened file's own previews (`PcraftFormat.readPreviews`)
+    stand in. The writer keeps the last previews' PNG bytes.
+  - **One full flush per save.** `saveDir` checks existing objects and writes new ones on all
+    cores. Each new object or preview goes through a temporary file flushed to the drive (`fsync`)
+    and a rename; the folders are synced once; the manifest's own `F_FULLFSYNC`, before its rename,
+    then empties the drive's cache, so the manifest still never names an object that isn't on
+    stable storage. Measured on the first save of realistic20 at 0.3.0: 4.83 s of the 6.33 s it
+    spent on objects was the per-object full flush (≈ 3.9 ms × 1,238 files: 1,235 objects, 2
+    previews, the manifest).
+  - Measured in release (`PCRAFT_SAVE_BENCH=1 swift test -c release --filter
+    PCEngineTests.SaveTimingTests`: realistic20 at 4096², 1,211 tiles, opened from a PSD as
+    PixelAgencyEditor's `openAndSaveAt4096` does; M5 Max, 2026-10-14, other sessions loading the
+    Mac to 35–73; receipt AB-R-0542 of AB-T-0259):
+
+    | | 0.3.0 (9922820) | AB-T-0259 |
+    |---|---|---|
+    | the previews alone | 3,517 ms | 408 ms first, 225 ms again |
+    | first package save | 8,312 ms | 457–499 ms |
+    | unchanged package save | 2,962–2,984 ms | 62–103 ms |
+    | save after a stroke (3 tiles) | 3,006 ms | 127–163 ms |
+    | the package reopened, a stroke, save | 3,933 ms | 389 ms |
+    | the same, once composited for display | 3,523 ms | 287–360 ms |
+
+    The previews are 0.3.0's within a level (max 1, mean 0.019 thumbnail and 0.031 composite).
 - **Types** (`DocumentTypes.swift`). The package is `com.xocialize.pcraft.package`, conforming to
   `com.apple.package` and `public.composite-content`; the app exports it. The single file is
   photocraft's `ai.storyteller.photocraft.document` (`public.data`, `public.image`); the app imports
@@ -581,7 +623,7 @@ photocraft-format's, so bundles go both ways:
 ## Tests
 
 `swift build --build-tests` and `swift test` in `Packages/PCIO` (debug and release): zero warnings.
-866 tests in 8 targets (2026-10-14, after streamed single files; zero warnings):
+879 tests in 8 targets (2026-10-14, after AB-T-0259's saves; zero warnings):
 
 | Target | Tests | Content |
 |---|---|---|
@@ -589,10 +631,10 @@ photocraft-format's, so bundles go both ways:
 | `PCIOTextTests` | 52 | TySh/EngineData/Txt2 read/write, styles, corpus (64/64 EngineData, 13/13 `Txt2` byte-exact) |
 | `PCIOMapsTests` | 91 | adjustment/effects/vector/pattern/channel/comps/slices/annotation maps + corpus |
 | `PCIOSmartTests` | 37 | smart maps, linked files, displace, Camera Raw + corpus (98 `SoLd`) |
-| `PCFormatTests` | 134 | all 115 photocraft-format tests, photocraft-shaped bundle, corruption, autosave/recovery, empty-blob frames, format 2 (versions per form, migration, forced ZIP64, package types, only new tiles written), streamed single files (the in-memory archive's bytes, format 2 decided at the end, a bounded cache, a failed save changes nothing, file loads fail as memory loads); the >4 GiB round trip and the load measurement are opt-in |
+| `PCFormatTests` | 139 | all 115 photocraft-format tests, photocraft-shaped bundle, corruption, autosave/recovery, empty-blob frames, format 2 (versions per form, migration, forced ZIP64, package types, only new tiles written), streamed single files (the in-memory archive's bytes, format 2 decided at the end, a bounded cache, a failed save changes nothing, file loads fail as memory loads), package saves on all cores (damaged objects among many rewritten, unchanged previews not encoded again, previews read back); the >4 GiB round trip and the load measurement are opt-in |
 | `PCIOFormatsTests` | 139 | ORA, KRA, PDN, EXR (every compression), layered TIFF transcoder (corpus both byte orders), SVG, Compositor `.comp` (every version gate, deep/HDR layers, transforms, masks, clipping, adjustments, text/shapes) |
 | `PCIOAffinityTests` | 45 | `affinity.rs` and `affinity_artboards.rs` import tests on `PCAffinitySynth` inputs |
-| `PCIOTests` | 300 | photocraft's `crates/io/tests` (roundtrip, psd_structure, block layout/alignment, 32-bit, modes, multichannel, lab16, channels, banded, large PSB (29000² opt-in), thumbnails, progress/cancel, composite, adjust/effects/vector/comps/annotations/patterns, smart objects, type, tiff_layers/pages/corpus, flat/orientation/metadata/resolution/colour/HEIF, container dispatch, Affinity export halves), the inline tests of the PCIO-owned modules, Compositor's `.comp` fixtures against its own oracle, Photoshop record conventions, both corpora (round trip, oracle, `.pcraft`), EXR part selection, flat export, the Photoshop oracle's findings (type-layer completeness, blend modes per mode/depth, 4-alignment, matte order, `Txt2`, patterns), fill pixels against the live composite, adjustment availability per mode/depth (with the oracle run's proof), per-document CMYK |
+| `PCIOTests` | 308 | photocraft's `crates/io/tests` (roundtrip, psd_structure, block layout/alignment, 32-bit, modes, multichannel, lab16, channels, banded, large PSB (29000² opt-in), thumbnails, progress/cancel, composite, adjust/effects/vector/comps/annotations/patterns, smart objects, type, tiff_layers/pages/corpus, flat/orientation/metadata/resolution/colour/HEIF, container dispatch, Affinity export halves), the inline tests of the PCIO-owned modules, Compositor's `.comp` fixtures against its own oracle, Photoshop record conventions, both corpora (round trip, oracle, `.pcraft`), EXR part selection, flat export, the Photoshop oracle's findings (type-layer completeness, blend modes per mode/depth, 4-alignment, matte order, `Txt2`, patterns), fill pixels against the live composite, adjustment availability per mode/depth (with the oracle run's proof), per-document CMYK, the `.pcraft` previews from one reduced composite (within a level of 0.3.0's two, damaged cells, stored previews) |
 
 Every PSD/PSB a test exports is checked with PCPSD's linter (`compatibilityIssues(decodeChannels:)`,
 no errors), and, when `PCIO_EXPORT_DIR` is set, saved there for the

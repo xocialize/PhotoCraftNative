@@ -88,6 +88,10 @@ CommandRegistry.standard().specs           // id, label, menu, shortcut, params,
 // Files (also as commands: file.open {path}, file.save {path?}, file.saveAs {path}, …)
 let (index, warnings, colorReport) = try session.openFile("/path/a.psd")  // PCIO import + Color Settings policy
 let out = try session.saveDocument(to: "/path/a.psd")  // SaveOutcome {path, warnings, copy, assets}
+let job = try session.saveJob(to: "/path/a.pcraft")    // the same save in parts: a snapshot, taken here,
+let written = try job.run()                            // written on any thread,
+try session.finishSave(job, written)                   // its bookkeeping back on the session's
+try await session.executeAsync("file.save")            // or as a background job (file.save, file.saveAs)
 session.recentFiles; session.enableRecovery(dir); session.autosaveDirty()
 session.recoverableDocuments(); try session.restore(entry)
 let r = try EngineIO.export(doc, as: "x.png", services: session.services)   // bytes + warnings
@@ -112,6 +116,24 @@ let i = try EngineIO.importFile(name: "x.psd", bytes: bytes, services: session.s
   original), which writes a copy; a save to its own file discards its crash-recovery data and runs
   the Save Document script event and Image Assets. All reads and writes go through
   `services.fileSystem` (crash-safe writes for the local one).
+* **Saving off the session's thread (AB-T-0259).** `saveDocument` is `saveJob` (on the session's
+  thread: what to write, and the document as a snapshot), `SaveJob.run` (any thread) and
+  `finishSave` (the session's thread again: the file becomes the document's, the recovery data
+  goes, Save Document and Image Assets run). An edit made while a job runs stays unsaved, and the
+  document stays dirty. `file.save` and `file.saveAs` are jobs (`runJob`, not locking the
+  document): `start` or `executeAsync` writes the file on a worker. A document's package writer and
+  its last `.pcraft` previews live in its `SaveSlot`, whose lock its jobs take one at a time, so two
+  saves never write one package at once; closing the document drops it. The previews come from one
+  reduced composite (PCIO's `pcraftPreviews`), which the slot keeps with the document it shows:
+  - unchanged while nothing they show changed (`SaveSlot.unseen`: the document equal but for its
+    name, identity, selection, guides, notes and work path; unchanged tiles are shared, so only
+    edits are compared);
+  - after an edit, only the reduction's cells meeting what the edit can have changed are composited
+    again: the damage of `TransactionBuilder.transaction(from:to:)` between the two, effects'
+    reach included (the canvas's own invalidation), else the whole;
+  - for a `.pcraft` just opened (`openFile`), the previews the file holds stand for the last ones
+    (`SaveSlot.opened`), read at its first save, unless the file has changed since it was opened
+    (`FileStamp`) or the document has a profile of its own (its previews are converted to sRGB).
 
 ## Glue
 
