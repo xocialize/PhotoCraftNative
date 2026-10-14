@@ -94,11 +94,28 @@ public final class CanvasRenderer: @unchecked Sendable {
     public var checkerSize: Float = 8
     public var pasteboard = SIMD4<Float>(0.16, 0.16, 0.16, 1)
     private var renderPipelines: [MTLPixelFormat.RawValue: any MTLRenderPipelineState] = [:]
+    /// The compositor `show` last rendered through (told to forget this view on deinit).
+    private weak var lastCompositor: MetalCompositor?
 
     public init(context: MetalContext? = MetalContext.shared) throws {
         guard let context else { throw MetalCompositorError.noMetal }
         self.context = context
         kernels = try PCRKernels(context: context)
+    }
+
+    deinit { lastCompositor?.forgetView(RenderView(self)) }
+
+    /// This canvas as a view of the compositor: what its `show` renders use counts as visible.
+    public var renderView: RenderView { RenderView(self) }
+
+    /// What this canvas holds on the GPU (allocated bytes of the composite, its reduction chain and
+    /// the LUT). Read it where the canvas is driven (it is not locked); a shrink never takes it.
+    public var footprint: DisplayFootprint {
+        var f = DisplayFootprint()
+        f.composite = composite?.allocatedSize ?? 0
+        f.levels = levels.reduce(0) { $0 + $1.allocatedSize }
+        f.lut = displayLUT?.texture.allocatedSize ?? 0
+        return f
     }
 
     /// Sets the composite (straight RGBA of `rect`) and rebuilds the reduction chain.
@@ -124,9 +141,12 @@ public final class CanvasRenderer: @unchecked Sendable {
         cb.waitUntilCompleted()
     }
 
-    /// Composites `plan` with `compositor` and shows it (the usual refresh).
+    /// Composites `plan` with `compositor` and shows it (the usual refresh). The render is this
+    /// canvas's view render: what it uses stays through a run-level shrink.
     public func show(_ plan: RenderPlan, region: PixelRect, source: any RenderSource, compositor: MetalCompositor) throws {
-        let r = try compositor.render(plan, region: region, source: source, outputFormat: .rgba16Float)
+        if let old = lastCompositor, old !== compositor { old.forgetView(renderView) }
+        lastCompositor = compositor
+        let r = try compositor.render(plan, region: region, source: source, outputFormat: .rgba16Float, view: renderView)
         try setComposite(r.texture, rect: region)
     }
 

@@ -5,7 +5,8 @@
 // rgba16Float / rgba32Float accumulators drawn from a heap-backed pool. Every op writes a fresh
 // accumulator (no in-place hazards); the stack holds shared references, so `.pick` costs nothing.
 // Effect maps and feathered masks are built once per leaf version before the cells run and
-// cached under a budget, as photocraft-gpu does.
+// cached under a budget, as photocraft-gpu does. What the caches hold, what a view uses and how
+// they give memory back (byte accessors, memory budget, shrink ladder): CanvasMemory.swift.
 
 import Foundation
 import Metal
@@ -51,16 +52,56 @@ public final class MetalCompositor: @unchecked Sendable {
     /// Side of the page cells (a multiple of 256; at most the device's texture limit).
     public var chunkSize: Int { didSet { chunkSize = max(256, (chunkSize + 255) / 256 * 256) } }
     public var precision: AccumulatorPrecision = .automatic
-    /// Bytes effect maps and feathered masks may hold on the GPU.
+    /// Bytes effect maps and feathered masks may hold on the GPU (without a `memoryBudget`).
     public var cacheBudget: Int = 1536 << 20
+    /// Side of the render cells in the low-footprint mode (`ReliefLevel.lowFootprint`).
+    public var lowFootprintCell = 512
     /// CPU-side timing of the last `render`.
     public private(set) var lastStats = MetalRenderStats()
 
-    private let lock = NSLock()
+    /// Shares of `memoryBudget` the caches may hold, and idle accumulator heaps kept.
+    public static let residencyShare = 0.25, effectsShare = 0.10, idleHeapLimit = 2
+
+    let lock = NSLock()
     var fxCache: [CPUCompositor.FxKey: (maps: GPUFxMaps, tick: UInt64)] = [:]
     var maskCache: [CPUCompositor.MaskKey: (mask: GPUMask, tick: UInt64)] = [:]
     var patternCache: [String: (version: UInt64, texture: any MTLTexture)] = [:]
     var tick: UInt64 = 0
+    /// Effect maps and masks the current render used.
+    var frameFx: Set<CPUCompositor.FxKey> = []
+    var frameMasks: Set<CPUCompositor.MaskKey> = []
+    /// Bytes of map-building textures allocated so far (build intermediates are differences).
+    var mapBytesAllocated = 0
+
+    /// What a view's last render used, and what it took.
+    struct ViewRecord {
+        var frame: UInt64
+        var pages: Set<ResidencyCache.Key>
+        var fx: Set<CPUCompositor.FxKey>
+        var masks: Set<CPUCompositor.MaskKey>
+        var region: PixelRect
+        /// The output texture the render allocated (0: it drew into a reused target).
+        var outputBytes: Int
+        /// Heap bytes its accumulators came from, at `accumulatorArea` per accumulator.
+        var poolBytes: Int
+        var accumulatorArea: Int
+        /// The largest build intermediates among its effect maps and masks.
+        var buildBytes: Int
+        /// What rebuilding each of its effect maps and masks takes (held + intermediates).
+        var fxRebuild: [CPUCompositor.FxKey: Int]
+        var maskRebuild: [CPUCompositor.MaskKey: Int]
+    }
+    var views: [RenderView: ViewRecord] = [:]
+    var budgetBytes: Int?
+    /// Deepest rung taken since pressure last cleared, and the caps it left.
+    var relief: (level: ReliefLevel, residency: Int, effects: Int)?
+
+    /// Guards what may be read without waiting for a render: the last footprint, the observer and
+    /// views to forget.
+    let stateLock = NSLock()
+    var last = CompositorFootprint()
+    var observer: (@Sendable (CompositorFootprint) -> Void)?
+    var forgotten: [RenderView] = []
 
     public init(context: MetalContext? = MetalContext.shared, chunkSize: Int = 2048, residentBudget: Int = 4 << 30) throws {
         guard let context else { throw MetalCompositorError.noMetal }
@@ -78,9 +119,12 @@ public final class MetalCompositor: @unchecked Sendable {
 
     /// Drops every cached texture.
     public func purge() {
-        lock.lock(); defer { lock.unlock() }
-        fxCache.removeAll(); maskCache.removeAll(); patternCache.removeAll()
-        residency.purge(); pool.purge()
+        let fp: CompositorFootprint = locked {
+            fxCache.removeAll(); maskCache.removeAll(); patternCache.removeAll()
+            residency.purge(); pool.purge()
+            return publish()
+        }
+        notify(fp)
     }
 
     /// Why `plan` can't run on the GPU, or nil when it can.
@@ -96,24 +140,61 @@ public final class MetalCompositor: @unchecked Sendable {
     /// Composites `plan` over `region` on the GPU into a new region-sized texture.
     /// `into`: a texture of at least the region's size to composite into (reused across frames:
     /// a fresh 4096² float texture costs its page mapping on every render); nil allocates one.
+    /// `view`: the canvas view this render draws (what it uses counts as visible until the view's
+    /// next render; see CanvasMemory.swift).
     public func render(_ plan: RenderPlan, region: PixelRect, source: any RenderSource,
                        outputFormat: MTLPixelFormat = .rgba32Float, outputStorage: MTLStorageMode = .private,
-                       into target: (any MTLTexture)? = nil) throws -> MetalRenderResult {
+                       into target: (any MTLTexture)? = nil, view: RenderView? = nil) throws -> MetalRenderResult {
         func clock() -> Double { Double(DispatchTime.now().uptimeNanoseconds) / 1e9 }
         var stats = MetalRenderStats()
         var t = clock()
         func lap(_ k: WritableKeyPath<MetalRenderStats, Double>) { let n = clock(); stats[keyPath: k] += n - t; t = n }
         do { try plan.validate() } catch { throw MetalCompositorError.gpu(error.description) }
         if let why = unsupportedReason(plan) { throw MetalCompositorError.unsupported(why) }
+        let reused = target.flatMap({ $0.width >= region.width && $0.height >= region.height ? $0 : nil })
         guard !region.isEmpty,
-              let out = target.flatMap({ $0.width >= region.width && $0.height >= region.height ? $0 : nil })
+              let out = reused
                 ?? context.makeTexture(width: region.width, height: region.height, pixelFormat: outputFormat,
                                        usage: [.shaderRead, .shaderWrite], storage: outputStorage) else {
             throw MetalCompositorError.gpu("output texture \(region)")
         }
-        lock.lock(); defer { lock.unlock() }
+        lock.lock()
+        applyForgotten()
         lap(\.output)
         residency.beginFrame()
+        let frame = residency.currentFrame
+        pool.frame = frame
+        pool.frameIsView = view != nil
+        frameFx.removeAll(); frameMasks.removeAll()
+        let result: MetalRenderResult
+        do {
+            result = try renderLocked(plan, region: region, source: source, out: out, lap: lap)
+            lastStats = stats
+        } catch {
+            let fp = finishFrame()
+            lock.unlock()
+            notify(fp)
+            throw error
+        }
+        if let view {
+            var fxRebuild: [CPUCompositor.FxKey: Int] = [:], maskRebuild: [CPUCompositor.MaskKey: Int] = [:]
+            for k in frameFx { if let m = fxCache[k]?.maps { fxRebuild[k] = m.heldBytes + m.buildBytes } }
+            for k in frameMasks { if let m = maskCache[k]?.mask { maskRebuild[k] = m.allocated + m.buildBytes } }
+            let build = max(frameFx.compactMap { fxCache[$0]?.maps.buildBytes }.max() ?? 0,
+                            frameMasks.compactMap { maskCache[$0]?.mask.buildBytes }.max() ?? 0)
+            views[view] = ViewRecord(frame: frame, pages: residency.keys(usedIn: frame), fx: frameFx, masks: frameMasks, region: region,
+                                     outputBytes: reused == nil ? out.allocatedSize : 0,
+                                     poolBytes: pool.bytes(touchedIn: frame), accumulatorArea: accumulatorArea(region, side: renderCell),
+                                     buildBytes: build, fxRebuild: fxRebuild, maskRebuild: maskRebuild)
+        }
+        let fp = finishFrame()
+        lock.unlock()
+        notify(fp)
+        return result
+    }
+
+    private func renderLocked(_ plan: RenderPlan, region: PixelRect, source: any RenderSource, out: any MTLTexture,
+                              lap: (WritableKeyPath<MetalRenderStats, Double>) -> Void) throws -> MetalRenderResult {
         let accFormat = precision.format(for: plan)
         var gpuTime = 0.0
         // Effect maps and feathered masks first (their own command buffer; the cells read them).
@@ -126,7 +207,7 @@ public final class MetalCompositor: @unchecked Sendable {
             cb.commit()
             committed.append(cb)
         }
-        let cells = cellRects(region)
+        let cells = cellRects(region, side: renderCell)
         for cell in cells {
             guard let cb = context.queue.makeCommandBuffer() else { throw MetalCompositorError.gpu("command buffer") }
             cb.label = "PCRender cell \(cell)"
@@ -150,7 +231,6 @@ public final class MetalCompositor: @unchecked Sendable {
         }
         gpuTime = committed.isEmpty ? 0 : max(end - start, 0)
         lap(\.wait)
-        lastStats = stats
         return MetalRenderResult(texture: out, rect: region, gpuTime: gpuTime, cells: cells.count)
     }
 
@@ -161,9 +241,9 @@ public final class MetalCompositor: @unchecked Sendable {
         return RGBABuffer(img)
     }
 
-    /// The region cut along the page-cell grid.
-    func cellRects(_ region: PixelRect) -> [PixelRect] {
-        let s = Int32(chunkSize)
+    /// The region cut along the cell grid of `side` (the page cells by default).
+    func cellRects(_ region: PixelRect, side: Int? = nil) -> [PixelRect] {
+        let s = Int32(side ?? chunkSize)
         func floorDiv(_ a: Int32) -> Int32 { a >= 0 ? a / s : -((-a + s - 1) / s) }
         var out: [PixelRect] = []
         var y = floorDiv(region.y0) * s
@@ -235,6 +315,7 @@ public final class MetalCompositor: @unchecked Sendable {
     }
 
     func evictCaches() {
+        if governed { return evictGoverned() }
         var bytes = fxCache.values.reduce(0) { $0 + $1.maps.bytes } + maskCache.values.reduce(0) { $0 + $1.mask.bytes }
         while bytes > cacheBudget && fxCache.count + maskCache.count > 1 {
             let oldFx = fxCache.min { $0.value.tick < $1.value.tick }
@@ -262,6 +343,7 @@ public final class MetalCompositor: @unchecked Sendable {
     /// A shared r32Float texture holding `values` (row-major over `w × h`).
     func valuesTexture(_ values: [Float], _ w: Int, _ h: Int) -> (any MTLTexture)? {
         guard let t = context.makeTexture(width: w, height: h, pixelFormat: .r32Float, usage: [.shaderRead, .shaderWrite]) else { return nil }
+        mapBytesAllocated += t.allocatedSize
         if w > 0 && h > 0 {
             values.withUnsafeBytes { t.replace(region: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0, withBytes: $0.baseAddress!, bytesPerRow: w * 4) }
         }
@@ -270,7 +352,9 @@ public final class MetalCompositor: @unchecked Sendable {
 
     /// A private r32Float working texture.
     func mapTexture(_ w: Int, _ h: Int) -> (any MTLTexture)? {
-        context.makeTexture(width: w, height: h, pixelFormat: .r32Float, usage: [.shaderRead, .shaderWrite], storage: .private)
+        let t = context.makeTexture(width: w, height: h, pixelFormat: .r32Float, usage: [.shaderRead, .shaderWrite], storage: .private)
+        if let t { mapBytesAllocated += t.allocatedSize }
+        return t
     }
 }
 

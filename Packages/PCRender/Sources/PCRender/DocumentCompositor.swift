@@ -25,6 +25,9 @@ public final class DocumentCompositor: @unchecked Sendable {
     public var options: PlanOptions
     /// Rows per band of `renderBands` when the caller passes 0 (≈ `bandPixels` per band).
     public static let bandPixels = 8 << 20
+    /// Keeps the CPU caches registered with `MemoryPressureRelay.shared` (they trim once a host
+    /// starts it).
+    private let pressure: MemoryPressureRegistration
     /// Side of the CPU reference's render tiles (bands are whole multiples of it).
     public static let renderTile: Int32 = 256
 
@@ -32,11 +35,25 @@ public final class DocumentCompositor: @unchecked Sendable {
                 cpu: CPUCompositor = CPUCompositor(), metal: MetalCompositor? = try? MetalCompositor(),
                 cache: DocumentLeafCache = DocumentLeafCache(), options: PlanOptions = PlanOptions()) {
         self.rasterizer = rasterizer; self.backend = backend; self.cpu = cpu; self.metal = metal; self.cache = cache; self.options = options
+        pressure = MemoryPressureRelay.shared.register("PCRender CPU caches") { level in cpu.trim(level) + cache.trim(level) }
     }
 
     /// Drops every cache (Edit › Purge › All).
     public func purge() {
         cache.purge(); cpu.purge(); metal?.purge()
+    }
+
+    /// Trims the CPU caches (CPUCompositor's maps and masks, the leaf cache) for memory pressure;
+    /// returns the bytes freed. The GPU caches shrink through `MetalCompositor.relieve` instead.
+    @discardableResult
+    public func trimCPUCaches(_ level: MemoryPressureRelay.Level) -> Int { cpu.trim(level) + cache.trim(level) }
+
+    /// The GPU transient of one export or flatten band of a `width`-wide document (raise the canvas's
+    /// declaration by it while a band pass runs); 0 without Metal.
+    public func bandTransient(width: Int) -> Int {
+        guard let metal, width > 0 else { return 0 }
+        let rows = Int(DocumentCompositor.bandRows(width: width, requested: 0))
+        return metal.transientEstimate(region: PixelRect(x: 0, y: 0, width: width, height: rows), outputFormat: .rgba32Float)
     }
 
     /// Plans `doc` over `region`.

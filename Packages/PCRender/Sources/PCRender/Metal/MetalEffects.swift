@@ -23,6 +23,10 @@ final class GPUFxMaps: @unchecked Sendable {
     let outline: Bool
     let frames: [(UInt32, PixelRect)]
     let bytes: Int
+    /// Allocated bytes of the distinct textures held (a map can be the shape itself).
+    let heldBytes: Int
+    /// Bytes of the build's intermediates (region-sized working textures the build released).
+    var buildBytes = 0
 
     init(region: PixelRect, shape: any MTLTexture, per: [[any MTLTexture]], bevelPaint: [EffectMath.BevelPaint], din: (any MTLTexture)?,
          dout: (any MTLTexture)?, vdout: (any MTLTexture)?, outline: Bool, frames: [(UInt32, PixelRect)]) {
@@ -30,7 +34,15 @@ final class GPUFxMaps: @unchecked Sendable {
         self.vdout = vdout; self.outline = outline; self.frames = frames
         let n = per.reduce(0) { $0 + $1.count } + 1 + (din == nil ? 0 : 1) + (dout == nil ? 0 : 1) + (vdout == nil ? 0 : 1)
         bytes = n * region.area * 4
+        var seen = Set<ObjectIdentifier>()
+        var held = 0
+        for t in [shape] + per.flatMap({ $0 }) + [din, dout, vdout].compactMap({ $0 }) where seen.insert(ObjectIdentifier(t)).inserted {
+            held += t.allocatedSize
+        }
+        heldBytes = held
     }
+
+    var textures: [any MTLTexture] { [shape] + per.flatMap { $0 } + [din, dout, vdout].compactMap { $0 } }
 
     func strokeFrame(_ st: StrokeFx) -> PixelRect? {
         let key = EffectMath.strokeWidths(st).outer.bitPattern
@@ -44,7 +56,14 @@ final class GPUMask: @unchecked Sendable {
     let texture: (any MTLTexture)?
     let outside: Float
     var bytes: Int { area.area * 4 }
-    init(area: PixelRect, texture: (any MTLTexture)?, outside: Float) { self.area = area; self.texture = texture; self.outside = outside }
+    /// Allocated bytes of `texture`.
+    let allocated: Int
+    /// Bytes of the build's intermediates.
+    var buildBytes = 0
+    init(area: PixelRect, texture: (any MTLTexture)?, outside: Float) {
+        self.area = area; self.texture = texture; self.outside = outside
+        allocated = texture?.allocatedSize ?? 0
+    }
 }
 
 extension MetalCompositor {
@@ -144,7 +163,8 @@ extension MetalCompositor {
         guard let shapeVersion = source.leafVersion(spec.shape) else { throw MetalCompositorError.gpu(PlanError.missingLeaf(spec.shape).description) }
         let key = CPUCompositor.FxKey(layer: spec.layerID, shapeVersion: shapeVersion, effects: spec.effects, region: spec.region,
                                       light: ctx.globalLight, vectorShape: spec.vectorShape, outline: spec.outline)
-        if let hit = fxCache[key] { fxCache[key] = (hit.maps, nextTick()); return hit.maps }
+        if let hit = fxCache[key] { fxCache[key] = (hit.maps, nextTick()); frameFx.insert(key); return hit.maps }
+        let allocatedBefore = mapBytesAllocated
         guard let shapeLeaf = source.leaf(spec.shape) else { throw MetalCompositorError.gpu(PlanError.missingLeaf(spec.shape).description) }
         let region = spec.region
         let shapeCPU = region.isEmpty ? [] : LeafReader.values(shapeLeaf, region)
@@ -234,7 +254,9 @@ extension MetalCompositor {
         }
         let maps = GPUFxMaps(region: region, shape: shapeTex, per: per, bevelPaint: bevelPaint, din: din, dout: dout, vdout: vdout,
                              outline: spec.outline, frames: frames)
+        maps.buildBytes = max(0, mapBytesAllocated - allocatedBefore - maps.heldBytes)
         fxCache[key] = (maps, nextTick())
+        frameFx.insert(key)
         return maps
     }
 
@@ -303,7 +325,8 @@ extension MetalCompositor {
             return v
         }
         let key = CPUCompositor.MaskKey(spec: spec, pixelVersion: try version(spec.pixel), vectorVersion: try version(spec.vector), canvas: ctx.canvas)
-        if let hit = maskCache[key] { maskCache[key] = (hit.mask, nextTick()); return hit.mask }
+        if let hit = maskCache[key] { maskCache[key] = (hit.mask, nextTick()); frameMasks.insert(key); return hit.mask }
+        let allocatedBefore = mapBytesAllocated
         let pixel = try get(spec.pixel), vector = try get(spec.vector)
         let sv = vector == nil ? 0 : MaskSpec.featherSigma(spec.vectorFeather)
         let sp = pixel == nil ? 0 : MaskSpec.featherSigma(spec.feather)
@@ -317,11 +340,12 @@ extension MetalCompositor {
         if area.isEmpty {
             let m = GPUMask(area: .empty, texture: nil, outside: outside)
             maskCache[key] = (m, nextTick())
+            frameMasks.insert(key)
             return m
         }
         let me = MapEncoder(c: self, enc: try encoder(), region: area)
         func gather(_ id: LeafID, _ leaf: RenderLeaf, density: Float) throws -> any MTLTexture {
-            let b = residency.bind(id, leaf, values: true, cell: area)
+            let b = residency.bind(id, leaf, values: true, cell: area, gather: true)
             var o = me.op()
             o.leafOutside = b.outside
             if b.texture != nil { o.flags |= PCROp.flagLeaf; o.leafOrigin = b.origin; o.leafSize = b.size }
@@ -372,6 +396,7 @@ extension MetalCompositor {
         guard let first = a else {
             let m = GPUMask(area: .empty, texture: nil, outside: outside)
             maskCache[key] = (m, nextTick())
+            frameMasks.insert(key)
             return m
         }
         var o = me.op()
@@ -380,7 +405,9 @@ extension MetalCompositor {
         if let b { tex[Slot.b] = b }
         let t = try me.run("pcr_mask_combine", o, tex)
         let m = GPUMask(area: area, texture: t, outside: outside)
+        m.buildBytes = max(0, mapBytesAllocated - allocatedBefore - m.allocated)
         maskCache[key] = (m, nextTick())
+        frameMasks.insert(key)
         return m
     }
 }

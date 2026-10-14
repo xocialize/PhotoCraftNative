@@ -187,12 +187,22 @@ public enum AccumulatorPrecision: Sendable, Hashable {
 }
 
 /// A pool of same-sized textures reused across ops and chunks, placed in heaps (the transient
-/// per-render working set).
+/// per-render working set). Heaps never shrink on their own; `trim` and `purge` drop them between
+/// renders (under the compositor's lock, so none is in flight). Each heap remembers the last
+/// render that took a texture from it, which is how a view's working set is measured.
 final class TexturePool: @unchecked Sendable {
     let device: any MTLDevice
     private var free: [Key: [any MTLTexture]] = [:]
     private var heaps: [any MTLHeap] = []
+    /// Render (frame) that last took a texture from each heap, and the last view render that did.
+    private var heapUse: [ObjectIdentifier: UInt64] = [:]
+    private var heapViewUse: [ObjectIdentifier: UInt64] = [:]
+    /// Textures made outside a heap (when a heap couldn't be made).
+    private var loose: [ObjectIdentifier: Int] = [:]
     private(set) var allocatedBytes = 0
+    /// The render taking textures now, and whether it draws a view (`MetalCompositor.render` sets them).
+    var frame: UInt64 = 0
+    var frameIsView = false
 
     struct Key: Hashable { let w: Int, h: Int, format: MTLPixelFormat.RawValue }
 
@@ -205,12 +215,18 @@ final class TexturePool: @unchecked Sendable {
         return d
     }
 
+    private func mark(_ t: any MTLTexture) {
+        guard let h = t.heap else { return }
+        heapUse[ObjectIdentifier(h)] = frame
+        if frameIsView { heapViewUse[ObjectIdentifier(h)] = frame }
+    }
+
     func take(_ w: Int, _ h: Int, _ format: MTLPixelFormat) -> any MTLTexture {
         let key = Key(w: w, h: h, format: format.rawValue)
-        if var list = free[key], let t = list.popLast() { free[key] = list; return t }
+        if var list = free[key], let t = list.popLast() { free[key] = list; mark(t); return t }
         let d = descriptor(w, h, format)
         for heap in heaps {
-            if let t = heap.makeTexture(descriptor: d) { return t }
+            if let t = heap.makeTexture(descriptor: d) { mark(t); return t }
         }
         // A new heap for a batch of eight such textures.
         let sa = device.heapTextureSizeAndAlign(descriptor: d)
@@ -220,15 +236,53 @@ final class TexturePool: @unchecked Sendable {
         hd.size = (sa.size + sa.align) * 8
         if let heap = device.makeHeap(descriptor: hd), let t = heap.makeTexture(descriptor: d) {
             heaps.append(heap)
-            allocatedBytes += hd.size
+            allocatedBytes += heap.size
+            mark(t)
             return t
         }
-        return device.makeTexture(descriptor: d)!
+        let t = device.makeTexture(descriptor: d)!
+        loose[ObjectIdentifier(t)] = t.allocatedSize
+        allocatedBytes += t.allocatedSize
+        return t
     }
 
     func give(_ t: any MTLTexture) {
         free[Key(w: t.width, h: t.height, format: t.pixelFormat.rawValue), default: []].append(t)
     }
 
-    func purge() { free.removeAll(); heaps.removeAll(); allocatedBytes = 0 }
+    /// Drops every heap; returns the bytes released.
+    @discardableResult
+    func purge() -> Int {
+        let n = allocatedBytes
+        free.removeAll(); heaps.removeAll(); heapUse.removeAll(); heapViewUse.removeAll(); loose.removeAll(); allocatedBytes = 0
+        return n
+    }
+
+    /// Heap bytes the render of `frame` took textures from (its accumulators' working set).
+    func bytes(touchedIn frame: UInt64) -> Int {
+        heaps.reduce(0) { $0 + (heapUse[ObjectIdentifier($1)] == frame ? $1.size : 0) }
+    }
+
+    /// Keeps the heaps the view renders `frames` used and the `idle` most recently used others;
+    /// drops the rest (and every loose texture). Returns the bytes released.
+    @discardableResult
+    func trim(keeping frames: Set<UInt64>, idle: Int) -> Int {
+        let others = heaps.filter { !frames.contains(heapViewUse[ObjectIdentifier($0)] ?? 0) }
+            .sorted { (heapUse[ObjectIdentifier($0)] ?? 0) > (heapUse[ObjectIdentifier($1)] ?? 0) }
+        let dropped = others.dropFirst(max(idle, 0))
+        if dropped.isEmpty && loose.isEmpty { return 0 }
+        let gone = Set(dropped.map { ObjectIdentifier($0) })
+        for (k, list) in free {
+            free[k] = list.filter { t in
+                if let h = t.heap { return !gone.contains(ObjectIdentifier(h)) }
+                return false
+            }
+        }
+        let freed = dropped.reduce(0) { $0 + $1.size } + loose.values.reduce(0, +)
+        heaps.removeAll { gone.contains(ObjectIdentifier($0)) }
+        for id in gone { heapUse.removeValue(forKey: id); heapViewUse.removeValue(forKey: id) }
+        loose.removeAll()
+        allocatedBytes -= freed
+        return freed
+    }
 }

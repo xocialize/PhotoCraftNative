@@ -5,7 +5,10 @@
 // (a brush dab re-uploads the touched 256² tiles, undo swaps them back). RGBA8 / RGBA16 / RGBA32F
 // tiles and Gray8/16/32F masks upload without conversion; other models go through `readRGBA`.
 // Rendered images (vector coverage, effect shapes) upload once per version. Pages over the memory
-// budget are evicted least recently used first, never one the current render uses.
+// budget are evicted least recently used first, never one the current render uses (eviction counts
+// logical bytes, area × bytes per pixel). For the canvas's memory declaration, Metal's allocation
+// sizes are reported per kind (cell pages, leaf images, feathered-mask gather pages), and pages can
+// be shed by key (`MetalCompositor.relieve`).
 
 import Foundation
 import Metal
@@ -24,6 +27,10 @@ final class ResidencyCache: @unchecked Sendable {
     let device: any MTLDevice
     /// Bytes resident pages may hold.
     var budget: Int
+    /// A tighter cap set by the compositor (memory budget, relief); nil: `budget`.
+    var cap: Int?
+    /// Entries a capped eviction never takes (the views' visible pages).
+    var protected: Set<Key> = []
     private var entries: [Key: Entry] = [:]
     private var frame: UInt64 = 0
     /// Tiles uploaded since creation (tests, profiling).
@@ -43,11 +50,22 @@ final class ResidencyCache: @unchecked Sendable {
         var generations: [TileCoord: UInt64]
         var version: UInt64
         var bytes: Int
+        /// Metal's allocation size of `texture`.
+        let allocated: Int
         var used: UInt64
+        /// Bound last by a feathered mask's build (not by a cell: a warm frame doesn't read it).
+        var gather = false
         init(texture: any MTLTexture, rect: PixelRect, format: PixelFormat?, defaultBits: [UInt32], version: UInt64, bytes: Int) {
             self.texture = texture; self.rect = rect; self.format = format; self.defaultBits = defaultBits
             self.generations = [:]; self.version = version; self.bytes = bytes; self.used = 0
+            allocated = texture.allocatedSize
         }
+    }
+
+    /// Bytes by kind: cell pages of surfaces, derived leaf images, mask gather pages.
+    struct Bytes: Equatable {
+        var pages = 0, images = 0, gather = 0
+        var total: Int { pages + images + gather }
     }
 
     init(device: any MTLDevice, budget: Int) { self.device = device; self.budget = budget }
@@ -58,6 +76,37 @@ final class ResidencyCache: @unchecked Sendable {
 
     /// Starts a render (entries used from now on are not evicted until the next one).
     func beginFrame() { frame += 1 }
+
+    /// The current render's frame number.
+    var currentFrame: UInt64 { frame }
+
+    /// Allocated bytes by kind, of every entry or of `keys` only.
+    func bytes(of keys: Set<Key>? = nil) -> Bytes {
+        var b = Bytes()
+        for (k, e) in entries where keys?.contains(k) ?? true {
+            if e.gather { b.gather += e.allocated } else if k.cell.x == Int32.min { b.images += e.allocated } else { b.pages += e.allocated }
+        }
+        return b
+    }
+
+    /// Allocated bytes of every entry.
+    var allocatedBytes: Int { entries.values.reduce(0) { $0 + $1.allocated } }
+
+    /// Pages and images the render of `frame` bound for its cells (gather pages excluded).
+    func keys(usedIn frame: UInt64) -> Set<Key> {
+        Set(entries.compactMap { $0.value.used == frame && !$0.value.gather ? $0.key : nil })
+    }
+
+    /// Drops every entry not in `keep`; returns the allocated bytes dropped.
+    @discardableResult
+    func drop(keeping keep: Set<Key>) -> Int {
+        var freed = 0
+        for (k, e) in entries where !keep.contains(k) {
+            freed += e.allocated
+            entries.removeValue(forKey: k)
+        }
+        return freed
+    }
 
     /// The texture format a surface's tiles upload to without conversion, if any.
     static func directFormat(_ f: PixelFormat, values: Bool) -> MTLPixelFormat? {
@@ -86,11 +135,12 @@ final class ResidencyCache: @unchecked Sendable {
         return probe.readRGBA(PixelRect(x: 0, y: 0, width: 1, height: 1))[0]
     }
 
-    /// Binds `leaf` for the document area `cell` (a page cell or an image's rect).
-    func bind(_ id: LeafID, _ leaf: RenderLeaf, values: Bool, cell: PixelRect) -> LeafBinding {
+    /// Binds `leaf` for the document area `cell` (a page cell or an image's rect); `gather`: for a
+    /// feathered mask's build rather than a cell.
+    func bind(_ id: LeafID, _ leaf: RenderLeaf, values: Bool, cell: PixelRect, gather: Bool = false) -> LeafBinding {
         switch leaf {
-        case .surface(let s): return bindSurface(id, s, values: values, cell: cell)
-        case let .image(img, outside, version): return bindImage(id, img, outside: outside, version: version, values: values)
+        case .surface(let s): return bindSurface(id, s, values: values, cell: cell, gather: gather)
+        case let .image(img, outside, version): return bindImage(id, img, outside: outside, version: version, values: values, gather: gather)
         }
     }
 
@@ -101,12 +151,13 @@ final class ResidencyCache: @unchecked Sendable {
         return device.makeTexture(descriptor: d)
     }
 
-    private func bindImage(_ id: LeafID, _ img: FloatImage, outside: SIMD4<Float>, version: UInt64, values: Bool) -> LeafBinding {
+    private func bindImage(_ id: LeafID, _ img: FloatImage, outside: SIMD4<Float>, version: UInt64, values: Bool, gather: Bool) -> LeafBinding {
         let key = Key(leaf: id, cell: SIMD2(Int32.min, Int32.min), values: values)
         let rect = img.rect
         if rect.isEmpty { return LeafBinding(texture: nil, origin: .zero, size: .zero, outside: outside) }
         if let e = entries[key], e.version == version, e.rect == rect {
             e.used = frame
+            e.gather = gather
             return LeafBinding(texture: e.texture, origin: SIMD2(rect.x0, rect.y0), size: SIMD2(Int32(rect.width), Int32(rect.height)), outside: outside)
         }
         let fmt: MTLPixelFormat = values ? .r32Float : .rgba32Float
@@ -120,12 +171,13 @@ final class ResidencyCache: @unchecked Sendable {
         }
         let e = Entry(texture: tex, rect: rect, format: nil, defaultBits: [], version: version, bytes: rect.area * ResidencyCache.bytesPerPixel(fmt))
         e.used = frame
+        e.gather = gather
         entries[key] = e
         evict()
         return LeafBinding(texture: tex, origin: SIMD2(rect.x0, rect.y0), size: SIMD2(Int32(rect.width), Int32(rect.height)), outside: outside)
     }
 
-    private func bindSurface(_ id: LeafID, _ s: Surface, values: Bool, cell: PixelRect) -> LeafBinding {
+    private func bindSurface(_ id: LeafID, _ s: Surface, values: Bool, cell: PixelRect, gather: Bool) -> LeafBinding {
         let outside = ResidencyCache.surfaceOutside(s, values: values)
         // The tile area inside the cell (rounded out to whole tiles).
         let tiles = cell.tiles
@@ -148,6 +200,7 @@ final class ResidencyCache: @unchecked Sendable {
         }
         guard let e = entry else { return LeafBinding(texture: nil, origin: .zero, size: .zero, outside: outside) }
         e.used = frame
+        e.gather = gather
         let ts = Int(tileSize)
         let bpp = ResidencyCache.bytesPerPixel(fmt)
         var defaultTile: [UInt8]?
@@ -201,13 +254,16 @@ final class ResidencyCache: @unchecked Sendable {
         return [SIMD4<Float>](repeating: o, count: n).withUnsafeBytes { Array($0) }
     }
 
-    /// Least recently used pages first, never one used in the current frame.
-    private func evict() {
+    /// Least recently used pages first, never one used in the current frame (nor, under a cap, a
+    /// protected one).
+    func evict() {
+        let limit = cap ?? budget
         var total = residentBytes
-        if total <= budget { return }
-        let lru = entries.filter { $0.value.used != frame }.sorted { $0.value.used < $1.value.used }
+        if total <= limit { return }
+        let guarded = cap != nil
+        let lru = entries.filter { $0.value.used != frame && !(guarded && protected.contains($0.key)) }.sorted { $0.value.used < $1.value.used }
         for (k, e) in lru {
-            if total <= budget { break }
+            if total <= limit { break }
             entries.removeValue(forKey: k)
             total -= e.bytes
         }
