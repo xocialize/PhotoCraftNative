@@ -145,15 +145,15 @@ final class ResidencyCache: @unchecked Sendable {
         Set(entries.compactMap { $0.value.shown == frame ? $0.key : nil })
     }
 
-    /// Drops every entry not in `keep`; returns the allocated bytes dropped.
-    @discardableResult
-    func drop(keeping keep: Set<Key>) -> Int {
-        var freed = 0
+    /// Drops every entry not in `keep` and returns them: a texture is deallocated when its last
+    /// reference goes, so the caller decides where (the compositor, outside its lock).
+    func drop(keeping keep: Set<Key>) -> [Entry] {
+        var dropped: [Entry] = []
         for (k, e) in entries where !keep.contains(k) {
-            freed += e.allocated
+            dropped.append(e)
             entries.removeValue(forKey: k)
         }
-        return freed
+        return dropped
     }
 
     /// The texture format a surface's tiles upload to without conversion, if any.

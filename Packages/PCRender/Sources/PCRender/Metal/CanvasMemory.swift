@@ -11,6 +11,12 @@
 // its own) records the pages, leaf images, effect maps and masks of that render. A run-level
 // shrink keeps all of it, because the next frame would re-upload it (AB-R-0303: a 260–360 ms
 // stall per edit, for no lasting relief).
+//
+// A shrink takes entries out of the caches under the compositor's lock, so the declaration falls
+// at once, but lets go of their textures and heaps afterwards, on a utility queue: releasing them
+// is Metal's deallocation, about 9 ms per GB of pages, and 2.6 GB of closed documents' pages
+// held the lock for 21–65 ms (AB-T-0260). Phys follows a few ms later; the engine credits the
+// declared drop at once (AB-A-0169 §2).
 
 import Foundation
 import Metal
@@ -241,15 +247,18 @@ extension MetalCompositor {
 
     /// Sheds every rung up to `level`; returns the bytes the declaration (`persistent + transient`)
     /// fell by. Runs on the calling thread under the compositor's lock, so it waits for a render in
-    /// flight and nothing it drops is still in use on the GPU.
+    /// flight and nothing it drops is still in use on the GPU. What it drops is released after the
+    /// lock (`waitForReleases`).
     @discardableResult
     public func relieve(_ level: ReliefLevel) -> Int {
+        let dropped = Dropped()
         let (freed, fp): (Int, CompositorFootprint) = locked {
             let before = footprintLocked().declared
-            for rung in ReliefLevel.allCases where rung <= level { shed(rung) }
+            for rung in ReliefLevel.allCases where rung <= level { shed(rung, into: dropped) }
             let fp = publish()
             return (before - fp.declared, fp)
         }
+        release(dropped)
         notify(fp)
         return freed
     }
@@ -257,7 +266,9 @@ extension MetalCompositor {
     /// Walks the ladder for `reason` (`ReliefReason.deepest`), one rung at a time, stopping once
     /// `requested` bytes are freed. Never sheds what a view's last render used on a run, and skips
     /// `.effects` when the next frame's rebuild would cost the declaration more than it frees.
+    /// What it drops is released after the lock (`waitForReleases`).
     public func relieve(requested: Int, reason: ReliefReason) -> Relief {
+        let dropped = Dropped()
         let t0 = Self.clock()
         lock.lock()
         let t1 = Self.clock()
@@ -273,7 +284,7 @@ extension MetalCompositor {
                     rungs.append((rung, 0))
                     continue
                 }
-                shed(rung)
+                shed(rung, into: dropped)
                 let after = footprintLocked().declared
                 rungs.append((rung, before - after))
                 total += before - after
@@ -284,9 +295,14 @@ extension MetalCompositor {
         let fp = publish()
         let t2 = Self.clock()
         lock.unlock()
+        release(dropped)
         notify(fp)
         return Relief(requested: requested, rungs: rungs, footprint: fp, waited: t1 - t0, elapsed: t2 - t1)
     }
+
+    /// Waits until what earlier shrinks dropped has been released, so the device's allocation count
+    /// can show it (benches, tests; Metal may still retire the memory a little later).
+    public func waitForReleases() { Self.releases.sync {} }
 
     /// Pressure has cleared: the normal caps and render cells come back. Lazily: nothing is
     /// re-allocated until a render needs it.
@@ -299,21 +315,41 @@ extension MetalCompositor {
         notify(fp)
     }
 
-    /// One rung (under the lock).
-    private func shed(_ rung: ReliefLevel) {
+    /// What a shrink took out of the caches: owned only here until `release`, so the textures and
+    /// heaps are deallocated where it lets go of them.
+    final class Dropped: @unchecked Sendable {
+        var items: [Any] = []
+    }
+
+    /// The serial queue shrinks release on (utility: phys may lag the declaration a few ms).
+    static let releases = DispatchQueue(label: "PCRender.MetalCompositor.releases", qos: .utility)
+
+    /// Lets go of what a shrink dropped, after the lock and off the calling thread (the engine's
+    /// shedder answers without waiting for Metal's deallocation).
+    private func release(_ dropped: Dropped) {
+        guard !dropped.items.isEmpty else { return }
+        Self.releases.async { dropped.items.removeAll() }
+    }
+
+    /// One rung (under the lock). A cache's old contents go to `dropped`: what the rung keeps is in
+    /// the new one too, so only what it sheds is deallocated when `dropped` is released.
+    private func shed(_ rung: ReliefLevel, into dropped: Dropped) {
         switch rung {
         case .scratch:
-            pool.purge()
+            dropped.items.append(pool.purge())
         case .patterns:
+            dropped.items.append(patternCache)
             patternCache.removeAll()
         case .offscreen:
-            residency.drop(keeping: visiblePageKeys())
+            dropped.items.append(residency.drop(keeping: visiblePageKeys()))
             let (fx, masks) = visibleEffectKeys()
+            dropped.items.append(fxCache); dropped.items.append(maskCache)
             fxCache = fxCache.filter { fx.contains($0.key) }
             maskCache = maskCache.filter { masks.contains($0.key) }
         case .lowFootprint:
             break
         case .effects:
+            dropped.items.append(fxCache); dropped.items.append(maskCache)
             fxCache.removeAll(); maskCache.removeAll()
         }
         // The caps hold the caches at what the off-screen rung left (the visible set): panning

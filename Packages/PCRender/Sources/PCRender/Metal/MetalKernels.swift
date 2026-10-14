@@ -252,12 +252,13 @@ final class TexturePool: @unchecked Sendable {
         free[Key(w: t.width, h: t.height, format: t.pixelFormat.rawValue), default: []].append(t)
     }
 
-    /// Drops every heap; returns the bytes released.
+    /// Drops every heap; returns the heaps and free textures it let go of, for the caller to release
+    /// where it chooses (the compositor, outside its lock).
     @discardableResult
-    func purge() -> Int {
-        let n = allocatedBytes
+    func purge() -> [AnyObject] {
+        let dropped: [AnyObject] = heaps.map { $0 as AnyObject } + free.values.joined().map { $0 as AnyObject }
         free.removeAll(); heaps.removeAll(); heapUse.removeAll(); heapViewUse.removeAll(); loose.removeAll(); allocatedBytes = 0
-        return n
+        return dropped
     }
 
     /// Heap bytes the render of `frame` took textures from (its accumulators' working set).

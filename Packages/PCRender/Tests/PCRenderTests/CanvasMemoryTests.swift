@@ -121,6 +121,27 @@ import Testing
         #expect(after.transient > before.transient)
     }
 
+    /// AB-T-0260: the declaration falls under the lock, but what a shrink drops is released after
+    /// it, on the release queue (Metal's deallocation, ~9 ms per GB, would hold the lock).
+    @Test func whatAShrinkDropsIsReleasedAfterTheLock() throws {
+        guard let r = Self.rig() else { return }
+        try r.prime()
+        final class Weak { weak var object: AnyObject?; init(_ o: AnyObject) { object = o } }
+        let held = r.metal.fxCache.values.map { Weak($0.maps) } + r.metal.maskCache.values.map { Weak($0.mask) }
+        #expect(!held.isEmpty)
+        // Hold the release queue: the shrink must neither wait for it nor release on this thread.
+        let gate = DispatchSemaphore(value: 0)
+        MetalCompositor.releases.async { gate.wait() }
+        let before = r.metal.footprint
+        let freed = r.metal.relieve(.effects)
+        #expect(freed == before.declared - r.metal.footprint.declared)
+        #expect(r.metal.fxCache.isEmpty && r.metal.maskCache.isEmpty && r.metal.footprint.poolHeaps == 0)
+        #expect(held.allSatisfy { $0.object != nil }, "released before the release queue ran")
+        gate.signal()
+        r.metal.waitForReleases()
+        #expect(held.allSatisfy { $0.object == nil }, "still held after the release queue ran")
+    }
+
     @Test func lowFootprintCellsRenderTheSamePixels() throws {
         guard let r = Self.rig(chunk: 1024) else { return }
         let p = r.gpu.plan(Self.doc, region: Self.doc.bounds)
