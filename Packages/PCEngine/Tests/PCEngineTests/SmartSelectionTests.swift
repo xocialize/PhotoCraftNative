@@ -233,6 +233,17 @@ import Testing
 @Suite struct SmartStackCacheTests {
     typealias F = SmartFixture
 
+    @Test func stagesTrimForMemoryPressure() throws {
+        let key: SmartCommands.StackCache.Key = Array("memory-pressure trim test".utf8)
+        var surface = Surface(format: PixelFormat(mode: .rgb, sample: .u8, alpha: true))
+        surface.fill(PixelRect(x: 0, y: 0, width: 300, height: 300), with: [1, 0, 0, 1])
+        SmartCommands.StackCache.put(key, .init(surface: surface, extent: surface.contentBounds))
+        #expect(SmartCommands.StackCache.get(key) != nil)
+        #expect(MemoryPressureRelay.shared.registered.contains("smart-object stages"))
+        #expect(SmartCommands.StackCache.trim(.critical) >= SmartCommands.StackCache.surfaceBytes(surface))
+        #expect(SmartCommands.StackCache.get(key) == nil)
+    }
+
     /// A smart object with three smart filters, the middle one blended at half opacity.
     func filtered(_ depth: Int) throws -> Session {
         let s = try F.session(depth)

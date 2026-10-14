@@ -47,6 +47,26 @@ public final class CPUCompositor: @unchecked Sendable {
         return fxCache.values.reduce(0) { $0 + $1.maps.bytes } + maskCache.values.reduce(0) { $0 + $1.mask.values.count * 4 }
     }
 
+    /// Trims the cached maps and masks for memory pressure, oldest first: to half the bytes held on
+    /// a warning, all of them when critical. Returns the bytes freed.
+    @discardableResult
+    public func trim(_ level: MemoryPressureRelay.Level) -> Int {
+        lock.lock(); defer { lock.unlock() }
+        let held = fxCache.values.reduce(0) { $0 + $1.maps.bytes } + maskCache.values.reduce(0) { $0 + $1.mask.values.count * 4 }
+        let target = level == .critical ? 0 : held / 2
+        var bytes = held
+        while bytes > target && fxCache.count + maskCache.count > 0 {
+            let oldFx = fxCache.min { $0.value.tick < $1.value.tick }
+            let oldMask = maskCache.min { $0.value.tick < $1.value.tick }
+            if let f = oldFx, oldMask.map({ f.value.tick < $0.value.tick }) ?? true {
+                bytes -= f.value.maps.bytes; fxCache.removeValue(forKey: f.key)
+            } else if let m = oldMask {
+                bytes -= m.value.mask.values.count * 4; maskCache.removeValue(forKey: m.key)
+            }
+        }
+        return held - bytes
+    }
+
     /// Composites `plan` over `region` (straight-alpha RGBA).
     public func render(_ plan: RenderPlan, region: PixelRect, source: any RenderSource) throws -> RGBABuffer {
         try plan.validate()

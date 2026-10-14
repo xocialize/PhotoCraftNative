@@ -70,6 +70,7 @@ extension SmartCommands {
         }
 
         static func put(_ key: Key, _ stage: Stage) {
+            _ = pressure
             let n = surfaceBytes(stage.surface)
             if n > budget { return }
             stages.withLock { c in
@@ -81,6 +82,22 @@ extension SmartCommands {
 
         /// Bytes held by cached stages.
         static func bytes() -> Int { stages.withLock { $0.reduce(0) { $0 + $1.bytes } } }
+
+        /// Registered with `MemoryPressureRelay.shared` once a stage is first cached.
+        static let pressure = MemoryPressureRelay.shared.register("smart-object stages") { trim($0) }
+
+        /// Trims for memory pressure, least recently used first: to half the bytes on a warning,
+        /// everything when critical. Returns the bytes released.
+        @discardableResult
+        static func trim(_ level: MemoryPressureRelay.Level) -> Int {
+            stages.withLock { c in
+                let held = c.reduce(0) { $0 + $1.bytes }
+                let target = level == .critical ? 0 : held / 2
+                var total = held
+                while total > target, !c.isEmpty { total -= c.removeFirst().bytes }
+                return held - total
+            }
+        }
 
         /// Drops every cached stage (Edit › Purge › All). Returns the bytes released.
         @discardableResult

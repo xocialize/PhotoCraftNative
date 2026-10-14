@@ -148,6 +148,41 @@ public final class AlgoGPU: @unchecked Sendable {
 
     init(metal: MetalContext, library: any MTLLibrary) {
         self.metal = metal; self.library = library
+        pressure = MemoryPressureRelay.shared.register("PCAlgo reusable textures") { [weak self] in self?.trimCaches($0) ?? 0 }
+    }
+
+    /// Keeps the reusable textures and staging buffers registered with `MemoryPressureRelay.shared`.
+    private var pressure: MemoryPressureRegistration?
+
+    /// Bytes of private textures and staging buffers kept for reuse across runs (GPU memory outside
+    /// any canvas declaration; it counts in the process's footprint).
+    public var cachedBytes: Int {
+        textureLock.lock(); let t = textureCacheBytes; textureLock.unlock()
+        stagingLock.lock(); let s = staging.reduce(0) { $0 + $1.length }; stagingLock.unlock()
+        return t + s
+    }
+
+    /// Trims the reusable textures (oldest first) to half on a warning; drops them and the staging
+    /// buffers when critical. In-flight runs are unaffected (they hold their own). Returns the
+    /// bytes freed.
+    @discardableResult
+    public func trimCaches(_ level: MemoryPressureRelay.Level) -> Int {
+        textureLock.lock()
+        let held = textureCacheBytes
+        let target = level == .critical ? 0 : held / 2
+        while textureCacheBytes > target, !textureCache.isEmpty {
+            let t = textureCache.removeFirst()
+            textureCacheBytes -= t.width * t.height * 16
+        }
+        var freed = held - textureCacheBytes
+        textureLock.unlock()
+        if level == .critical {
+            stagingLock.lock()
+            freed += staging.reduce(0) { $0 + $1.length }
+            staging.removeAll()
+            stagingLock.unlock()
+        }
+        return freed
     }
 
     public var device: any MTLDevice { metal.device }

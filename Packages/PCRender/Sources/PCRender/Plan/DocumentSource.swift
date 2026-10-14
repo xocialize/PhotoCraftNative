@@ -41,6 +41,29 @@ public final class DocumentLeafCache: @unchecked Sendable {
         return leaves.values.reduce(0) { $0 + $1.bytes }
     }
 
+    /// Trims for memory pressure: derived leaves to half their bytes (least recently used first) on
+    /// a warning; everything (leaves, rasterized layers, split shapes, pattern tiles) when critical.
+    /// Returns the bytes freed (surfaces counted by their tiles).
+    @discardableResult
+    public func trim(_ level: MemoryPressureRelay.Level) -> Int {
+        lock.lock(); defer { lock.unlock() }
+        let held = leaves.values.reduce(0) { $0 + $1.bytes }
+        if level == .critical {
+            func tiles(_ s: Surface?) -> Int { s.map { $0.tileCount * Int(tileSize) * Int(tileSize) * $0.format.bytesPerPixel } ?? 0 }
+            let others = rasters.values.reduce(0) { $0 + tiles($1.surface) }
+                + splits.values.reduce(0) { $0 + tiles($1.parts?.fill) + tiles($1.parts?.stroke) }
+                + patterns.values.reduce(0) { $0 + $1.premultiplied.count * 16 }
+            leaves.removeAll(); rasters.removeAll(); splits.removeAll(); patterns.removeAll()
+            return held + others
+        }
+        var total = held
+        while total > held / 2, let old = leaves.min(by: { $0.value.tick < $1.value.tick }) {
+            total -= old.value.bytes
+            leaves.removeValue(forKey: old.key)
+        }
+        return held - total
+    }
+
     func leaf(_ k: LeafKey) -> RenderLeaf? {
         lock.lock(); defer { lock.unlock() }
         guard let e = leaves[k] else { return nil }
