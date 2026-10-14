@@ -1,6 +1,7 @@
 // PCRender memory bench (new): the canvas's GPU declaration on a BenchmarkDocuments scene.
 //
 //   swift run -c release PCRenderBench --memory [--size 4096] [--runs 200] [--chunk 2048] [--low-cell 512]
+//                                      [--closed 7] [--closed-runs 20] [--closed-only]
 //
 // 1. Accessors against Metal's own allocation sizes (`allocatedSize`, heap sizes) and against the
 //    device's `currentAllocatedSize`, after a cold and three warm view renders of the whole document.
@@ -8,6 +9,10 @@
 //    renders the whole document off-view (as an export band would) and then a 2048² viewport.
 // 3. The 16 GB tier: a 12.7 GB budget, an admission shrink of everything, and the floor + transient
 //    it leaves, then the next frame in the low-footprint mode (its cost and what it measures).
+// 4. Closed documents (AB-T-0260; also alone with `--closed-only`, `--closed 7 --closed-runs 20`):
+//    at the 16 GB tier, `--closed` + 1 documents shown whole, then all but one closed, so their
+//    pages are off screen (the editor's drill: 7 closed, 2.65 GB). A model's admission asks for
+//    128 MiB; the offscreen rung drops them all. Timed under the lock, then the release after it.
 
 import Foundation
 import Metal
@@ -89,8 +94,10 @@ func memoryBench(size: Int, runs: Int, chunk: Int, lowCell: Int) throws {
     for level in ReliefLevel.allCases {
         try prime()
         for l in ReliefLevel.allCases where l < level { metal.relieve(l) }
+        metal.waitForReleases()
         let before = metal.footprint.persistent, dev0 = settled(device)
         metal.relieve(level)
+        metal.waitForReleases()
         let shed = before - metal.footprint.persistent, fell = dev0 - settled(device)
         print("\(level.description.padding(toLength: 12, withPad: " ", startingAt: 0)) \(mib(shed))      \(mib(fell))   \(pct(shed, fell))")
     }
@@ -154,6 +161,68 @@ func memoryBench(size: Int, runs: Int, chunk: Int, lowCell: Int) throws {
     _ = metal.relieve(.lowFootprint)
     let b = try metal.renderBuffer(q.plan, region: whole, source: q.source)
     print("low-footprint composite vs normal: \(a == b ? "identical" : "DIFFERENT")")
+}
+
+/// Section 4: an admission's 128 MiB request against `closed` closed documents' off-screen pages.
+func closedDocumentsBench(size: Int, closed: Int, runs: Int, chunk: Int) throws {
+    guard let device = MTLCreateSystemDefaultDevice() else { print("no Metal device"); return }
+    func mib(_ b: Int) -> String { String(format: "%9.1f MiB", Double(b) / 1_048_576) }
+    func quantile(_ xs: [Double], _ q: Double) -> Double {
+        let s = xs.sorted()
+        return s.isEmpty ? 0 : s[min(s.count - 1, Int((Double(s.count) * q).rounded(.up)) - 1)]
+    }
+    let load = { () -> String in
+        var l = [Double](repeating: 0, count: 3)
+        return getloadavg(&l, 3) == 3 ? String(format: "%.1f %.1f %.1f", l[0], l[1], l[2]) : "?"
+    }
+    print("\n== closed documents (AB-T-0260): \(closed) closed + 1 open realistic20 \(size)², chunk \(chunk), 16 GB tier, load average \(load())")
+
+    let metal = try MetalCompositor(chunkSize: chunk)
+    metal.memoryBudget = 12_700_000_000
+    let gpu = DocumentCompositor(backend: .metal, metal: metal)
+    let docs = (0...closed).map { _ in BenchmarkDocuments.realistic20(size: size) }
+    let open = docs[closed]
+    let canvas = try CanvasRenderer()
+    // Each closed document's canvas, as the editor's: shown whole, then gone (`forgetView`).
+    final class Canvas {}
+    let canvases = (0..<closed).map { _ in Canvas() }
+    let target = metal.context.makeTexture(width: size, height: size, pixelFormat: .rgba16Float, usage: [.shaderRead, .shaderWrite], storage: .private)
+    func reopen() throws {
+        metal.pressureCleared()
+        for (doc, c) in zip(docs, canvases) {
+            let p = gpu.plan(doc, region: doc.bounds)
+            _ = try metal.render(p.plan, region: doc.bounds, source: p.source, outputFormat: .rgba16Float, into: target, view: RenderView(c))
+        }
+        for c in canvases { metal.forgetView(RenderView(c)) }
+        let p = gpu.plan(open, region: open.bounds)
+        try canvas.show(p.plan, region: open.bounds, source: p.source, compositor: metal)
+    }
+
+    let requested = 128 << 20
+    var elapsed: [Double] = [], waited: [Double] = [], released: [Double] = []
+    var offscreen: [Int] = [], freed: [Int] = [], shed: [Int] = [], fell: [Int] = []
+    var last: Relief?
+    for _ in 0..<runs {
+        try reopen()
+        let fp = metal.footprint
+        offscreen.append(fp.pages + fp.leafImages + fp.gatherPages - fp.visiblePages)
+        let dev0 = settled(device)
+        let r = metal.relieve(requested: requested, reason: .admission)
+        // What the release queue still had to do once relieve answered.
+        let t0 = Double(DispatchTime.now().uptimeNanoseconds) / 1e9
+        metal.waitForReleases()
+        released.append(Double(DispatchTime.now().uptimeNanoseconds) / 1e9 - t0)
+        elapsed.append(r.elapsed); waited.append(r.waited); freed.append(r.freed)
+        shed.append(fp.persistent - r.footprint.persistent)
+        fell.append(dev0 - settled(device))
+        last = r
+    }
+    func mean(_ xs: [Int]) -> Int { xs.reduce(0, +) / max(xs.count, 1) }
+    print("off-screen pages before the request: mean \(mib(mean(offscreen))) (min \(mib(offscreen.min() ?? 0)))")
+    print("relieve(requested: 128 MiB, .admission), \(runs) runs: p50 \(ms(quantile(elapsed, 0.5))), p99 \(ms(quantile(elapsed, 0.99))), max \(ms(elapsed.max() ?? 0)) under the lock (lock wait max \(ms(waited.max() ?? 0)))")
+    print("  rungs: \(last.map { $0.rungs.map { "\($0.level) \(mib($0.freed))" }.joined(separator: ", ") } ?? "")")
+    print("  declaration fell by \(mib(mean(freed))) (persistent \(mib(mean(shed)))); the device count by \(mib(mean(fell))) once released")
+    print("  release after the lock: p50 \(ms(quantile(released, 0.5))), max \(ms(released.max() ?? 0)) still to go when relieve answered; load average \(load())")
 }
 
 /// The device's allocation count once it stops falling (Metal retires freed memory late).

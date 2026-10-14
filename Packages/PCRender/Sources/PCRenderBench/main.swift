@@ -1,7 +1,7 @@
 // PCRender benchmark (new; scenes from BenchmarkDocuments). Composites photocraft-compose semantics (MIT OR Apache-2.0, © ArtCraft Team and the PhotoCraft contributors).
 //
 //   swift run -c release PCRenderBench [--size 4096] [--cpu-runs 3] [--gpu-runs 12] [--scene effects4|realistic20|all]
-//   swift run -c release PCRenderBench --memory [--size 4096] [--runs 200] (MemoryBench.swift)
+//   swift run -c release PCRenderBench --memory [--size 4096] [--runs 200] [--closed 7] [--closed-runs 20] [--closed-only] (MemoryBench.swift)
 //   swift run -c release PCRenderBench --level [--size 30000] [--drawable 5120x2880] [--parity] (LevelBench.swift)
 //
 // For each scene: planning time, the CPU reference (cold = first render, building effect maps and
@@ -47,8 +47,11 @@ if CommandLine.arguments.contains("--level") {
     exit(0)
 }
 if CommandLine.arguments.contains("--memory") {
-    try memoryBench(size: size, runs: Int(arg("--runs", "200")) ?? 200, chunk: Int(arg("--chunk", "2048")) ?? 2048,
-                    lowCell: Int(arg("--low-cell", "512")) ?? 512)
+    let chunk = Int(arg("--chunk", "2048")) ?? 2048
+    if !CommandLine.arguments.contains("--closed-only") {
+        try memoryBench(size: size, runs: Int(arg("--runs", "200")) ?? 200, chunk: chunk, lowCell: Int(arg("--low-cell", "512")) ?? 512)
+    }
+    try closedDocumentsBench(size: size, closed: Int(arg("--closed", "7")) ?? 7, runs: Int(arg("--closed-runs", "20")) ?? 20, chunk: chunk)
     exit(0)
 }
 
