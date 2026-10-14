@@ -75,7 +75,7 @@ PCDocument ──DocumentPlanner──▶ RenderPlan (DrawOp stack program) + Do
 | `Bench/BenchmarkDocuments.swift` | (new) | procedural `effects4` / `realistic20` scenes |
 | `Tests/PCRenderTests/PhotoshopM1Tests.swift` | (new) | Photoshop 27.11 function-oracle fits (batches M1, M2), PCIO's phase-4 requests, B/C modes |
 | `Sources/PCRenderBench/main.swift` | (new) | `swift run -c release PCRenderBench` |
-| `Sources/PCRenderBench/MemoryBench.swift` | (new) | `PCRenderBench --memory`: accessors against the device's count, `relieve` timing, the 16 GB tier |
+| `Sources/PCRenderBench/MemoryBench.swift` | (new) | `PCRenderBench --memory`: accessors against the device's count, `relieve` timing, the 16 GB tier, an admission against closed documents' pages |
 
 ## Phase 2: planner and leaves
 
@@ -557,6 +557,13 @@ maps them onto its engine's declaration. ForgeCanvasUI's `CanvasPressurePolicy` 
 
   `.run` stops at `offscreen`, so the next frame uploads no tile and rebuilds no map (AB-R-0303).
   `pressureCleared()` brings the caps and cells back lazily.
+* **Release (AB-T-0260).** A rung takes entries out of the caches under the lock, so the footprint
+  and `Relief.freed` fall at once. It lets go of their textures and heaps afterwards, on a utility
+  queue (`MetalCompositor.releases`). Releasing them is Metal's deallocation, about 9 ms per GB of
+  pages: 2.6 GB of closed documents' pages had held the lock up to 110 ms. Phys follows tens of ms
+  later, and the engine credits the declared drop at once (AB-A-0169 §2). `waitForReleases()` waits
+  for the queue (benches, tests). A new cache that a rung sheds must hand its old contents to
+  `shed`'s `dropped`, or its deallocation is back under the lock.
 * **CPU caches.** `MemoryPressureRelay` (PCFoundation) relays the system's memory-pressure events to
   registered trims: CPUCompositor's maps and masks, `DocumentLeafCache`, PCAlgo's reusable textures
   and PCEngine's smart-object stages. A warning trims each to half; critical empties them. Nothing
@@ -586,6 +593,39 @@ min(4 GiB, ¼ of `recommendedMaxWorkingSetSize`), so roughly 2.7 GB on a 16 GB M
 measured here) is GPU memory too. It trims on memory
 pressure, and a host can add it to its declaration and call `trimCaches(.critical)` from its
 shedder (its own lock, never the compositor's).
+
+### Releasing after the lock (AB-T-0260)
+
+PixelAgencyEditor's tenant drill (AB-T-0253) closed seven of eight 4096² documents. An admission
+asking for 107 MiB then dropped all 2.65 GB of their off-screen pages in the `offscreen` rung. That
+held the lock 21–28 ms on a quiet machine and 65 ms while two builds compiled. The time was Metal's
+deallocation, so it grew with the bytes dropped. `PCRenderBench --memory --closed-only` rebuilds the
+case: 7 closed and 1 open realistic20 4096² documents at the 16 GB tier leave 2,664 MiB of
+off-screen pages. `relieve(requested: 128 MiB, .admission)` then takes `offscreen`. That rung frees
+3,406.6 MiB of declaration, or 3,920.7 MiB of persistent memory counting the 514 MiB of heaps the
+next frame regrows. The device count falls by exactly that once released.
+
+Time under the lock, 20 runs each, Apple M5 Max, Release, 0.3.0 and the fix run back to back. The
+load is the 1-minute load average; the machine ran other sessions' test suites throughout:
+
+| Load | 0.3.0, p50 / max | Fix, p50 / max | Fix: release left after the lock, p50 / max |
+|---|---|---|---|
+| 26–40 | 12.3 / 24.0 ms | 0.2 / 0.2 ms | 14.7 / 29.3 ms |
+| ~45 | 19.2 / 49.7 ms | 0.2 / 0.2 ms | 23.8 / 34.5 ms |
+| 74–100 (plus two SwiftPM builds) | 34.9 / **109.9** ms | 0.2 / 0.2 ms | 37.3 / 61.3 ms |
+
+The rest of `--memory --runs 200`, back to back at load 26–45:
+- **Rungs and ladders under the lock:** with the fix, every rung and both ladders take p99 0.1 ms
+  (max ≤ 0.8 ms). 0.3.0 took offscreen p99 8.4 ms (max 11.2), effects 13.0 ms, `.run` 11.9 ms (max
+  15.2) and `.admission` 8.0 ms (max 12.0).
+- **Unchanged:** accessors −0.11 % against the device count, and each rung's shed equal to the
+  device count's fall. A run-level shrink still uploads 0 tiles on the next frame. The 16 GB tier
+  is still 932.6 MiB floor + transient, and low-footprint pixels are still identical. A warm
+  whole-document render took 42.3 ms vs 0.3.0's 42.0 ms.
+
+No quiet-machine figure: the load never fell below 18 during this work. Nothing left under the lock
+scales with bytes, so the quiet case is expected at or under the 0.2 ms seen at every load. To
+re-measure: `swift run -c release PCRenderBench --memory --closed-only`.
 
 ## Filter adjustment layers (AB-T-0258)
 
