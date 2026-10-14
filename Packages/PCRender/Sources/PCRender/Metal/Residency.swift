@@ -37,6 +37,24 @@ final class ResidencyCache: @unchecked Sendable {
     var cap: Int?
     /// Entries a capped eviction never takes (the views' visible pages).
     var protected: Set<Key> = []
+    /// Above 0 while an effect shape is rendered: what it binds counts as gather (built from, not
+    /// shown), unless a cell binds it too (`mark`).
+    var building = 0
+
+    /// An entry bound in this frame. A cell's bind makes it shown in this frame (what a view's render
+    /// uses, `keys(usedIn:)`) and not gather; a mask build's marks it gather; an effect shape's render
+    /// marks gather only an entry it made, and never shows one.
+    private func mark(_ e: Entry, gather: Bool, made: Bool) {
+        e.used = frame
+        if gather {
+            e.gather = true
+        } else if building > 0 {
+            if made { e.gather = true }
+        } else {
+            e.gather = false
+            e.shown = frame
+        }
+    }
     private var entries: [Key: Entry] = [:]
     private var frame: UInt64 = 0
     /// The level of detail of the current render (keys its leaf images).
@@ -69,7 +87,10 @@ final class ResidencyCache: @unchecked Sendable {
         /// Metal's allocation size of `texture` (of its buffer for a level page).
         let allocated: Int
         var used: UInt64
-        /// Bound last by a feathered mask's build (not by a cell: a warm frame doesn't read it).
+        /// The frame a cell last bound it in.
+        var shown: UInt64 = 0
+        /// Bound last by a feathered mask's build or an effect shape's render, not by a cell (a warm
+        /// frame doesn't read it).
         var gather = false
         init(texture: any MTLTexture, buffer: (any MTLBuffer)? = nil, rect: PixelRect, format: PixelFormat?, defaultBits: [UInt32], version: UInt64, bytes: Int) {
             self.texture = texture; self.buffer = buffer; self.rect = rect; self.format = format; self.defaultBits = defaultBits
@@ -118,7 +139,7 @@ final class ResidencyCache: @unchecked Sendable {
 
     /// Pages and images the render of `frame` bound for its cells (gather pages excluded).
     func keys(usedIn frame: UInt64) -> Set<Key> {
-        Set(entries.compactMap { $0.value.used == frame && !$0.value.gather ? $0.key : nil })
+        Set(entries.compactMap { $0.value.shown == frame ? $0.key : nil })
     }
 
     /// Drops every entry not in `keep`; returns the allocated bytes dropped.
@@ -181,8 +202,7 @@ final class ResidencyCache: @unchecked Sendable {
         let rect = img.rect
         if rect.isEmpty { return LeafBinding(texture: nil, origin: .zero, size: .zero, outside: outside) }
         if let e = entries[key], e.version == version, e.rect == rect {
-            e.used = frame
-            e.gather = gather
+            mark(e, gather: gather, made: false)
             return LeafBinding(texture: e.texture, origin: SIMD2(rect.x0, rect.y0), size: SIMD2(Int32(rect.width), Int32(rect.height)), outside: outside)
         }
         let fmt: MTLPixelFormat = values ? .r32Float : .rgba32Float
@@ -195,8 +215,7 @@ final class ResidencyCache: @unchecked Sendable {
             px.withUnsafeBytes { tex.replace(region: MTLRegionMake2D(0, 0, rect.width, rect.height), mipmapLevel: 0, withBytes: $0.baseAddress!, bytesPerRow: rect.width * 16) }
         }
         let e = Entry(texture: tex, rect: rect, format: nil, defaultBits: [], version: version, bytes: rect.area * ResidencyCache.bytesPerPixel(fmt))
-        e.used = frame
-        e.gather = gather
+        mark(e, gather: gather, made: true)
         entries[key] = e
         evict()
         return LeafBinding(texture: tex, origin: SIMD2(rect.x0, rect.y0), size: SIMD2(Int32(rect.width), Int32(rect.height)), outside: outside)
@@ -217,15 +236,16 @@ final class ResidencyCache: @unchecked Sendable {
         if let e = entry, e.rect != area || e.format != s.format || e.defaultBits != defaultBits || e.texture.pixelFormat != fmt {
             entry = nil
         }
+        var made = false
         if entry == nil {
             guard let tex = makeTexture(area.width, area.height, fmt) else { return LeafBinding(texture: nil, origin: .zero, size: .zero, outside: outside) }
             let e = Entry(texture: tex, rect: area, format: s.format, defaultBits: defaultBits, version: 0, bytes: area.area * ResidencyCache.bytesPerPixel(fmt))
             entries[key] = e
             entry = e
+            made = true
         }
         guard let e = entry else { return LeafBinding(texture: nil, origin: .zero, size: .zero, outside: outside) }
-        e.used = frame
-        e.gather = gather
+        mark(e, gather: gather, made: made)
         let ts = Int(tileSize)
         let bpp = ResidencyCache.bytesPerPixel(fmt)
         var defaultTile: [UInt8]?
@@ -273,7 +293,9 @@ final class ResidencyCache: @unchecked Sendable {
         if let e = entry, e.rect != area || e.format != s.format || e.defaultBits != defaultBits || e.texture.pixelFormat != fmt || e.buffer == nil {
             entry = nil
         }
+        var made = false
         if entry == nil {
+            made = true
             let align = max(device.minimumLinearTextureAlignment(for: fmt), 1)
             let rowBytes = (area.width * bpp + align - 1) / align * align
             let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: fmt, width: area.width, height: area.height, mipmapped: false)
@@ -287,8 +309,7 @@ final class ResidencyCache: @unchecked Sendable {
             entry = e
         }
         guard let e = entry, let buffer = e.buffer else { return none }
-        e.used = frame
-        e.gather = gather
+        mark(e, gather: gather, made: made)
         var work: [(TileCoord, Tile?)] = []
         for c in areaDoc.tiles {
             if let t = s.tile(c) {
@@ -364,13 +385,15 @@ final class ResidencyCache: @unchecked Sendable {
     }
 
     /// Least recently used pages first, never one used in the current frame (nor, under a cap, a
-    /// protected one).
-    func evict() {
+    /// protected one). `frameDone`: the render has finished, so what it used but no view shows (an
+    /// effect shape's pages, a mask's gather) may go too, last.
+    func evict(frameDone: Bool = false) {
         let limit = cap ?? budget
         var total = residentBytes
         if total <= limit { return }
         let guarded = cap != nil
-        let lru = entries.filter { $0.value.used != frame && !(guarded && protected.contains($0.key)) }.sorted { $0.value.used < $1.value.used }
+        let lru = entries.filter { (frameDone ? $0.value.shown != frame : $0.value.used != frame) && !(guarded && protected.contains($0.key)) }
+            .sorted { $0.value.used < $1.value.used }
         for (k, e) in lru {
             if total <= limit { break }
             entries.removeValue(forKey: k)

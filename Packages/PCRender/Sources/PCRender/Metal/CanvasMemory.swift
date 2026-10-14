@@ -410,7 +410,7 @@ extension MetalCompositor {
     func finishFrame() -> CompositorFootprint {
         if governed {
             applyCaps()
-            residency.evict()
+            residency.evict(frameDone: true)
             evictCaches()
         }
         if let idle = limitsLocked.idleHeaps {

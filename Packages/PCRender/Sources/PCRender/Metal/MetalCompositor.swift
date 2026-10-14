@@ -360,6 +360,8 @@ public final class MetalCompositor: @unchecked Sendable {
         }
     }
 
+    /// `region`: what the cells cover. Backdrop filters' programs render over it and their reach;
+    /// effect maps and feathered masks are built over what of them it can see (MetalEffects.swift).
     private func prepare(_ plan: RenderPlan, region: PixelRect, source: any RenderSource, format: MTLPixelFormat) throws -> Prepared {
         var p = Prepared()
         let ctx = plan.context
@@ -369,13 +371,13 @@ public final class MetalCompositor: @unchecked Sendable {
         let stream = PrepareStream(queue: context.queue)
         func needMask(_ m: MaskSpec?) throws {
             guard let m, m.hasFeather, p.masks[m] == nil else { return }
-            p.masks[m] = try gpuMask(m, ctx: ctx, source: source, encoder: stream.encoder)
+            p.masks[m] = try gpuMask(m, ctx: ctx, source: source, encoder: stream.encoder, near: region)
         }
         for (i, op) in plan.ops.enumerated() {
             switch op {
             case .adjust(let a): p.adjustments[i] = GPUAdjustment(a, ctx, kernels: kernels)
             case .effect(let spec, _):
-                p.maps[i] = try gpuMaps(spec, ctx: ctx, source: source, stream: stream)
+                p.maps[i] = try gpuMaps(spec, ctx: ctx, source: source, stream: stream, near: region)
                 try needMask(spec.vectorStrokeMask)
             case .drawTiles(let d): try needMask(d.mask)
             case .fill(let f): try needMask(f.mask)

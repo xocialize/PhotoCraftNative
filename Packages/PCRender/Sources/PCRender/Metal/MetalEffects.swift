@@ -161,20 +161,34 @@ extension MetalCompositor {
     /// that is the alpha of a program (`AlphaProgramSource`: a layer's content, a Transparency Shapes
     /// Layer mask) is rendered here by a nested plan, at a level too; the CPU builds the others, and
     /// gets the GPU's back only for what needs it (distance fields, sharp edges, stroke frames).
-    func gpuMaps(_ spec: EffectsSpec, ctx: RenderContext, source: any RenderSource, stream: PrepareStream) throws -> GPUFxMaps {
+    ///
+    /// `near`: the render the maps are for. They are built over what of the effect region it can see,
+    /// the render grown by the effects' reach (`EffectMath.margin`): every effect reads the shape no
+    /// further than that, so the render's pixels are the same as from maps of the whole layer, and a
+    /// view's maps stay bounded by the view, at any level. Gradient strokes lay out in the shape's
+    /// bounds and keep the whole region. Maps are cached per region they cover.
+    func gpuMaps(_ spec: EffectsSpec, ctx: RenderContext, source: any RenderSource, stream: PrepareStream, near render: PixelRect? = nil) throws -> GPUFxMaps {
         guard let shapeVersion = source.leafVersion(spec.shape) else { throw MetalCompositorError.gpu(PlanError.missingLeaf(spec.shape).description) }
-        let key = CPUCompositor.FxKey(layer: spec.layerID, shapeVersion: shapeVersion, effects: spec.effects, region: spec.region,
+        var region = spec.region
+        let gradientStroke = spec.effects.items.contains { e in
+            if case .stroke(let st) = e, e.isEnabled, case .gradient = st.paint { return true }
+            return false
+        }
+        if let render, !gradientStroke { region = region.intersect(render.outset(by: EffectMath.margin(spec.effects))) }
+        let key = CPUCompositor.FxKey(layer: spec.layerID, shapeVersion: shapeVersion, effects: spec.effects, region: region,
                                       light: ctx.globalLight, vectorShape: spec.vectorShape, outline: spec.outline)
         if let hit = fxCache[key] { fxCache[key] = (hit.maps, nextTick()); frameFx.insert(key); return hit.maps }
         let allocatedBefore = mapBytesAllocated
-        let region = spec.region
         let shapeTex: any MTLTexture
         var cpuShape: FxMap?
-        if !region.isEmpty, let prog = (source as? AlphaProgramSource)?.alphaProgram(spec.shape), prog.region == region,
+        if !region.isEmpty, let prog = (source as? AlphaProgramSource)?.alphaProgram(spec.shape), prog.region == spec.region,
            let t = context.makeTexture(width: region.width, height: region.height, pixelFormat: .r32Float, usage: [.shaderRead, .shaderWrite], storage: .shared) {
             mapBytesAllocated += t.allocatedSize
             // What this preparation encoded so far runs first (the shape's plan may read its masks).
             stream.flush()
+            // What the shape's plan binds is for building it, not for the next frame (as a mask's gather).
+            residency.building += 1
+            defer { residency.building -= 1 }
             _ = try renderLocked(prog.plan, region: region, source: prog.source, out: t, origin: .zero, alphaOnly: true) { _ in }
             shapeTex = t
         } else {
@@ -339,7 +353,11 @@ extension MetalCompositor {
 
     // MARK: Feathered masks
 
-    func gpuMask(_ spec: MaskSpec, ctx: RenderContext, source: any RenderSource, encoder: () throws -> any MTLComputeCommandEncoder) throws -> GPUMask {
+    /// `near`: the render the mask is for. A mask whose area reaches past what the render can see
+    /// (the render grown by the feather's reach: the blur reads no further) is built over that part,
+    /// so it stays bounded by the view; one that fits is built whole, and shared by every render.
+    func gpuMask(_ spec: MaskSpec, ctx: RenderContext, source: any RenderSource, encoder: () throws -> any MTLComputeCommandEncoder,
+                 near render: PixelRect? = nil) throws -> GPUMask {
         func get(_ id: LeafID?) throws -> RenderLeaf? {
             guard let id else { return nil }
             guard let l = source.leaf(id) else { throw MetalCompositorError.gpu(PlanError.missingLeaf(id).description) }
@@ -350,9 +368,6 @@ extension MetalCompositor {
             guard let v = source.leafVersion(id) else { throw MetalCompositorError.gpu(PlanError.missingLeaf(id).description) }
             return v
         }
-        let key = CPUCompositor.MaskKey(spec: spec, pixelVersion: try version(spec.pixel), vectorVersion: try version(spec.vector), canvas: ctx.canvas)
-        if let hit = maskCache[key] { maskCache[key] = (hit.mask, nextTick()); frameMasks.insert(key); return hit.mask }
-        let allocatedBefore = mapBytesAllocated
         let pixel = try get(spec.pixel), vector = try get(spec.vector)
         let sv = vector == nil ? 0 : MaskSpec.featherSigma(spec.vectorFeather)
         let sp = pixel == nil ? 0 : MaskSpec.featherSigma(spec.feather)
@@ -362,6 +377,16 @@ extension MetalCompositor {
         var area = vector.map { grow(LeafReader.extent($0), sv) } ?? .empty
         if let p = pixel, vOut > 0 { area = area.union(grow(LeafReader.extent(p), sp)) }
         area = area.intersect(ctx.canvas)
+        // Keyed by the window it is built within: the canvas, or the part of it a render sees.
+        var window = ctx.canvas
+        if let render {
+            let reach = Int32((max(sv, sp) * 4).rounded(.up)) + 2
+            let sees = render.outset(by: reach).intersect(ctx.canvas)
+            if area.intersect(sees) != area { window = sees; area = area.intersect(sees) }
+        }
+        let key = CPUCompositor.MaskKey(spec: spec, pixelVersion: try version(spec.pixel), vectorVersion: try version(spec.vector), canvas: window)
+        if let hit = maskCache[key] { maskCache[key] = (hit.mask, nextTick()); frameMasks.insert(key); return hit.mask }
+        let allocatedBefore = mapBytesAllocated
         let outside = MaskMath.q16(pDef * vOut)
         if area.isEmpty {
             let m = GPUMask(area: .empty, texture: nil, outside: outside)

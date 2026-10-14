@@ -421,6 +421,31 @@ struct LevelDiff: CustomStringConvertible {
         }
     }
 
+    /// Effect maps and feathered masks are built over what a render can see (MetalEffects.swift): a region cutting
+    /// through layers with shadows, strokes, glows, bevels and a feathered mask comes out as the whole render has it.
+    @Test func effectMapsOfARegionAreTheWholeLayersThere() throws {
+        guard let metal = try? MetalCompositor(chunkSize: 256) else { return }
+        let gpu = DocumentCompositor(rasterizer: DT.rasterizer, backend: .metal, metal: metal)
+        for d in [BenchmarkDocuments.effects4(size: 1024), BenchmarkDocuments.realistic20(size: 1024)] {
+            for level in [0, 2] {
+                let whole = try gpu.render(d, region: d.bounds, level: level)
+                for part in [PixelRect(x: 96, y: 160, width: 256, height: 192), PixelRect(x: 384, y: 512, width: 320, height: 256),
+                             PixelRect(x: 640, y: 64, width: 256, height: 256)] {
+                    let got = try gpu.render(d, region: part, level: level)
+                    var want = RGBABuffer(transparent: got.rect)
+                    for j in 0..<got.rect.height {
+                        for i in 0..<got.rect.width {
+                            let (x, y) = (got.rect.x0 + Int32(i) - whole.rect.x0, got.rect.y0 + Int32(j) - whole.rect.y0)
+                            want.px[j * got.rect.width + i] = whole.px[Int(y) * whole.rect.width + Int(x)]
+                        }
+                    }
+                    let diff = LevelDiff(got, want)
+                    #expect(diff.max <= 0.51, "\(d.name) level \(level) \(part): \(diff)")
+                }
+            }
+        }
+    }
+
     // MARK: Metal level pages
 
     @Test func levelPagesFollowTileGenerations() throws {
@@ -504,9 +529,12 @@ struct LevelDiff: CustomStringConvertible {
         let whole = gpu.plan(d, region: d.bounds)
         _ = try metal.render(whole.plan, region: d.bounds, level: 1, source: whole.source, outputFormat: .rgba16Float, view: canvas.renderView)
         let one = metal.footprint
-        #expect(parts.visiblePages == one.visiblePages && parts.visibleEffects == one.visibleEffects, "\(parts.visiblePages) vs \(one.visiblePages)")
+        // Every page either part bound is visible, as the whole render's are. (Effect maps are each part's own: a
+        // render's maps cover what it can see.)
+        #expect(parts.visiblePages == one.visiblePages, "\(parts.visiblePages) vs \(one.visiblePages)")
+        #expect(parts.visibleEffects > 0)
         let lastOnly = try draw(adding: false)
-        #expect(lastOnly.visiblePages < parts.visiblePages)
+        #expect(lastOnly.visiblePages < parts.visiblePages && lastOnly.visibleEffects < parts.visibleEffects)
     }
 
     // MARK: The display chain off the main thread
