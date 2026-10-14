@@ -1,6 +1,6 @@
 // swift-tools-version: 6.2
 // PhotoCraftNative — photocraft on Swift and Metal (macOS 26+, Apple Silicon). The one manifest for
-// the whole repository: every package under `Packages/` and `Tools/PhotoshopOracle` is a group of
+// the whole repository: every package under `Packages/`, `Tools/PhotoshopOracle` and `Tools/CameraRawFit` is a group of
 // targets here, each exported as a product, so other repos can depend on this one by URL (fleet rule
 // AB-D-0023; SwiftPM can't consume a package from a repo's subfolder):
 //
@@ -56,6 +56,7 @@ let package = Package(
         // The Photoshop acceptance oracle
         .library(name: "PSOracleKit", targets: ["PSOracleKit"]),
         .executable(name: "ps-oracle", targets: ["ps-oracle"]),
+        .executable(name: "cr-measure", targets: ["cr-measure"]),
     ],
     dependencies: [
         // Fleet image Kits: PCIntelligence's model-free tiers, and the option enums PCEngine passes on.
@@ -269,6 +270,10 @@ let package = Package(
         .target(name: "PSOracleKit", dependencies: ["PCPSD"], path: "Tools/PhotoshopOracle/Sources/PSOracleKit", resources: [.copy("JSX")]),
         .executableTarget(name: "ps-oracle", dependencies: ["PSOracleKit", "PCPSD"], path: "Tools/PhotoshopOracle/Sources/ps-oracle"),
         .testTarget(name: "PSOracleKitTests", dependencies: ["PSOracleKit", "PCPSD"], path: "Tools/PhotoshopOracle/Tests/PSOracleKitTests"),
+
+        // MARK: CameraRawFit — measures PCAlgo's Camera Raw develop on the grid its sliders were fitted on (AB-T-0241);
+        // the fitting scripts are Tools/CameraRawFit/fit.
+        .executableTarget(name: "cr-measure", dependencies: ["PCAlgo", "PCFoundation"], path: "Tools/CameraRawFit/Sources/cr-measure"),
     ],
     swiftLanguageModes: [.v6]
 )
