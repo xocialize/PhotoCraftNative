@@ -66,11 +66,13 @@ PCDocument ──DocumentPlanner──▶ RenderPlan (DrawOp stack program) + Do
 | `Metal/Residency.swift` | gpu lib.rs residency | tile-generation residency cache with LRU budget |
 | `Metal/GPUAdjustment.swift` | gpu plan.rs `adjustment_program` | adjustment → specialised kernel |
 | `Metal/MetalKernels.swift` | gpu lib.rs pipelines | `PCROp` (288 B), pipelines, `AccumulatorPrecision`, `TexturePool` |
+| `Metal/CanvasMemory.swift` | (new) | GPU footprint (`CompositorFootprint`, `DisplayFootprint`), `memoryBudget` caps, views (`RenderView`), the `relieve` ladder (`ReliefLevel`, `ReliefReason`, `Relief`) |
 | `Shaders/PCR0–6*.metal` | compose.wgsl | `pcr_` kernels: compose, adjust, fill, maps, effects, masks |
 | `Display/CanvasRenderer.swift`, `Shaders/PCR7Display.metal` | gpu display sink; Compositor v1.5 level selection | zoom / pan, checkerboard, nearest ≥ 100 %, premultiplied halving chain below 50 %, 33³ LUT pass, MTKView / CAMetalLayer |
 | `Bench/BenchmarkDocuments.swift` | (new) | procedural `effects4` / `realistic20` scenes |
 | `Tests/PCRenderTests/PhotoshopM1Tests.swift` | (new) | Photoshop 27.11 function-oracle fits (batches M1, M2), PCIO's phase-4 requests, B/C modes |
 | `Sources/PCRenderBench/main.swift` | (new) | `swift run -c release PCRenderBench` |
+| `Sources/PCRenderBench/MemoryBench.swift` | (new) | `PCRenderBench --memory`: accessors against the device's count, `relieve` timing, the 16 GB tier |
 
 ## Phase 2: planner and leaves
 
@@ -507,6 +509,80 @@ Measurements that would settle more:
   are 5–12 levels off.
 * **Light amounts below 50**: Whites / Blacks ±10, ±25 ramps (γ of each flow is set by ±50 and
   ±100 alone), Exposure ±0.5, and Contrast −100 (extrapolated below −50).
+
+## Canvas memory: a declarable GPU tenant (AB-T-0251)
+
+A host (PixelAgencyEditor, AB-T-0253) declares the canvas to its model engine as one external GPU
+tenant (AB-A-0169 §2). PCRender stays engine-free: it reports bytes and sheds by level; the host
+maps them onto its engine's declaration. ForgeCanvasUI's `CanvasPressurePolicy` is the precedent
+(AB-R-0315).
+
+* **Footprint.** `MetalCompositor.footprint` (waits for a render in flight), `lastFootprint` (never
+  waits) and `onFootprintChange` (after every render, shrink, purge and budget change, outside the
+  lock) give a `CompositorFootprint`: pages, leaf images, gather pages, effect maps, masks, patterns
+  and pool heaps, of which `visiblePages` / `visibleEffects`, plus `transient`. Then
+  `persistent`, `sheddableOnRun = persistent − visible`, `declared = persistent + transient`.
+  `CanvasRenderer.footprint` gives the composite, its reduction chain and the LUT (read it where the
+  canvas is driven; a shrink never takes it). Bytes are Metal's allocation sizes, recorded when each
+  texture is made (logical area × bpp misses alignment: masks by 11 %, the 3-D LUT by 74 %).
+  Eviction still counts logical bytes, as before.
+* **Visible** is what the views' last renders used. `render(…, view:)` records a view's pages, leaf
+  images, effect maps and masks, and `CanvasRenderer.show` passes `renderView` (itself).
+  `forgetView` drops one without waiting (a deinit'd canvas forgets itself).
+* **Transient** is the next view render's peak above persistent: its output texture (the next
+  `show` allocates one), the accumulators the pool would have to regrow, and map building, which
+  is one effect set's intermediates (an edit) or, when effect maps or masks the view used are gone,
+  all of them rebuilt at once. `transientEstimate(region:outputFormat:)` and
+  `DocumentCompositor.bandTransient(width:)` give an export or flatten band's.
+* **Budget.** `memoryBudget` (an engine's `memoryBudgetBytes`) caps residency at 25 %, effect maps
+  and masks at 10 %, and keeps at most 2 idle accumulator heaps. Under a budget, eviction never takes
+  a visible page or map. nil, the default, leaves every cap and behaviour as before.
+* **Shrink.** `relieve(_ level:)` sheds every rung up to `level`; `relieve(requested:reason:)` walks
+  them in order and stops once the request is met. It runs under the compositor's lock on the
+  calling thread, so it waits out a render in flight and nothing it drops is in use. It never
+  touches `CanvasRenderer` or the main thread. The rungs:
+  1. `scratch`: the pool's heaps;
+  2. `patterns`;
+  3. `offscreen`: pages, leaf images, gather pages, effect maps and masks no view's last render
+     used. From here until `pressureCleared()` the caches are capped at what is left, so panning
+     evicts instead of growing;
+  4. `lowFootprint`: render in `lowFootprintCell` (512²) cells. Accumulators shrink with the cell's
+     area, pages stay put, and the pixels are identical;
+  5. `effects`: every effect map and mask. The next frame rebuilds the visible ones, which the
+     transient then counts, so this rung pays only while the canvas doesn't draw. The ladder
+     skips it when it can't pay.
+
+  `.run` stops at `offscreen`, so the next frame uploads no tile and rebuilds no map (AB-R-0303).
+  `pressureCleared()` brings the caps and cells back lazily.
+* **CPU caches.** `MemoryPressureRelay` (PCFoundation) relays the system's memory-pressure events to
+  registered trims: CPUCompositor's maps and masks, `DocumentLeafCache`, PCAlgo's reusable textures
+  and PCEngine's smart-object stages. A warning trims each to half; critical empties them. Nothing
+  listens until a host calls `MemoryPressureRelay.shared.start()`.
+
+Measured on realistic20 at 4096² (Apple M5 Max, Release, `PCRenderBench --memory --runs 200`):
+
+| | |
+|---|---|
+| Accessors after a whole-document view (pages 378.2, effect maps 99.6, masks 6.5, gather 2.4, pool 514.0, composite 128.5, levels 42.9, LUT 2.1 MiB) | 1,174.1 MiB vs the device's `currentAllocatedSize` delta 1,175.4 MiB (−0.11 %) |
+| Each rung's reported shed vs the device count's fall (scratch 514.0, offscreen 316.1, effects 74.5 MiB) | equal (0.00 %) |
+| `relieve` per level, no render in flight, p99 (max) | scratch 0.0, patterns 0.0, offscreen 2.4, lowFootprint 6.4 (8.5), effects 6.8 ms |
+| Ladders, p99 (max) | `.run` 8.4 (8.6) ms, `.admission` 8.4 (12.3) ms |
+| A run-level shrink, then the next viewport frame | 0 tiles uploaded, no map rebuilt |
+| Transient vs a sampled peak (warm frame) | declared 242.7 MiB, peak 128.6 MiB (the rest is one effect set's rebuild allowance) |
+| 16 GB tier (budget 12.7 GB), whole document visible, after an admission shrink | floor 657.7 MiB (visible pages 378.2, visible effects 106.0, display 173.5) + transient 274.8 = **932.6 MiB**; the next frame peaks 160.8 MiB above its settled count |
+| Low-footprint frames (512² cells) | 46.0 ms warm vs 39.9 ms normal; the composite is identical |
+
+The 16 GB-tier ladder takes `lowFootprint` (481.9 MiB of transient) and skips `effects`: with the
+whole document on screen, its rebuild (maps 106 MiB plus every effect set's intermediates at once)
+would cost more than it frees. At 1024² cells the same shrink leaves 1,029 MiB, which is why the
+low-footprint cell is 512². Warm render speed is unchanged: 35.7 ms wall vs 35.9 ms at 0.2.0 on
+the same machine.
+
+Outside this declaration: PCAlgo's cross-run texture cache (`AlgoGPU.cachedBytes`, capped at
+min(4 GiB, ¼ of `recommendedMaxWorkingSetSize`), so roughly 2.7 GB on a 16 GB Mac, an estimate not
+measured here) is GPU memory too. It trims on memory
+pressure, and a host can add it to its declaration and call `trimCaches(.critical)` from its
+shedder (its own lock, never the compositor's).
 
 ## For the next phase
 
