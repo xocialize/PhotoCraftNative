@@ -66,7 +66,9 @@ enum FileMenuCommands: CommandModule {
     }
 
     /// Save / Save As: the document's own layered file, or `path` (photocraft `save_as_with` /
-    /// `save_in_place`). The journal records `{path}` so an action replays it.
+    /// `save_in_place`). The journal records `{path}` so an action replays it. A job: started in
+    /// the background (`Session.start`, `executeAsync`), the file is written on a worker from a
+    /// snapshot of the document, which stays editable meanwhile (`SaveJob`).
     static func save(_ s: Session, _ p: JSONValue, _ cmd: String, path: String?) throws -> JSONValue {
         let o = try FileCommands.SaveOpts.from(s, p, cmd)
         var form: PcraftFormat.Container?
@@ -74,10 +76,13 @@ enum FileMenuCommands: CommandModule {
             guard let c = PcraftFormat.Container(rawValue: f) else { throw EngineError.bad(cmd, "\"form\" is \"package\" or \"singleFile\"") }
             form = c
         }
-        let r = try s.saveDocument(to: path, quality: o.quality, tiffLayers: p["tiffLayers"]?.boolValue, tgaBits: o.tgaBits, pcraftForm: form)
-        var out: JSONValue = ["path": .string(r.path), "warnings": .strings(r.warnings), "copy": .bool(r.copy)]
-        if let assets = r.assets { out = out.setting("assets", assets) }
-        if let stats = r.stats { out = out.setting("tiles", ["written": .int(stats.tilesWritten), "reused": .int(stats.tilesReused)]) }
-        return out
+        let job = try s.saveJob(to: path, quality: o.quality, tiffLayers: p["tiffLayers"]?.boolValue, tgaBits: o.tgaBits, pcraftForm: form)
+        return try s.runJob("Save", lockDocument: false, work: { ctx in try job.run(ctx) }, apply: { s, written, _ in
+            let r = try s.finishSave(job, written)
+            var out: JSONValue = ["path": .string(r.path), "warnings": .strings(r.warnings), "copy": .bool(r.copy)]
+            if let assets = r.assets { out = out.setting("assets", assets) }
+            if let stats = r.stats { out = out.setting("tiles", ["written": .int(stats.tilesWritten), "reused": .int(stats.tilesReused)]) }
+            return out
+        })
     }
 }

@@ -91,6 +91,14 @@ public final class EngineRenderer: Sendable {
         return out
     }
 
+    /// The composite of the whole canvas area-averaged to `width` × `height` (PCRender's
+    /// `renderReduced`: one composite, reduced as it is rendered); with `damage`, only the output
+    /// pixels whose spans meet it.
+    public func renderReduced(_ doc: Document, width: Int, height: Int, damage: PixelRect? = nil) throws -> RGBABuffer {
+        lock.lock(); defer { lock.unlock() }
+        do { return try compositor.renderReduced(doc, width: width, height: height, damage: damage) } catch { throw EngineError.other("compositing failed: \(error)") }
+    }
+
     /// A reduced composite at most `maxSide` on its longer side.
     public func thumbnail(_ doc: Document, maxSide: Int) throws -> RGBABuffer {
         lock.lock(); defer { lock.unlock() }

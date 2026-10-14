@@ -48,8 +48,15 @@ extension Session {
     /// `open_path` + `Session::open_document`). Returns the index and the warnings.
     @discardableResult
     public func openFile(_ path: String) throws -> (index: Int, warnings: [String], color: JSONValue) {
+        // A local `.pcraft`'s own previews can stand for its first save's (`SaveSlot.opened`).
+        let pcraft = EngineIO.fileExtension(path) == PcraftFormat.fileExtension ? services.fileSystem.localURL(path) : nil
+        let stamp = pcraft.flatMap(FileStamp.init)
         let r = try EngineIO.importPath(path, services: services)
-        return openImported(r, path: path)
+        let opened = openImported(r, path: path)
+        if let pcraft, let stamp, opened.index < documents.count {
+            saveSlot(documents[opened.index].id).withLock { $0.opened = (r.document, pcraft, stamp) }
+        }
+        return opened
     }
 
     /// Adds an imported document: a read-only source (Paint.NET, Affinity, Krita) keeps no path to
@@ -72,10 +79,20 @@ extension Session {
     /// and Image Assets run (photocraft `saved`). `tiffLayers` is the TIFF Options answer (nil:
     /// not asked, the layers are kept); `tgaBits` the Targa bits per pixel. A `.pcraft` is saved
     /// in `pcraftForm`, by default its own form or else a package (`pcraftContainer(for:)`;
-    /// `savePlan` says what Save does).
+    /// `savePlan` says what Save does). `saveJob` and `finishSave` are the same save in two
+    /// parts, for writing the file on another thread.
     @discardableResult
     public func saveDocument(_ index: Int? = nil, to path: String? = nil, quality: Double? = nil, tiffLayers: Bool? = nil, tgaBits: Int? = nil,
                              forceCopy: Bool = false, pcraftForm: PcraftFormat.Container? = nil) throws -> SaveOutcome {
+        let job = try saveJob(index, to: path, quality: quality, tiffLayers: tiffLayers, tgaBits: tgaBits, forceCopy: forceCopy, pcraftForm: pcraftForm)
+        return try finishSave(job, try job.run())
+    }
+
+    /// The first part of `saveDocument` (same parameters): what to write, decided on the session's
+    /// thread, with a snapshot of the document. Run the job anywhere (`SaveJob.run`), then give
+    /// what it wrote to `finishSave` on the session's thread.
+    public func saveJob(_ index: Int? = nil, to path: String? = nil, quality: Double? = nil, tiffLayers: Bool? = nil, tgaBits: Int? = nil,
+                        forceCopy: Bool = false, pcraftForm: PcraftFormat.Container? = nil) throws -> SaveJob {
         guard let i = index ?? activeIndex, i >= 0, i < documents.count else { throw EngineError.noDocument }
         let st = documents[i]
         let target: String
@@ -93,28 +110,37 @@ extension Session {
         opts.tiffLayers = tiffLayers ?? true
         opts.tgaBits = tgaBits
         opts.imagePreviews = preferences["fileHandling.imagePreviews"]?.stringValue != "never"
-        var warnings: [String] = []
-        var stats: SaveStats?
+        var package: URL?
         if EngineIO.fileExtension(target) == PcraftFormat.fileExtension, try pcraftContainer(for: target, requested: pcraftForm) == .package {
-            stats = try savePackage(st.doc, target, id: st.id.rawValue)
-        } else {
-            warnings = try FileCommands.saveDoc(self, st.doc, target, opts)
+            guard let url = services.fileSystem.localURL(target) else {
+                throw EngineError.other("\(target): .pcraft packages can't be saved here; save a single-file .pcraft")
+            }
+            package = url
         }
-        let copy = forceCopy || Self.savesCopy(st, target, tiffLayers: tiffLayers)
+        return SaveJob(path: target, document: st.doc, copy: forceCopy || Self.savesCopy(st, target, tiffLayers: tiffLayers), docId: st.id,
+                       revision: st.revision, package: package, options: opts, services: services, slot: saveSlot(st.id))
+    }
+
+    /// The second part of `saveDocument`: what job `job`'s save means to the session, once it has
+    /// written the file. Unless it was a copy, the file becomes the document's (still dirty if it
+    /// was edited after the job was taken), and the Save Document script event and Image Assets
+    /// run. A document closed meanwhile has nothing to update.
+    @discardableResult
+    public func finishSave(_ job: SaveJob, _ written: SaveJob.Written) throws -> SaveOutcome {
         var assets: JSONValue?
-        if !copy {
+        if !job.copy, let i = documents.firstIndex(where: { $0.id == job.docId }) {
             // File identity is not a history step; a stale revision (an edit since) stays dirty.
             try updateDocument(at: i) { d in
-                if d.revision == st.revision { d.savedTo(target) } else { d.path = target }
+                if d.revision == job.revision { d.savedTo(job.path) } else { d.path = job.path }
                 d.sourceReadOnly = false
             }
-            discardRecovery(documents[i].id)
-            noteRecent(target)
+            discardRecovery(job.docId)
+            noteRecent(job.path)
             // "Save Document" script events and File › Generate › Image Assets.
             assets = AutomateCommands.documentSaved(self, i)
             publish()
         }
-        return SaveOutcome(path: target, warnings: warnings, copy: copy, assets: assets, stats: stats)
+        return SaveOutcome(path: job.path, warnings: written.warnings, copy: job.copy, assets: assets, stats: written.stats)
     }
 
     /// Whether saving document `st` to `path` writes a copy (photocraft `saves_copy`): a flat file

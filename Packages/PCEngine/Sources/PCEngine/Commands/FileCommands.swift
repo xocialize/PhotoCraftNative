@@ -165,9 +165,14 @@ public enum FileCommands: CommandModule {
     /// Encodes `doc` for `path`'s extension (photocraft `encode`): PCIO for the layered formats
     /// and PNG/JPEG/TIFF, PCPlatform's codecs for the other flat formats.
     static func encode(_ s: Session, _ doc: Document, _ path: String, _ save: SaveOpts = SaveOpts(), interrupt: Interrupt = .none) throws -> ([UInt8], [String]) {
+        try encode(s.services, doc, path, save, interrupt: interrupt)
+    }
+
+    /// `encode` through `services` (no session: a save job's worker).
+    static func encode(_ services: EngineServices, _ doc: Document, _ path: String, _ save: SaveOpts, interrupt: Interrupt = .none) throws -> ([UInt8], [String]) {
         // Photoshop's 0–12 JPEG scale → 1–100.
         let q = save.quality.map { (min(max($0, 0), 12) / 12 * 99 + 1).rounded() }
-        let r = try EngineIO.export(doc, as: path, services: s.services, quality: q, tiffLayers: save.tiffLayers, imagePreviews: save.imagePreviews,
+        let r = try EngineIO.export(doc, as: path, services: services, quality: q, tiffLayers: save.tiffLayers, imagePreviews: save.imagePreviews,
                                     tgaBits: save.tgaBits, interrupt: interrupt)
         return (r.bytes, r.warnings)
     }
@@ -176,12 +181,19 @@ public enum FileCommands: CommandModule {
     /// single-file `.pcraft` on a local disk is streamed into place instead (`saveSingleFile`).
     @discardableResult
     static func saveDoc(_ s: Session, _ doc: Document, _ path: String, _ save: SaveOpts = SaveOpts()) throws -> [String] {
-        if fileExtension(path) == PcraftFormat.fileExtension, !s.services.fileSystem.isDirectory(path), let url = s.services.fileSystem.localURL(path) {
-            try s.saveSingleFile(doc, path, url)
+        try saveDoc(s.services, doc, path, save)
+    }
+
+    /// `saveDoc` through `services` (no session: a save job's worker). `previews` gives a
+    /// single-file `.pcraft`'s previews (default: rendered).
+    static func saveDoc(_ services: EngineServices, _ doc: Document, _ path: String, _ save: SaveOpts,
+                        previews: (() throws -> SaveOptions)? = nil) throws -> [String] {
+        if fileExtension(path) == PcraftFormat.fileExtension, !services.fileSystem.isDirectory(path), let url = services.fileSystem.localURL(path) {
+            try SaveJob.saveSingleFile(doc, path, url, try previews?() ?? SaveJob.previews(doc, path, services))
             return []
         }
-        let (bytes, warnings) = try encode(s, doc, path, save)
-        try writeFile(s, path, bytes)
+        let (bytes, warnings) = try encode(services, doc, path, save)
+        do { try services.fileSystem.write(path, Data(bytes)) } catch { throw EngineError.wrap(error) }
         return warnings
     }
 

@@ -138,6 +138,7 @@ public final class Session {
         cancelJobs(on: id)
         for h in closeHooks { h(self, index) }
         discardRecovery(id)
+        dropSaveSlot(id)
         let d = documents.remove(at: index)
         if documents.isEmpty {
             activeIndex = nil

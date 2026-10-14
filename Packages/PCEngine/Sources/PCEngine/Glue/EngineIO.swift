@@ -23,7 +23,24 @@ import PCIOCore
 import PCPlatform
 import PCRender
 
-extension EngineRenderer: PCIOCore.DocumentCompositor {}
+extension EngineRenderer: PCIOCore.DocumentCompositor {
+    /// The `.pcraft` previews' composite: PCRender's own reduction for an RGB document, whose
+    /// composite reads back as rendered; the band-by-band default for the others.
+    public func reduced(_ document: Document, width: Int, height: Int) throws -> [SIMD4<Float>] {
+        guard document.pixelFormat.mode == .rgb else { return try ReducedComposite.reduce(document, width: width, height: height, compositor: self) }
+        return try renderReduced(document, width: width, height: height).px
+    }
+
+    /// Only the damaged cells, through PCRender, for an RGB document (the whole reduction for the others).
+    public func reduced(_ document: Document, width: Int, height: Int, damage: PixelRect) throws -> (rect: PixelRect, pixels: [SIMD4<Float>]) {
+        guard document.pixelFormat.mode == .rgb else {
+            let rect = ReducedComposite.cells(meeting: damage, canvas: document.size, width: width, height: height)
+            return rect.isEmpty ? (rect, []) : (rect, ReducedComposite.crop(try reduced(document, width: width, height: height), width: width, rect))
+        }
+        let b = try renderReduced(document, width: width, height: height, damage: damage)
+        return (b.rect, b.px)
+    }
+}
 
 /// PCIO's `LayerContentRenderer` on PCPlatform: type through `TextEngine`, shapes through
 /// `VectorRasterizer`, fonts through `FontCatalog`. Fill layers need nothing here: PCIO draws them
