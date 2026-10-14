@@ -82,6 +82,9 @@ final class ResidencyCache: @unchecked Sendable {
         var format: PixelFormat?
         var defaultBits: [UInt32]
         var generations: [TileCoord: UInt64]
+        /// A level page's source-tile generations, row-major over the tiles its area covers (`UInt64.max`:
+        /// not written yet, 0: the default pixel): a dense grid, as a page holds thousands of blocks.
+        var grid: [UInt64] = []
         var version: UInt64
         var bytes: Int
         /// Metal's allocation size of `texture` (of its buffer for a level page).
@@ -310,12 +313,21 @@ final class ResidencyCache: @unchecked Sendable {
         }
         guard let e = entry, let buffer = e.buffer else { return none }
         mark(e, gather: gather, made: made)
-        var work: [(TileCoord, Tile?)] = []
-        for c in areaDoc.tiles {
-            if let t = s.tile(c) {
-                if e.generations[c] != t.generation { work.append((c, t)) }
-            } else if e.generations[c] != 0 {
-                work.append((c, nil))
+        // The source tiles under the area, row-major.
+        let ts = tileSize
+        let tx0 = areaDoc.x0 / ts, ty0 = areaDoc.y0 / ts, cols = Int(areaDoc.width / Int(ts)), rows = Int(areaDoc.height / Int(ts))
+        if e.grid.count != cols * rows { e.grid = [UInt64](repeating: .max, count: cols * rows) }
+        var work: [(TileCoord, Tile?, Int)] = []
+        e.grid.withUnsafeBufferPointer { g in
+            for j in 0..<rows {
+                for i in 0..<cols {
+                    let c = TileCoord(tx: tx0 + Int32(i), ty: ty0 + Int32(j)), k = j * cols + i
+                    if let t = s.tile(c) {
+                        if g[k] != t.generation { work.append((c, t, k)) }
+                    } else if g[k] != 0 {
+                        work.append((c, nil, k))
+                    }
+                }
             }
         }
         if !work.isEmpty {
@@ -326,14 +338,15 @@ final class ResidencyCache: @unchecked Sendable {
             let job = work
             let (format, x0, y0) = (s.format, Int(area.x0), Int(area.y0))
             DispatchQueue.concurrentPerform(iterations: job.count) { i in
-                let (c, t) = job[i]
+                let (c, t, _) = job[i]
                 let dst = base.value + (Int(c.ty) * side - y0) * rowBytes + (Int(c.tx) * side - x0) * bpp
                 func copy(_ packed: UnsafeRawPointer) {
                     for r in 0..<side { (dst + r * rowBytes).copyMemory(from: packed + r * blockRow, byteCount: blockRow) }
                 }
                 guard let t else { fallback.withUnsafeBytes { copy($0.baseAddress!) }; return }
                 if direct != nil {
-                    if let hit = ReducedTiles.shared.cached(t, format: format, level: level, sampled: sampled) {
+                    // A sampled block costs less to make than a look-up.
+                    if !sampled, let hit = ReducedTiles.shared.cached(t, format: format, level: level) {
                         hit.withUnsafeBytes { copy($0.baseAddress!) }
                     } else {
                         t.bytes.withUnsafeBytes { TileReduction.block($0.baseAddress!, format: format, level: level, sampled: sampled, into: dst, rowBytes: rowBytes) }
@@ -350,7 +363,7 @@ final class ResidencyCache: @unchecked Sendable {
                     ReducedBlock.converted(block, format: format, side: side, values: values).withUnsafeBytes { copy($0.baseAddress!) }
                 }
             }
-            for (c, t) in work { e.generations[c] = t?.generation ?? 0 }
+            for (_, t, k) in work { e.grid[k] = t?.generation ?? 0 }
             tilesUploaded += work.count
             blocksReduced += work.reduce(0) { $0 + ($1.1 == nil ? 0 : 1) }
         }
