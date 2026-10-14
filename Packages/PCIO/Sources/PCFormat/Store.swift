@@ -41,6 +41,20 @@ enum Store {
         return [UInt8](out as Data)
     }
 
+    /// A preview's PNG read back: nil unless it decodes as 8-bit RGBA with straight alpha, as
+    /// `png` writes it.
+    static func rgba8(_ png: [UInt8]) -> RGBA8Image? {
+        guard let source = CGImageSourceCreateWithData(Data(png) as CFData, nil), let cg = CGImageSourceCreateImageAtIndex(source, 0, nil),
+              cg.bitsPerComponent == 8, cg.bitsPerPixel == 32, cg.alphaInfo == .last,
+              cg.bitmapInfo.intersection(.byteOrderMask) == [] || cg.bitmapInfo.intersection(.byteOrderMask) == .byteOrder32Big,
+              let data = cg.dataProvider?.data, let base = CFDataGetBytePtr(data) else { return nil }
+        let w = cg.width, h = cg.height, stride = cg.bytesPerRow
+        guard w > 0, h > 0, stride >= w * 4, CFDataGetLength(data) >= stride * (h - 1) + w * 4 else { return nil }
+        var out = [UInt8](repeating: 0, count: w * h * 4)
+        for y in 0 ..< h { for i in 0 ..< w * 4 { out[y * w * 4 + i] = base[y * stride + i] } }
+        return RGBA8Image(width: w, height: h, data: out)
+    }
+
     // MARK: - Loading
 
     /// Deepest JSON nesting a manifest may have: each group level adds three (the layer object,
@@ -399,7 +413,7 @@ final class CompressedBatch: @unchecked Sendable {
 }
 
 /// What a file looked like when it was verified. Any change means "verify again".
-struct FileSignature: Equatable {
+struct FileSignature: Equatable, Sendable {
     var len: UInt64
     var modified: timespec
     /// Inode, device and status-change time: an in-place rewrite changes the change time even
@@ -439,8 +453,8 @@ public let defaultReverifyBudget: UInt64 = 16 * 1024 * 1024
 public let defaultZipCacheBudget = 64 << 20
 
 /// Incremental `.pcraft` writer. Keep one per open document: it remembers tile hashes (by tile
-/// generation), compressed objects, and objects it has verified in the current directory, so
-/// repeated saves stay cheap.
+/// generation), compressed objects, objects it has verified in the current directory and its last
+/// previews' PNG bytes, so repeated saves stay cheap.
 ///
 /// **What the directory cache trusts.** A directory save reuses an existing object file only
 /// after decompressing it and checking its content. After that, the writer remembers the file's
@@ -492,6 +506,17 @@ public final class PcraftWriter {
     /// What a cached object costs beyond its bytes: its path and its dictionary entry.
     static let zipCacheEntryCost = 256
 
+    /// The PNG bytes of the last previews saved, by entry name.
+    var previewPNGs: [String: (image: RGBA8Image, png: [UInt8])] = [:]
+
+    /// Preview `image` as PNG for entry `name`: the last save's bytes again when it is unchanged.
+    func png(_ name: String, _ image: RGBA8Image) throws(FormatError) -> [UInt8] {
+        if let last = previewPNGs[name], last.image == image { return last.png }
+        let png = try Store.png(image)
+        previewPNGs[name] = (image, png)
+        return png
+    }
+
     /// Generator string written into manifests.
     public static let generator = "photocraft-format 0.1.0 (PhotoCraftNative PCFormat)"
 
@@ -512,8 +537,8 @@ public final class PcraftWriter {
         // Keep the hashes of this save's tiles only.
         hashCache = c.seen
         var previews: [(String, [UInt8])] = []
-        if let t = opts.thumbnail { previews.append((Store.thumb, try Store.png(t))) }
-        if let t = opts.composite { previews.append((Store.composite, try Store.png(t))) }
+        if let t = opts.thumbnail { previews.append((Store.thumb, try png(Store.thumb, t))) }
+        if let t = opts.composite { previews.append((Store.composite, try png(Store.composite, t))) }
         // photocraft's version unless the document (a filter adjustment layer) or the container
         // (`saveZip` decides that) needs more.
         let version = Convert.holdsFilterAdjustment(doc.layers) ? pcraftFilterFormatVersion : pcraftPhotocraftFormatVersion
@@ -651,6 +676,14 @@ public final class PcraftWriter {
 
     /// Saves into a directory bundle: reuses only valid existing objects, rewrites missing or
     /// damaged ones, then writes the manifest atomically and removes unreferenced objects.
+    ///
+    /// **Durability.** The manifest is written last: until it is renamed into place the bundle
+    /// still opens as its previous save, whose objects this save never removes before then. New
+    /// objects and previews are compressed and written on all cores, each through a temporary file
+    /// flushed to the drive (`fsync`) and renamed; their folders are synced once; the manifest's
+    /// own full flush (`F_FULLFSYNC`), before its rename, then empties the drive's cache, so every
+    /// object it names is on stable storage before it is. One full flush per save, where a flush
+    /// per object made a first save of 1,211 tiles spend seconds waiting on the drive (AB-T-0259).
     @discardableResult
     public func saveDir(_ doc: Document, _ dir: URL, _ opts: SaveOptions = SaveOptions()) throws(FormatError) -> SaveStats {
         let root = try DirBundle.root(dir.path)
@@ -664,6 +697,11 @@ public final class PcraftWriter {
         verified?.generation += 1
         let generation = verified?.generation ?? 0
         let recheck = rollingRecheck(Set(p.objects.map(\.path)))
+        // Objects on disk whose signature this writer checked and which aren't due a recheck are
+        // reused; the other existing ones are read back and checked, and what is missing or
+        // damaged is written. Checks and writes run on all cores.
+        var check: [(path: String, object: StoreObject)] = []
+        var writes: [(path: String, object: StoreObject)] = []
         for (path, obj) in p.objects {
             let objectPath = FS.join(root, path)
             // `root` and `listObjects` validated the fixed parent directories once. Check each
@@ -673,25 +711,48 @@ public final class PcraftWriter {
             let alreadyVerified = !recheck.contains(path) && signature != nil && verified?.objects[path]?.signature == signature
             if existing.contains(path) && alreadyVerified {
                 if obj.isTile { stats.tilesReused += 1 }
-                continue
-            }
-            if existing.contains(path) {
-                let (valid, sig) = try DirBundle.existingObjectIsValid(objectPath, obj, path)
-                if valid {
-                    if let sig { verified?.objects[path] = (sig, generation) }
-                    if obj.isTile { stats.tilesReused += 1 }
-                    continue
-                }
-            }
-            if obj.isTile { stats.tilesWritten += 1 } else { stats.blobsWritten += 1 }
-            try DirBundle.writeFile(root, objectPath, obj.compressed)
-            if let written = try DirBundle.pathSignature(objectPath) {
-                verified?.objects[path] = (written, generation)
+            } else if existing.contains(path) {
+                check.append((path, obj))
             } else {
-                verified?.objects[path] = nil
+                writes.append((path, obj))
             }
         }
-        for (name, data) in p.previews { try DirBundle.writeFile(root, FS.join(root, name), data) }
+        let toCheck = check
+        let checked = Parallel.map(toCheck.count) { i -> Result<(Bool, FileSignature?), FormatError> in
+            do throws(FormatError) {
+                return .success(try DirBundle.existingObjectIsValid(FS.join(root, toCheck[i].path), toCheck[i].object, toCheck[i].path))
+            } catch {
+                return .failure(error)
+            }
+        }
+        for (i, r) in checked.enumerated() {
+            switch r {
+            case .success((true, let sig)):
+                if let sig { verified?.objects[check[i].path] = (sig, generation) }
+                if check[i].object.isTile { stats.tilesReused += 1 }
+            case .success((false, _)): writes.append(check[i])
+            case .failure(let e): throw e
+            }
+        }
+        for (_, obj) in writes { if obj.isTile { stats.tilesWritten += 1 } else { stats.blobsWritten += 1 } }
+        let toWrite = writes
+        let written = Parallel.map(toWrite.count) { i -> Result<FileSignature?, FormatError> in
+            let objectPath = FS.join(root, toWrite[i].path)
+            do throws(FormatError) {
+                try DirBundle.writeFile(root, objectPath, toWrite[i].object.compressed, durability: .drive)
+                return .success(try DirBundle.pathSignature(objectPath))
+            } catch {
+                return .failure(error)
+            }
+        }
+        for (i, r) in written.enumerated() {
+            switch r {
+            case .success(let signature?): verified?.objects[writes[i].path] = (signature, generation)
+            case .success(nil): verified?.objects[writes[i].path] = nil
+            case .failure(let e): throw e
+            }
+        }
+        for (name, data) in p.previews { try DirBundle.writeFile(root, FS.join(root, name), data, durability: .drive) }
         for stale in [Store.thumb, Store.composite] where !p.previews.contains(where: { $0.name == stale }) {
             let path = FS.join(root, stale)
             try DirBundle.validateFile(root, path)
@@ -701,6 +762,9 @@ public final class PcraftWriter {
                 if error.kind != .notFound { throw .io(error) }
             }
         }
+        // The new objects' and previews' names reach the drive before the manifest's flush.
+        let renamedInto = Set((writes.map(\.path) + p.previews.map(\.name)).map { (FS.join(root, $0) as NSString).deletingLastPathComponent })
+        for dir in renamedInto.sorted() { DirBundle.syncDirectory(dir) }
         try DirBundle.writeFile(root, FS.join(root, Store.manifest), p.manifest)
         // The manifest is committed: the save has succeeded. Removing objects it no longer
         // references is best-effort housekeeping (a vanished or locked file must not turn a
@@ -864,9 +928,19 @@ enum DirBundle {
         return FileSignature(st)
     }
 
+    /// How far `writeFile` flushes what it writes before it returns.
+    enum Durability {
+        /// On stable storage: the file fully flushed (`F_FULLFSYNC`), and its folder synced after
+        /// the rename.
+        case stable
+        /// On the drive: the file `fsync`ed (the drive may still cache it), its folder not synced.
+        /// The caller syncs the folders (`syncDirectory`) and fully flushes something after.
+        case drive
+    }
+
     /// Writes `data` to `path` through a temporary file and a rename, rechecking the target and
     /// its parent around each step (photocraft `write_bundle_file`).
-    static func writeFile(_ root: String, _ path: String, _ data: [UInt8]) throws(FormatError) {
+    static func writeFile(_ root: String, _ path: String, _ data: [UInt8], durability: Durability = .stable) throws(FormatError) {
         try validateFile(root, path)
         let parent = (path as NSString).deletingLastPathComponent
         let name = (path as NSString).lastPathComponent
@@ -894,7 +968,10 @@ enum DirBundle {
             try validateFile(root, path)
             do throws(IOError) {
                 try AtomicSave.writeAll(fd, data, 0, data.count, tmp)
-                try AtomicSave.syncFile(fd)
+                switch durability {
+                case .stable: try AtomicSave.syncFile(fd)
+                case .drive: if fsync(fd) != 0 { throw IOError.last("fsync") }
+                }
             } catch {
                 throw .io(error)
             }
@@ -912,15 +989,20 @@ enum DirBundle {
             } catch {
                 throw .io(error)
             }
-            let dfd = Darwin.open(parent, O_RDONLY | O_CLOEXEC)
-            if dfd >= 0 {
-                _ = fsync(dfd)
-                close(dfd)
-            }
+            if durability == .stable { syncDirectory(parent) }
         } catch {
             closeOnce()
             if (try? validateFile(root, tmp)) != nil { unlink(tmp) }
             throw error
+        }
+    }
+
+    /// Syncs folder `dir` (best effort: the files in it are already renamed into place).
+    static func syncDirectory(_ dir: String) {
+        let dfd = Darwin.open(dir, O_RDONLY | O_CLOEXEC)
+        if dfd >= 0 {
+            _ = fsync(dfd)
+            close(dfd)
         }
     }
 

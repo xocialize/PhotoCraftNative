@@ -129,6 +129,18 @@ public enum PcraftFormat {
         try Store.readManifest(try ZipSource(bytes), LoadOptions())
     }
 
+    /// The previews the bundle at `url` (a package or a single file) holds, as its manifest names
+    /// them: nil for one it has none of, or one that doesn't read back as straight 8-bit RGBA.
+    public static func readPreviews(contentsOf url: URL) throws(FormatError) -> SaveOptions {
+        let src: any ByteSource = FS.isDir(url.path) ? DirSource(root: url) : try ZipFileSource(url)
+        let m = try Store.readManifest(src, LoadOptions())
+        func image(_ path: String?) throws(FormatError) -> RGBA8Image? {
+            guard let path else { return nil }
+            return Store.rgba8(try src.get(path, max: 64 << 20))
+        }
+        return SaveOptions(thumbnail: try image(m.thumbnail), composite: try image(m.composite))
+    }
+
     /// The embedded thumbnail, if present (PNG bytes).
     public static func readThumbnail(_ bytes: [UInt8]) throws(FormatError) -> [UInt8]? {
         let src = try ZipSource(bytes)
