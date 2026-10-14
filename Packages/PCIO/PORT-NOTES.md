@@ -109,7 +109,7 @@ import so a document → PSD → document round trip returns the same document.
 | Layered TIFF | Photoshop tags 37724/34377 transcoded to a PSD model in either byte order, then the PSD importer; the TIFF's own ICC/resolution/XMP win | the PSD exporter's layer section and resources in the file's byte order next to the composite; Gray/RGB/CMYK 8/16/32, BigTIFF when needed; Lab and Multichannel save flat with a warning | `TIFFLayers`, `LayeredTIFF`, `PSDTIFF`; corpus: all 36 PSDs transcode to TIFF and back byte-identically in both orders |
 | Multi-part EXR | parts and channel groups listed (`entries`), chosen ones imported as layers with an optional additive precomp; Cryptomatte listing; decoders for NONE/RLE/ZIPS/ZIP/PIZ/PXR24/B44/B44A (DWAA/DWAB/HTJ2K listed but refused) | — | `EXRParts`; NONE/ZIPS/ZIP/PXR24 checked bit-exact against ImageIO on real files |
 | SVG / SVGZ | groups and shape layers (Bézier knots, fill, stroke, gradients), text outlined with CoreText, what shapes can't hold (clip paths, masks, filters, patterns, images, markers) rasterised by CoreSVG with a warning | — | `SVGImport`; photocraft parses with usvg and rasterises with resvg, here XMLParser + CoreGraphics/CoreSVG: a shape's own opacity goes on its layer (no wrapping "Group N"), markers and text on a path are rasterised, CSS is a selector subset, reflect/repeat gradient spreads and nesting past ~256 levels are CoreSVG's limits |
-| Compositor (`.comp`, v1–v13) | the package directory: 8/16-bit PNG and OpenEXR layers, transforms, masks, folders, clipping, the 24 blend modes, 8 of 12 adjustment kinds, the 6 effects, text and shape metadata, guides, resolution (section below) | — (import only, AB-D-0131; `sourceReadOnly`) | `CompImport`; dispatched by `DocumentIO.importFile(contentsOf:)` for a directory |
+| Compositor (`.comp`, v1–v13) | the package directory: 8/16-bit PNG and OpenEXR layers, transforms, masks, folders, clipping, the 24 blend modes, the 12 adjustment kinds (Grain, Add Noise and the blurs as filter adjustment layers), the 6 effects, text and shape metadata, guides, resolution (section below) | — (import only, AB-D-0131; `sourceReadOnly`) | `CompImport`; dispatched by `DocumentIO.importFile(contentsOf:)` for a directory |
 | Affinity (`.af`, `.afdesign`, `.afphoto`, `.afpub`) | spreads/artboards, groups, shapes (incl. clipping shapes), text, images as embedded smart objects, pixel layers, layer and vector masks, blend modes; the embedded preview with a warning when the native data can't be read | — (refused by name, as in photocraft) | `AffinityImport` on `Affinity.read`/`Affinity.preview` |
 | Flat images | through the injected `FlatImageCodec` (default `ImageIOCodec`): straight alpha, Gray+alpha, 8/16-bit and half/full float read from the image's own samples, EXIF/XMP/text from the container, EXIF/TIFF orientation applied, EXIF/XMP resolution fallback, linear profile for EXR/HDR, multi-part EXR opened at its most colourful part; `Document.fileEncoding` from the file (JPEG quality from its quantisation tables, WebP lossless/lossy at 75: photocraft `file_encoding`, `SourceEncoding`) | PNG/JPEG/TIFF through the codec (photocraft `export_flat`): a plain single layer at its own model and depth, else the composite (CMYK/Lab as sRGB); alpha dropped when opaque; JPEG matted over white; EXIF/XMP/text/resolution embedded, normalised | the full codec matrix (WebP/AVIF/JPEG XL writing, GIF frames, TGA alpha channel, BMP palettes, JPEG quality estimate, camera raw) is PCPlatform's |
 
@@ -145,7 +145,7 @@ side, 10,000 layers, 800 MP of images and of masks.
 | Hue/Saturation (master, six ranges with their bands, colorize) | `.hueSaturation`; "invert range" has no equivalent (warned) |
 | Levels, Exposure, Invert, Black & White (+ tint), Color Balance, Gradient Map | the same adjustment; a tint becomes Photoshop's tint colour (HSL at ½ lightness); Gradient Map reads brightness with Photoshop's weights (warned: Compositor's are Rec. 709's) |
 | Curves | pencil curves holding the 256 levels Compositor's monotone Hermite curves evaluate to (exact at 8 bits; the handles are not kept, warned) |
-| Grain, Add Noise, Gaussian Blur, Motion Blur | no Photoshop adjustment layer: left out with their settings in the warning |
+| Grain, Add Noise, Gaussian Blur, Motion Blur | filter adjustment layers (`Adjustment.filter`, AB-T-0258) with Compositor's settings and seeds; PCRender draws them (no Photoshop adjustment layer: a PSD save writes them as empty pixel layers, below) |
 | stroke, drop shadow, inner shadow, outer glow, inner glow, colour overlay | Photoshop layer styles in Normal (Compositor's renderer), sizes scaled from layer pixels to document pixels; Compositor's own effect shapes differ (its outside stroke is a square dilation) |
 | text metadata | a type layer: runs from the UTF-16 colour/face runs, size and leading in points at the document's resolution, tracking in 1/1000 em, box or point text placed as Compositor lays it out (12 px padding); Compositor's PNG is its rendered pixels until edited |
 | shape metadata | a shape layer (live rectangle/ellipse/line when upright) with Compositor's PNG as its pixels |
@@ -164,7 +164,8 @@ compared with the PNG Compositor exported, premultiplied at 8 bits:
 | clip | 1 | 1 / 1 | |
 | folder | 1 | 21 / 21 | Pass Through by design; with its opacity and mask pushed into its layers (Compositor's way) 3 levels |
 | effects | 1 | 197 / 197 | layer-style shapes |
-| adjust | 13 | 0 for Curves, Invert, B&W; 3–4 Hue/Sat, Levels, Exposure; 28 Gradient Map (luminance weights); 53 Color Balance (Photoshop's algorithm); the four left-out kinds show the layers below unchanged | |
+| adjust | 13 | 0 for Curves, Invert, B&W, Add Noise; 1 Grain; 1.83 Motion Blur; 2.54 Gaussian Blur (30 px over 2); 3–4 Hue/Sat, Levels, Exposure; 28 Gradient Map (luminance weights); 53 Color Balance (Photoshop's algorithm) | the four filter kinds held to their bounds (`filterBounds`) |
+| motion | 5 | 1.52 at 0°, 2.00 at 90°; 13 at 45°/20 px (115 px over 2), 7 at −30°/25 px (76 px), 34 at 60°/4 px (806 px) | Motion Blur adjustment layers, held to these bounds: off the axes `CIMotionBlur` isn't a Gaussian streak (PCRender PORT-NOTES) |
 
 Compositor's oracle blends through CoreGraphics (14 modes) and Core Image pinned to sRGB (10).
 Run on the layers of Photoshop 27.11's own ps-corpus `blend-*.psd` files
@@ -490,6 +491,23 @@ photocraft-format's, so bundles go both ways:
   coded iteratively (a 100-deep tree in 512 KiB of stack); directory bundles fall back to `fsync`
   where `F_FULLFSYNC` is refused (SMB), which photocraft fails on.
 
+### Format 3: filter adjustment layers (AB-T-0258)
+
+- `pcraftFormatVersion` is 3. A document holding a filter adjustment layer (`Adjustment.filter`:
+  Grain, Add Noise, Gaussian Blur, Motion Blur; anywhere in the tree, hidden or not) is written as
+  format 3, in either container (format 3 allows ZIP64). The manifest stores it as
+  `{"Filter":{"GaussianBlur":{"radius":10}}}` (serde's externally tagged form), seeds included.
+- Every other document is still written as format 1 (or 2 for a ZIP64 single file), so
+  photocraft keeps opening what it could.
+- A reader that doesn't know the kind must reject the file, and the version makes it: photocraft
+  and PhotoCraftNative 0.3 (format 2) refuse it as "written by a newer version" instead of failing
+  on an unknown adjustment. Version 2 manifests migrate to 3 unchanged.
+- PSD/PSB has no such layer: each is written as an empty pixel layer (its name, mask, opacity, blend
+  mode and clipping kept) with a warning naming it, and the merged image shows the filters
+  (`FilterAdjustmentPSDTests`, both record conventions, PCPSD's linter clean). Rasterizing them
+  instead would stamp the filtered backdrop as pixels, which needs the backdrop of each layer
+  rendered inside PSD export; not done.
+
 ### Format 2: ZIP64, the package type, Save (AB-T-0240, AB-D-0131)
 
 - **Two forms.** The package (directory) form is the editor's default Save. It is incremental (only
@@ -500,10 +518,10 @@ photocraft-format's, so bundles go both ways:
   Every archive that fits is byte for byte the classic layout. `ZipReader` reads ZIP64 from any
   writer, checked both ways against Info-ZIP (`zip -fz`, `unzip -t`). A missing ZIP64 field reads
   as its classic value, as Info-ZIP and Python read it.
-- **Manifest version.** `pcraftFormatVersion` is 2, and version 1 migrates to 2 unchanged. Format 2
-  changes the container, not the document schema. A writer writes 1 (photocraft's) unless the
-  single file needs ZIP64, so photocraft opens every package and every single file it could open
-  before. A ZIP64 single file says 2, and photocraft can't open it either way. New objects are
+- **Manifest version.** Format 2 (`pcraftZip64FormatVersion`), and version 1 migrates to 2
+  unchanged (and on to 3, above). Format 2 changes the container, not the document schema. A
+  writer writes 1 (photocraft's) unless the single file needs ZIP64, so photocraft opens every
+  package and every single file it could open before. A ZIP64 single file says 2, and photocraft can't open it either way. New objects are
   compressed and checksummed on all cores.
 - **Streamed, never whole (AB-T-0249).** `PcraftWriter.save(_:to:as: .singleFile)` writes the
   archive into the atomic save's temporary file entry by entry (`ZipStreamWriter` over a file

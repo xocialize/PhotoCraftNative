@@ -33,6 +33,7 @@ Both depend on `../PCFoundation` only. `PCHistory` depends on `PCDocument` (as o
 | (new) | `PCDocument/LayerTree.swift` | id → path index, navigation, placements, insert/move/group/ungroup, `reassignLayerIds` |
 | (new) | `PCDocument/LayerProperties.swift` | a layer's pixel-free properties as one value (`SetLayerProps`) |
 | `doc/src/adjust.rs` | `PCDocument/Adjust.swift` | curve maps, `lut3d_len`, `HueRange` maths, every `Adjustment` |
+| (new; Compositor's settings, MIT, © 2026 Wonder Assembly LLC) | `PCDocument/FilterAdjustment.swift` | `Adjustment.filter(FilterAdjustment)`: Grain, Add Noise, Gaussian Blur, Motion Blur over the composite beneath (AB-T-0258); settings, ranges and defaults are Compositor's; JSON `{"Filter":{"Grain":{…}}}`; `.pcraft` format 3 |
 | `doc/src/advanced.rs` | `PCDocument/Advanced.swift` | |
 | `doc/src/analysis.rs` | `PCDocument/Analysis.swift` | `Measurement` → `MeasurementSettings` |
 | `doc/src/blend_if.rs` | `PCDocument/BlendIf.swift` | `[BlendRange; 2]` → `BlendRangePair` |

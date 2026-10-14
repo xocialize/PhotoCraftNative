@@ -10,10 +10,13 @@ and error messages are kept verbatim, and photocraft's tests are ported one for 
 
 All 892 command ids of photocraft's catalogue are registered with photocraft's label, menu path,
 shortcut and params notation: **887 implemented, 5 stubbed** (`plugin.*`, the WebAssembly plug-in
-host), **0 not registered**. 16 more ids are registered that photocraft's engine doesn't have: the
+host), **0 not registered**. 20 more ids are registered that photocraft's engine doesn't have: the
 seven File-menu ids its app shell owns (`file.open`, `file.save`, `file.saveAs`,
-`file.export.exportAs`, `file.export.quickExportAsPng`, `file.clearRecent`, `file.removeRecent`)
-and nine PCIntelligence commands. Files go through PCIO (PSD, PSB, .pcraft, OpenRaster, layered
+`file.export.exportAs`, `file.export.quickExportAsPng`, `file.clearRecent`, `file.removeRecent`),
+nine PCIntelligence commands, and the four filter adjustment layers (AB-T-0258:
+`layer.newAdjustmentLayer.grain`, `.addNoise`, `.gaussianBlur`, `.motionBlur`, created with
+Compositor's settings and edited by `layer.setAdjustment`; Grain's and Add Noise's `seed` defaults
+to one derived from the new layer's id, and a reset keeps it). Files go through PCIO (PSD, PSB, .pcraft, OpenRaster, layered
 TIFF, Krita/Paint.NET/Affinity import, SVG, EXR parts) with the engine's compositor and PCPlatform's
 text, vector and image codecs injected; smart objects re-render from their sources. `pccli`, the
 control channel and MCP read and write every format.

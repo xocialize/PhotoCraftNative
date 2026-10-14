@@ -33,7 +33,8 @@ PCDocument ──DocumentPlanner──▶ RenderPlan (DrawOp stack program) + Do
   region. `pushGroup/popGroup` (isolated | pass-through with opacity × mask), `pushTransparent`,
   `pick/drop/swap/remove`, `drawTiles(leaf, mask)`, `fill`, `pushMaskShape`, `mask`, `composite`
   (blend_into_fill: special-eight fill, Dissolve, text gamma), `clipped` (atop), `adjust`,
-  `adjustMix`, `quantize`, `finishLayer` (channels + Blend If), `effect(spec, atop:)`,
+  `filter` and `backdropFilter` (filter adjustment layers, below), `adjustMix` (with `coverage` for
+  the blurs), `quantize`, `finishLayer` (channels + Blend If), `effect(spec, atop:)`,
   `saveFloor/pushFloor/dropFloor`, `knockoutBegin/End`, `mixBy`, `addDifference`, `restrictTo`.
   `RenderPlan.validate()` checks stack discipline.
 * **Leaves** come from a `RenderSource` (`leaf`, `leafVersion`, `pattern`): `.surface` (tiled
@@ -59,12 +60,14 @@ PCDocument ──DocumentPlanner──▶ RenderPlan (DrawOp stack program) + Do
 | `CPU/GradientMath.swift` | compose effects.rs, fill_layout.rs, gradient_fill.rs | gradient geometry, ramps, dither |
 | `CPU/Masks.swift` | compose masks.rs, lib.rs `mask_vals` | `LeafReader`, combined (feathered) masks, Blend If weight |
 | `CPU/RGBABuffer.swift` | compose `Buffer` | buffers, parallel helpers |
+| `CPU/Filters.swift` | (new; Compositor's grain / noise hashes, MIT, © 2026 Wonder Assembly LLC) | filter adjustment layers: `FilterMath` (patterns, kernels, reach), the CPU reference `FilterCPU` |
 | `Effects/*.swift` | compose effects.rs, gpu fx.rs | distance fields, effect maps, `composite_with_effects` |
 | `Params/PatternTile.swift` | compose pattern.rs | pattern tiles and placement |
 | `Metal/MetalCompositor.swift` | gpu lib.rs `Compositor`, `run_cell` | cells, back-to-back command buffers, op encoding |
 | `Metal/MetalEffects.swift` | gpu fx.rs, plan.rs `effects`, lib.rs `sync_fx` | GPU effect maps, feathered masks, effect composite |
 | `Metal/Residency.swift` | gpu lib.rs residency | tile-generation residency cache with LRU budget |
 | `Metal/GPUAdjustment.swift` | gpu plan.rs `adjustment_program` | adjustment → specialised kernel |
+| `Metal/MetalFilters.swift`, `Shaders/PCR8Filters.metal` | (new) | filter adjustment layers on the GPU: Grain / Add Noise kernels, a blur's backdrop program rendered and blurred before the cells |
 | `Metal/MetalKernels.swift` | gpu lib.rs pipelines | `PCROp` (288 B), pipelines, `AccumulatorPrecision`, `TexturePool` |
 | `Metal/CanvasMemory.swift` | (new) | GPU footprint (`CompositorFootprint`, `DisplayFootprint`), `memoryBudget` caps, views (`RenderView`), the `relieve` ladder (`ReliefLevel`, `ReliefReason`, `Relief`) |
 | `Shaders/PCR0–6*.metal` | compose.wgsl | `pcr_` kernels: compose, adjust, fill, maps, effects, masks |
@@ -583,6 +586,71 @@ min(4 GiB, ¼ of `recommendedMaxWorkingSetSize`), so roughly 2.7 GB on a 16 GB M
 measured here) is GPU memory too. It trims on memory
 pressure, and a host can add it to its declaration and call `trimCaches(.critical)` from its
 shedder (its own lock, never the compositor's).
+
+## Filter adjustment layers (AB-T-0258)
+
+`Adjustment.filter` (PCDocument): Compositor's Grain, Add Noise, Gaussian Blur and Motion Blur
+adjustment layers, a filter over the composite beneath them, live. They act like any adjustment
+layer: within their group (or on their clipping base), inside their mask, at their opacity and in
+their blend mode, with the depth quantisation after them. New; no photocraft counterpart.
+
+* **Semantics (Compositor's, as `ImageExporter.render(_ snapshot:)` draws them).** Grain and Add
+  Noise are Compositor's patterns (`adjust_grain`, `noise_add_at`: the same hashes, lattice and
+  Box–Muller, in Float), fixed in document space by their seed: Grain's field at each pixel's
+  centre in document pixels, Add Noise per document pixel. Gaussian Blur is a Gaussian of sigma =
+  radius over ±⌈3σ⌉ (`CIGaussianBlur`'s, measured); Motion Blur a Gaussian along the line of sigma
+  distance / √12 (the spread of an even streak; what `CIMotionBlur` with Compositor's radius
+  measures on its axes), its taps read bilinearly. Both on premultiplied colour, with the backdrop
+  clear past the canvas, so an opaque picture thins at the canvas edge as in Compositor (its blurs
+  are deliberately not clamped there). In Normal, `AdjustMix.coverage` mixes premultiplied colour
+  and coverage, so a blur spreads into clear pixels; the other modes blend colours and keep the
+  backdrop's coverage (Compositor blends at full coverage and restores the alpha). Clipped to a
+  base, a blur keeps the base's coverage (atop) and takes its colours from the base's own pixels;
+  Compositor blurs the base made opaque, so it darkens towards the outline where this doesn't.
+  `LayerGeometry.filterReach` is how far a change beneath the blurs can spread: PCEngine's damage
+  grows by it.
+* **Plan.** Grain and Add Noise are `.filter(FilterSpec)` on a copy of the backdrop, per pixel. A
+  blur needs its backdrop past each tile and cell, so it is a `.backdropFilter(BackdropFilter)`
+  carrying the backdrop's own program: the ops so far, then `.remove` / `.dropFloor` until the
+  backdrop is alone. Each render runs that program once, over the region plus the blur's reach
+  within the canvas, blurs the whole of it, and every tile or cell reads its part. On the root stack
+  (the usual case) the program replaces the ops that made the backdrop (`pushesBackdrop`), so the
+  layers below are composited once; inside a group they are composited twice. Nested blurs nest
+  programs. The planner keeps layers within the document's blur reaches added up
+  (`LayerGeometry.filterReach`) past the region, and a group's bounds grow by its blurs' reach.
+* **Executors.** CPU: `prepare` renders each program (its tiles in parallel) and filters it.
+  Metal: `prepare` renders each program first by a nested render in the plan's accumulator format
+  (it waits, so everything it builds is complete), then premultiplies and blurs over the region
+  (`pcr_blur_h` / `pcr_blur_v`, or `pcr_blur_motion` with taps precomputed as whole steps and
+  fractions, so where a render starts never changes a sample), and cells read the result through
+  `pcr_draw_leaf`. A `.filter` blur (never planned) is CPU-only.
+* **Parity, GPU vs CPU** (`FilterAdjustmentTests`, 143 renders: 11 settings × 8/16/32-bit, masked,
+  four blend modes, isolated and pass-through groups, clipped, three filters stacked, Lab): every
+  blur, Grain and uniform Add Noise render is **identical** (0). Gaussian Add Noise takes libm's
+  log and cos against Metal's precise ones, an ulp apart: a pixel on a rounding edge flips one 8-bit
+  level (2 of the 143 renders), one 16-bit step at 16 bits, 8·10⁻⁵ levels at 32. In Lab documents Grain and Add Noise go through display RGB
+  and back, where PCRender's CPU and GPU Lab conversions differ (cbrt and pow): up to 2.6 levels,
+  against 3.8 for Hue/Saturation on the same document. Any region, band, tile or cell equals the
+  same pixels of the whole canvas's render, exactly.
+* **Against Compositor** (PCIO's `CompCorpusTests`, its own 64² oracles, premultiplied 8-bit):
+  Add Noise 0 levels, Grain 1, Gaussian Blur 2.54 (30 px over 2: `CIGaussianBlur`'s approximation),
+  Motion Blur 1.83, and the motion set 1.52 (0°) and 2.00 (90°). Off the axes `CIMotionBlur` is not
+  a Gaussian streak (an impulse sums to 0.91–1.13 instead of 1 and spreads across the line), so
+  short diagonal streaks differ most at sharp edges: 45°/20 px 13 levels (115 px over 2), −30°/25 px
+  7 (76 px), 60°/4 px 34 (806 px); means ≤ 1.03 levels.
+* **Cost** (release, warm, M5 Max, `PCRENDER_FILTER_BENCH=1 swift test -c release --filter
+  FilterAdjustmentTests/bench`; a 4096² two-layer document, 11.8 ms on the GPU without a filter):
+  Grain +4.4 ms, Gaussian Add Noise +2.3 ms, Gaussian Blur radius 10 +37 ms, radius 50 +79 ms,
+  Motion Blur 45°, 40 px +41 ms; the CPU reference over 1024², 3 ms bare: +3, +10, +19, +81, +21 ms.
+  A blur allocates its backdrop, premultiplied and intermediate textures (rgba32Float, the region
+  plus its reach) per render, outside `CanvasMemory`'s accounting: transient, but a pooled set
+  would save their page mapping (about 5 ms per 4096² texture).
+* **Levels of detail (AB-T-0256).** `FilterSpec.scale` is plan pixels per document pixel: blur
+  lengths and reach multiply by it, Grain reads its field in document units at level pixel centres,
+  Add Noise hashes level pixels with a seed of the level and scales its spread by it (a level pixel
+  averages 1/scale² document pixels). When `RenderPlan.atLevel` lands, `DrawOp.atLevel` maps
+  `.filter(f)` to `f.atLevel(level)`, and `.backdropFilter(b)` to its spec `atLevel` with its
+  program's ops mapped too.
 
 ## For the next phase
 
