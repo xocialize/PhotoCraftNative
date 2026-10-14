@@ -105,6 +105,15 @@ public enum DocumentIO {
             try options.interrupt.check()
             do { return ImportResult(document: try PcraftFormat.load(contentsOf: url)) } catch { throw PCIOError.format("pcraft", error.description) }
         }
+        // A single-file `.pcraft` is read entry by entry through its central directory, never whole.
+        if url.pathExtension.lowercased() == PcraftFormat.fileExtension, PcraftFormat.container(at: url) == .singleFile {
+            try options.interrupt.check()
+            let r: ImportResult
+            do { r = ImportResult(document: try PcraftFormat.load(contentsOf: url)) } catch { throw PCIOError.format("pcraft", error.description) }
+            try options.interrupt.check()
+            options.interrupt.progress(1)
+            return r
+        }
         let data: Data
         do { data = try Data(contentsOf: url, options: [.alwaysMapped]) } catch { throw PCIOError.io("\(error)") }
         let name = url.lastPathComponent

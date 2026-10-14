@@ -106,6 +106,42 @@ struct WholeFilesOnly: FileSystemService {
         #expect(throws: EngineError.self) { try s.execute("file.saveAs", ["path": .string(path), "form": "zip"]) }
     }
 
+    /// A single file on a local disk is streamed into place (AB-T-0249): Save and Save a Copy write
+    /// the very bytes the export encodes in memory, and Open reads it back entry by entry, with the
+    /// errors the in-memory open gives.
+    @Test func aSingleFileIsStreamedAsTheExportWritesIt() throws {
+        let dir = try ioDir("streamed")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let s = try poster()
+        let doc = try #require(s.active?.doc)
+        let encoded = try FileCommands.encode(s, doc, "x.pcraft").0
+        let saved = dir.appendingPathComponent("Saved.pcraft").path
+        try s.saveDocument(to: saved, pcraftForm: .singleFile)
+        #expect(try [UInt8](Data(contentsOf: URL(fileURLWithPath: saved))) == encoded)
+        // Saving renamed the document: a copy now holds the new name.
+        let renamed = try FileCommands.encode(s, try #require(s.active?.doc), "x.pcraft").0
+        #expect(renamed != encoded)
+        let copy = dir.appendingPathComponent("Copy.pcraft").path
+        try s.execute("file.saveACopy", ["path": .string(copy)])
+        #expect(try [UInt8](Data(contentsOf: URL(fileURLWithPath: copy))) == renamed)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: dir.path).sorted() == ["Copy.pcraft", "Saved.pcraft"])
+        let s2 = Session()
+        let (i, _, _) = try s2.openFile(copy)
+        #expect(s2.documents[i].doc.layers == doc.layers)
+        // A damaged file fails as it does when read whole.
+        var damaged = renamed
+        damaged.removeLast(30)
+        let bad = dir.appendingPathComponent("Damaged.pcraft")
+        try Data(damaged).write(to: bad)
+        let whole = Result { try EngineIO.importFile(name: "Damaged.pcraft", bytes: damaged, services: s2.services) }
+        let streamed = Result { try s2.openFile(bad.path) }
+        guard case .failure(let a) = whole, case .failure(let b) = streamed else {
+            Issue.record("both opens must fail: \(whole), \(streamed)")
+            return
+        }
+        #expect("\(a)" == "\(b)")
+    }
+
     /// PSD stays PSD (and PSB stays PSB), with a warning for each thing it can't keep.
     @Test(arguments: ["psd", "psb"]) func aDocumentOpenedFromPhotoshopSavesBackToIt(_ ext: String) throws {
         let dir = try ioDir("photoshop-\(ext)")

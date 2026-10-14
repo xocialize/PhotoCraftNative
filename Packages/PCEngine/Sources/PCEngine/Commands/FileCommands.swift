@@ -172,9 +172,14 @@ public enum FileCommands: CommandModule {
         return (r.bytes, r.warnings)
     }
 
-    /// Encodes and writes `doc` to `path` (photocraft `save_doc`); returns the warnings.
+    /// Encodes and writes `doc` to `path` (photocraft `save_doc`); returns the warnings. A
+    /// single-file `.pcraft` on a local disk is streamed into place instead (`saveSingleFile`).
     @discardableResult
     static func saveDoc(_ s: Session, _ doc: Document, _ path: String, _ save: SaveOpts = SaveOpts()) throws -> [String] {
+        if fileExtension(path) == PcraftFormat.fileExtension, !s.services.fileSystem.isDirectory(path), let url = s.services.fileSystem.localURL(path) {
+            try s.saveSingleFile(doc, path, url)
+            return []
+        }
         let (bytes, warnings) = try encode(s, doc, path, save)
         try writeFile(s, path, bytes)
         return warnings

@@ -12,12 +12,14 @@
 // A package needs a local folder (`FileSystemService.localURL`); sessions without one, and
 // automation sessions (`newPcraftContainer = .singleFile`: scripts and agents expect one file), save
 // `.pcraft` as a single file. Each open document keeps one `PcraftWriter`, so repeated package saves
-// re-hash and re-write only the tiles that changed.
+// re-hash and re-write only the tiles that changed. A single file on a local disk is streamed into
+// place entry by entry (AB-T-0249), so a multi-gigabyte document is never encoded in memory whole.
 
 import Foundation
 import PCDocument
 import PCFormat
 import PCIO
+import PCIOCore
 
 /// What File › Save does with a document (`Session.savePlan`).
 public struct SavePlan: Sendable, Equatable {
@@ -117,6 +119,23 @@ extension Session {
             return try writer.save(doc, to: url, as: .package, previews)
         } catch {
             throw EngineError.other("save `\(path)`: \(error)")
+        }
+    }
+
+    /// Saves `doc` as a single-file `.pcraft` at `path` (local file `url`), written into its
+    /// temporary file as it is encoded and then renamed into place: the same file the export
+    /// writes, with the same previews and errors, but never held in memory whole.
+    func saveSingleFile(_ doc: Document, _ path: String, _ url: URL) throws {
+        let previews: SaveOptions
+        do { previews = try DocumentIO.pcraftPreviews(doc, options: EngineIO.options(services)) } catch { throw EngineIO.wrap(error, "save `\(path)`") }
+        // A one-off writer: it keeps nothing for a next save.
+        let writer = PcraftWriter()
+        writer.setZipCacheBudget(0)
+        do {
+            try writer.save(doc, to: url, as: .singleFile, previews)
+        } catch {
+            if case .io(let e) = error { throw EngineError.other("\(path): \(e)") }
+            throw EngineIO.wrap(PCIOError.format("pcraft", error.description), "save `\(path)`")
         }
     }
 }

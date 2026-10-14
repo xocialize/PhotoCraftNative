@@ -186,7 +186,7 @@ public enum EngineIO {
     }
 
     /// Reads and imports the file at `path` through the session's file service. A `.pcraft`
-    /// package (a folder) is read object by object.
+    /// package (a folder) is read object by object, a local single-file `.pcraft` entry by entry.
     public static func importPath(_ path: String, services: EngineServices, interrupt: Interrupt = .none) throws -> ImportResult {
         let fs = services.fileSystem
         if fileExtension(path) == PcraftFormat.fileExtension, fs.isDirectory(path) {
@@ -197,6 +197,12 @@ public enum EngineIO {
                 return ImportResult(document: doc)
             } catch {
                 throw EngineError.other("open `\(DocState.fileName(path))`: pcraft: \(error)")
+            }
+        }
+        // A single-file `.pcraft` on a local disk is read entry by entry, never whole (AB-T-0249).
+        if fileExtension(path) == PcraftFormat.fileExtension, fs.exists(path), let url = fs.localURL(path) {
+            do { return try DocumentIO.importFile(contentsOf: url, options: options(services, interrupt: interrupt)) } catch {
+                throw wrap(error, "open `\(DocState.fileName(path))`")
             }
         }
         let data: Data
