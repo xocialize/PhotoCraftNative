@@ -124,7 +124,8 @@ let package = Package(
         .testTarget(name: "PCPlatformTests", dependencies: ["PCPlatform", "PCDocument"], path: tests("PCPlatform", "PCPlatformTests")),
 
         // MARK: PCAlgo — the Filter menu: Metal kernels with Swift CPU references (photocraft-algo).
-        .target(name: "PCAlgo", dependencies: ["PCFoundation"], path: sources("PCAlgo", "PCAlgo"), resources: [.copy("Shaders")]),
+        .target(name: "PCAlgo", dependencies: ["PCFoundation"], path: sources("PCAlgo", "PCAlgo"),
+                resources: [.copy("Shaders"), .copy("Tone/CameraRawModel.json")]),
         .testTarget(name: "PCAlgoTests", dependencies: ["PCAlgo", "PCFoundation"], path: tests("PCAlgo", "PCAlgoTests")),
 
         // MARK: PCPaint — the brush engine: dab generation, CPU reference, Metal dab renderer

@@ -122,7 +122,7 @@ bit-identical. Release timings follow the table.
 | Filter Gallery | 47 effects (Artistic, Brush Strokes, Distort, Sketch, Stylize, Texture) as a stack | artistic.rs, artistic_fx.rs | Gallery/*.swift | pca_gfx_* | 2.15e-06 (worst of 49 cases) | float-float line blurs keep thresholds identical |
 | Other / Tone | HSB/HSL, De-Interlace, NTSC Colors, Color to Alpha | other2.rs, video.rs, color_to_alpha.rs | Tone/HsbHsl.swift, Video.swift, ColorToAlpha.swift | pca_tone_hsbhsl, _deinterlace, _ntsc, _color_to_alpha | 0 / 0 / 0 / 0 |  |
 | Tone | Replace Color, Match Color, HDR Toning, Shadows/Highlights | tone.rs, tone/shadows_highlights.rs | Tone/ToneAdjustments.swift, ShadowsHighlights.swift | pca_tone_replace_color, _match_color, _hdr_*, _sh_* | 0 / 4.21e-06 / 1.61e-06 / 4.77e-07 | statistics on the CPU where small |
-| Tone | Camera Raw develop (per-pixel stages) | camera_raw.rs (+ local_tone, whites_blacks) | Tone/CameraRaw*.swift | pca_tone_camera_raw | 1.13e-06 | Dehaze/local-Laplacian/Clarity/Detail stages CPU |
+| Tone | Camera Raw develop (per-pixel stages) | camera_raw.rs; the sliders Photoshop's, fitted (AB-T-0241, below) | Tone/CameraRaw*.swift | pca_tone_camera_raw | PARITY | one lattice of the colour stages; Dehaze/Clarity/Texture/Detail stages CPU |
 | Analysis | Histogram, Vectorscope | histogram.rs, vectorscope.rs | Tone/Histogram.swift, Misc/Vectorscope.swift | pca_tone_rgb_hist, pca_misc_vectorscope | 0 / 0 | atomic bins, exact |
 | HDR | Merge to HDR, tone mapping (4 methods) | hdr.rs | Tone/HDR.swift, HDRGPU.swift | pca_tone_hdr_merge, _ghost_*, _tm_* | 2.91e-07 / 1.25e-06 | response recovery / MTB on CPU |
 | Quantize | Palettes, nearest colour, dithering, Bitmap | quantize.rs, quantize/nearest.rs | Tone/Quantize*.swift | pca_tone_quantize, _bitmap | 0 / 0 | error diffusion / palette building CPU |
@@ -245,6 +245,47 @@ Selection rows are 4096² masks through the host-array APIs (`.auto` picks the C
 cost more than the kernels); Segment rows are 1 MP; RenderProc composites the generated primitives
 into a 6000 × 4000 RGBA8 `Surface`, where the Surface writes dominate both backends.
 
+## Camera Raw: Photoshop's sliders, fitted (AB-T-0241)
+
+A deliberate departure from photocraft (AB-D-0139). White balance, Exposure, Contrast, Highlights,
+Shadows, Whites, Blacks, Saturation, Vibrance, the parametric curve (at its default dividers), the
+Color Mixer and Color Grading are no longer photocraft's formulas but Photoshop's Camera Raw Filter's
+behaviour, fitted; Calibration (the primaries' hue and saturation) is new. photocraft's Dehaze,
+Clarity, Texture, point curves, Detail, vignette and grain are unchanged.
+
+* **The model** (`Tone/CameraRawModel.swift`): each slider stop is one stage on linear ProPhoto RGB —
+  a 3×3 matrix, a hue map (hue shift, saturation and value scales at 24 hues weighted by saturation,
+  the DNG HueSatMap's form), a tone stage (one grey curve through the DNG SDK's hue-preserving RGB
+  tone, per channel and as a luminance gain with a saturation exponent, mixed) and a tint keyed by
+  lightness, each optional per slider. Between stops a slider blends its two stops' results (four for
+  Temperature × Tint, and for Contrast, Highlights and Shadows, which read the picture's brightness:
+  `CameraRawStatistics`, measured from the pixels unless the settings carry it). The slider logic
+  (stop grids, Balance as a share of saturation, the order the stages compose in) follows
+  Compositor's `CameraRawTables` (MIT).
+* **The parameters** (`Tone/CameraRawModel.json`, 63,498 numbers over 698 stops, about 0.6 % of the tables' 11.2 M) are fitted values and 1-D
+  curves, not colour tables (AB-D-0130). They were fitted (`Tools/CameraRawFit`) to Compositor's
+  Photoshop-captured tables — 763 tables of a 17³ grid, one slider at one stop each — which no
+  longer ship anywhere.
+* **The run.** The colour stages compose over a 33³ lattice per develop, looked up by tetrahedral
+  interpolation, the same lattice on the CPU and in Metal (`pca_tone_camera_raw` now applies the
+  lattice, vignette and grain). Dehaze, Texture and Clarity sit between Calibration / Exposure / white
+  balance and the rest. Float documents keep values past 1, with Exposure as a gain in linear light
+  there. `ToneKit.cameraRawColors` runs the stages exactly on given colours, for a caller composing its
+  own lookup (PixelAgencyEditor's panel).
+* **Fit.** Measured as the gap was before fitting (AB-R-0532: every table stop, every channel of every grid colour,
+  8-bit levels, through `develop` itself), p99 before → after: white balance 202 → 23.5, Exposure 204 → 6.4, Contrast
+  90 → 8.4, Highlights 81 → 19.5, Shadows 40 → 10.4, Whites 66 → 15.2, Blacks 33 → 5.2, Saturation 80 → 13.5,
+  Vibrance 121 → 8.5, Mixer hue 30–113 → 3.4–5.4, saturation 30–103 → 4.9–11.4, luminance 40–106 → 14–37,
+  Calibration 96–129 → 14–18, parametric curve 45–99 → 6–11, grading wheels 69–86 → 13–22, grading luminance
+  54–78 → 1.9; means 0.2–2.9 levels. Only the grading luminance sliders are within AB-D-0139's 2 levels: the error
+  concentrates in saturated colours at the sRGB gamut's edge, and Highlights and Shadows are local in Photoshop, so
+  a per-pixel model of them is an approximation (AB-L-0271 found both). The 65³ lattice adds a p99 of about 2 levels
+  between its points (33³ would add 6). Receipts: AB-R-0532 (before), AB-R-0538 (after).
+* **What went.** photocraft's white-balance gains, sine Contrast, local-Laplacian Highlights/Shadows
+  (`camera_raw/local_tone.rs`), Photoshop-25.4 Whites/Blacks curves (`camera_raw/whites_blacks.rs`),
+  Vibrance/Saturation, parametric bumps, HSL bands and grading tints, with their ported tests; the
+  remaining photocraft tests say where the fitted model holds them differently.
+
 ## Native frameworks
 
 * **Metal** compute for every GPU path; **Metal Performance Shaders**: `MPSImageAreaMin/Max` for
@@ -265,8 +306,8 @@ into a 6000 × 4000 RGBA8 `Surface`, where the Surface writes dominate both back
   non-local solver (Inpaint), max-flow / GrabCut / Quick Selection, seam DP, Poisson SOR (healing),
   Nelder–Mead direct alignment (f64 cost cancellation), descriptors / matching / RANSAC / bundle
   adjustment, error diffusion and palette building, HDR response recovery and MTB, Camera Raw's
-  spatial stages (Dehaze, local-Laplacian Highlights/Shadows, Clarity/Texture, Whites/Blacks,
-  Detail), red-eye, retouch dab kernels, magnetic lasso, polygon rasterisation, procedural primitive
+  spatial stages (Dehaze, Clarity/Texture, Detail) and its picture brightness when the settings don't
+  carry it, red-eye, retouch dab kernels, magnetic lasso, polygon rasterisation, procedural primitive
   generation (Flame / Tree / Frame).
 * **CPU under `.auto` for some models:** filters that read native CMYK/Lab channels jointly (Smart
   Blur on CMYK+A, Diffuse/Wind/Facet/Extrude on CMYK, Oil Paint on CMYK+A, Color Halftone /

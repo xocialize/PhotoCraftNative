@@ -115,7 +115,8 @@ loses its 4 GiB limit, as a `.pcraft` format v2 with a migration from v1.
 1. **Default format:** `.pcraft` document package, with PSD/PSB first-class. Recorded as **AB-D-0131**.
 2. **Where the app lives:** a new app repo from the Compositor history, plus a PhotoCraftNative package
    repo. Compositor's `main` stays Forge's oracle. Recorded as **AB-D-0132**.
-3. **Camera Raw tables:** decide later, before any release (task AB-T-0241).
+3. **Camera Raw tables:** dropped (AB-D-0139, AB-T-0241). PCAlgo's Camera Raw sliders are Photoshop's behaviour, fitted
+   (`Packages/PCAlgo/Sources/PCAlgo/Tone/CameraRawModel.swift`, `Tools/CameraRawFit`); the editor's panels draw with them.
 4. **Owner:** a new effort id `photocraft` (ask AB-A-0167).
 
 5. **Identity and distribution (AB-D-0133):**
@@ -229,7 +230,7 @@ over a ForgeCore-only catalog on MESInProcess. Desktop then links them back. Its
 | AB-T-0238 (P2) | photocraft | Menus and shortcuts from the command registry; UI-owned ids (blocked by 0235, 0236) |
 | AB-T-0239 (P2) | photocraft | PCIO `.comp` importer |
 | AB-T-0240 (P1) | photocraft | `.pcraft` v2: ZIP64, package UTI, Save semantics (no provenance or history; those live in the container) |
-| AB-T-0241 (P3) | photocraft | Decide the Camera Raw tables before release |
+| AB-T-0241 (P3) | photocraft | Camera Raw tables dropped; PCAlgo's sliders fitted to Photoshop's (AB-D-0139) |
 | AB-T-0242 (P2) | photocraft | Adopt DesignScaffold tokens; app-local editor controls (blocked by AB-A-0168, 0235) |
 
 Repos created 2026-10-13 (private): `xocialize/PhotoCraftNative` and `xocialize/PixelAgencyEditor` (GitHub Actions off). Can start now: AB-T-0234 (root `Package.swift` and tag), AB-T-0235 (rename, identity, package-first), AB-T-0239 (`.comp` importer). AB-T-0240

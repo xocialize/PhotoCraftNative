@@ -1,9 +1,17 @@
-// Port of photocraft-algo (crates/algo/src/camera_raw.rs, camera_raw/local_tone.rs, camera_raw/whites_blacks.rs, histogram.rs tests), MIT OR Apache-2.0, © ArtCraft Team and the PhotoCraft contributors.
+// Port of photocraft-algo (crates/algo/src/camera_raw.rs, histogram.rs tests), MIT OR Apache-2.0, © ArtCraft Team and the PhotoCraft contributors.
+//
+// AB-T-0241 departs from photocraft on purpose: white balance, Exposure, Contrast, Highlights, Shadows, Whites, Blacks,
+// Saturation, Vibrance, the parametric curve (at its default dividers), the Color Mixer and Color Grading are
+// Photoshop's Camera Raw Filter's, fitted (CameraRawModel.swift), and Calibration is new. photocraft's tests of those
+// formulas say where they now hold differently; its local_tone.rs and whites_blacks.rs tests went with the local
+// Laplacian Highlights/Shadows and the adaptive Whites/Blacks curves the fit replaced, and the fitted model's own
+// tests are below them.
 
 import Foundation
 import Testing
 @testable import PCAlgo
 import PCFoundation
+import simd
 
 @Suite struct ToneCameraRawTests {
     typealias Kit = CameraRawKit
@@ -25,10 +33,16 @@ import PCFoundation
 
     // MARK: Parity (per-pixel stages)
 
+    /// A picture's brightness, for the adaptive sliders to run per pixel.
+    static let bright = CameraRawStatistics(brightest: 0.7, logBrightest: 0.6, luminance: 0.55)
+
     static let perPixelCases: [CameraRaw] = [
         settings { $0.temperature = 40; $0.tint = -30; $0.exposure = 0.7 },
-        settings { $0.contrast = 80 },
-        settings { $0.contrast = -100; $0.exposure = -1.2 },
+        settings { $0.contrast = 80; $0.statistics = bright },
+        settings { $0.contrast = -100; $0.exposure = -1.2; $0.statistics = CameraRawStatistics(brightest: 0.2, logBrightest: 0.2, luminance: 0.2) },
+        settings { $0.highlights = -70; $0.shadows = 60; $0.statistics = bright },
+        settings { $0.whites = 40; $0.blacks = -55 },
+        settings { $0.calibrationRedHue = 30; $0.calibrationGreenSaturation = -60; $0.calibrationBlueHue = 80 },
         settings { $0.vibrance = 70; $0.saturation = -30 },
         settings { $0.curveShadows = 60; $0.curveHighlights = -40; $0.curveSplits = [20, 55, 80] },
         settings { $0.pointCurve = [SIMD2(0, 20), SIMD2(90, 70), SIMD2(200, 230), SIMD2(255, 250)]; $0.pointCurveRed = [SIMD2(0, 0), SIMD2(128, 160), SIMD2(255, 255)] },
@@ -45,7 +59,7 @@ import PCFoundation
         settings {
             $0.temperature = -25; $0.exposure = 0.4; $0.contrast = 30; $0.vibrance = 40; $0.curveDarks = -30
             $0.hslSat = [0, 0, 0, 50, 0, 0, 0, 0]; $0.gradeMidtones = CameraRawWheel(hue: 30, sat: 40, lum: 10)
-            $0.vignetteAmount = -30; $0.grainAmount = 25
+            $0.vignetteAmount = -30; $0.grainAmount = 25; $0.statistics = bright
         },
         CameraRaw(),
     ]
@@ -67,16 +81,21 @@ import PCFoundation
         ParityLog.record("CameraRaw (per-pixel stages)", worst)
     }
 
-    /// Non-per-pixel settings fall back to the CPU under `.auto` and are refused by `.gpu`.
+    /// Non-per-pixel settings fall back to the CPU under `.auto` and are refused by `.gpu`: a neighbourhood, or an adaptive
+    /// slider without the picture's brightness.
     @Test func statisticalStagesRunOnTheCPU() throws {
-        let p = Self.settings { $0.clarity = 50 }
-        let f = CameraRawFilter(settings: p)
-        let ctx = FilterContext(bounds: PixelRect(x: 0, y: 0, width: 8, height: 8), mode: .rgb, alpha: true)
-        #expect(!f.supportsGPU(ctx, channels: 4))
-        var px = Self.img(8, 8), q = px
-        try ToneKit.develop(&px, w: 8, h: 8, p, float: false, on: .auto)
-        ToneKit.develop(&q, w: 8, h: 8, p, float: false)
-        #expect(px == q)
+        for p in [Self.settings { $0.clarity = 50 }, Self.settings { $0.shadows = 50 }] {
+            let f = CameraRawFilter(settings: p)
+            let ctx = FilterContext(bounds: PixelRect(x: 0, y: 0, width: 8, height: 8), mode: .rgb, alpha: true)
+            #expect(!f.supportsGPU(ctx, channels: 4))
+            var px = Self.img(8, 8), q = px
+            try ToneKit.develop(&px, w: 8, h: 8, p, float: false, on: .auto)
+            ToneKit.develop(&q, w: 8, h: 8, p, float: false)
+            #expect(px == q)
+        }
+        var known = Self.settings { $0.shadows = 50 }
+        known.statistics = CameraRawStatistics.measure(Self.img(8, 8))
+        #expect(known.isPerPixel)
     }
 
     // MARK: photocraft camera_raw.rs tests
@@ -141,8 +160,10 @@ import PCFoundation
         #expect(hl[w * h - 1].x < base[w * h - 1].x)
         let con = run(Self.settings { $0.contrast = 100 })
         #expect(con[0].y < base[0].y && con[w * h - 1].x > base[w * h - 1].x)
+        // Photoshop's Saturation −100 makes greys; the fitted model gets within about a level of grey (photocraft's
+        // formula was exact).
         let desat = run(Self.settings { $0.saturation = -100 })
-        #expect(desat.allSatisfy { abs($0.x - $0.y) < 1e-4 && abs($0.y - $0.z) < 1e-4 })
+        #expect(desat.allSatisfy { abs($0.x - $0.y) < 1.5 / 255 && abs($0.y - $0.z) < 1.5 / 255 }, "\(desat.map { $0.max() - $0.min() }.max()! * 255)")
         let vib = run(Self.settings { $0.vibrance = 100 })
         let spread = { (q: SIMD4<Float>) in max(q.x, q.y, q.z) - min(q.x, q.y, q.z) }
         #expect(spread(vib[w * h / 2]) > spread(base[w * h / 2]))
@@ -161,19 +182,19 @@ import PCFoundation
         let lut = ToneKit.curveLUT([SIMD2(0, 0), SIMD2(64, 40), SIMD2(192, 220), SIMD2(255, 255)], count: 256)
         #expect(abs(lut[64] - 40.0 / 255.0) < 0.01 && abs(lut[192] - 220.0 / 255.0) < 0.01)
         #expect(zip(lut, lut.dropFirst()).allSatisfy { $1 >= $0 })
-        for hh in stride(from: 0, to: 360, by: 7) {
-            let s = ToneKit.bandWeights(Float(hh)).reduce(0, +)
-            #expect(abs(s - 1) < 1e-4, "\(hh): \(s)")
-        }
+        // photocraft's band weights went with its Color Mixer formula (the fitted Mixer has its own hue maps).
         let (w, h) = (48, 32)
         var hs = [Float](repeating: 0, count: 8)
         hs[0] = -100
         var a = [SIMD4<Float>](repeating: SIMD4(0.8, 0.2, 0.2, 1), count: w * h)
         ToneKit.develop(&a, w: w, h: h, Self.settings { $0.hslSat = hs }, float: false)
-        #expect(a[0].x - a[0].y < 0.1, "reds desaturated: \(a[0])")
+        // Photoshop's Red Saturation −100 keeps about a quarter of this red's chroma (0.16 of 0.6, its neighbours'
+        // bands overlapping it); photocraft's took it below 0.1.
+        #expect(a[0].x - a[0].y < 0.2, "reds desaturated: \(a[0])")
+        // Blues keep their color within a level: the fitted map moves them a little, where photocraft's left them exact.
         var b = [SIMD4<Float>](repeating: SIMD4(0.2, 0.2, 0.8, 1), count: w * h)
         ToneKit.develop(&b, w: w, h: h, Self.settings { $0.hslSat = hs }, float: false)
-        #expect(abs(b[0].z - 0.8) < 1e-4, "blues untouched")
+        #expect(abs(b[0].z - 0.8) < 1.0 / 255 && abs(b[0].x - 0.2) < 1.0 / 255, "blues untouched: \(b[0])")
         var g: [SIMD4<Float>] = [SIMD4(0.1, 0.1, 0.1, 1), SIMD4(0.95, 0.95, 0.95, 1)]
         ToneKit.develop(&g, w: 2, h: 1, Self.settings { $0.gradeShadows = CameraRawWheel(hue: 220, sat: 80, lum: 0) }, float: false)
         #expect(g[0].z > g[0].x + 0.05 && abs(g[1].z - g[1].x) < 0.02, "\(g)")
@@ -214,96 +235,86 @@ import PCFoundation
         }
     }
 
-    // MARK: photocraft local_tone.rs tests
+    // MARK: The fitted model (AB-T-0241)
 
-    static let srgb = Kit.Encoding(gamma: 0)
+    static func grey(_ v: Float) -> SIMD4<Float> { SIMD4(v, v, v, 1) }
 
-    static func grey(_ w: Int, _ h: Int, _ f: (Int, Int) -> Float) -> [SIMD4<Float>] {
-        (0..<(w * h)).map { i in let v = f(i % w, i / w); return SIMD4(v, v, v, 1) }
+    /// Runs `p` on a few colors (the picture's brightness given, so the adaptive sliders don't read these colors).
+    static func colors(_ p: CameraRaw, _ c: [SIMD4<Float>]) -> [SIMD4<Float>] {
+        var px = c, q = p
+        if q.statistics == nil { q.statistics = CameraRawStatistics() }
+        ToneKit.develop(&px, w: px.count, h: 1, q, float: false)
+        return px
     }
 
-    @Test func aFlatImageIsUnchanged() {
-        var px = Self.grey(64, 48) { _, _ in 0.4 }
-        Kit.LocalTone.apply(&px, 64, 48, 100, -100, Self.srgb)
-        #expect(px.allSatisfy { abs($0.x - 0.4) < 1e-5 })
+    @Test func theFittedModelLoads() {
+        #expect(CameraRawKit.Model.library != nil)
     }
 
-    @Test func shadowsRaiseADarkAreaWithoutAHalo() {
-        let (w, h) = (256, 128)
-        var px = Self.grey(w, h) { x, _ in x < w / 2 ? 0.1 : 0.6 }
-        Kit.LocalTone.apply(&px, w, h, 100, 0, Self.srgb)
-        let row = Array(px[(64 * w)..<(65 * w)])
-        #expect(abs(row[w / 2 + 1].x - 0.6) < 0.002 && abs(row[w - 5].x - 0.6) < 0.002)
-        let (far, near) = (row[10].x, row[w / 2 - 1].x)
-        #expect(abs(far - 0.1) < 0.004 && abs(far - near) < 0.004, "\(far) \(near)")
+    /// Every slider at zero leaves the picture as it is, and a slider moves its stops' way.
+    @Test func slidersMoveAsPhotoshopsDo() {
+        let greys = [0.1, 0.3, 0.5, 0.7, 0.9].map { Self.grey(Float($0)) }
+        func mean(_ p: CameraRaw) -> Float { Self.colors(p, greys).reduce(0) { $0 + $1.x + $1.y + $1.z } / Float(3 * greys.count) }
+        let base = mean(CameraRaw())
+        #expect(mean(Self.settings { $0.exposure = 1 }) > base + 0.05)
+        #expect(mean(Self.settings { $0.exposure = -1 }) < base - 0.05)
+        #expect(mean(Self.settings { $0.whites = 100 }) > base + 0.02)
+        #expect(mean(Self.settings { $0.blacks = -100 }) < base - 0.02)
+        #expect(mean(Self.settings { $0.shadows = 100 }) > base + 0.01)
+        #expect(mean(Self.settings { $0.highlights = -100 }) < base - 0.01)
+        // Photoshop's Temperature +60 takes mid grey to about (211, 175, 119): warmer and brighter, blue nearly kept.
+        let warm = Self.colors(Self.settings { $0.temperature = 60 }, [Self.grey(0.5)])[0]
+        #expect(warm.x > 0.75 && warm.y > warm.z && warm.z < 0.5, "\(warm * 255)")
+        let magenta = Self.colors(Self.settings { $0.tint = 60 }, [Self.grey(0.5)])[0]
+        #expect(magenta.y < magenta.x && magenta.y < magenta.z, "\(magenta)")
+        // Photoshop's Temperature +100 takes mid grey to about (236, 188, 116).
+        let hot = Self.colors(Self.settings { $0.temperature = 100 }, [Self.grey(128.0 / 255)])[0] * 255
+        #expect(abs(hot.x - 236) < 6 && abs(hot.y - 188) < 6 && abs(hot.z - 116) < 6, "\(hot)")
     }
 
-    @Test func greyMovesAsInPhotoshop() {
-        let n = 256
-        func image(_ c: Float) -> [SIMD4<Float>] {
-            Self.grey(n, n) { x, y in x >= n - 26 && y >= n - 26 ? 0.97 : (x >= n - 26 && y < 26 ? 0.015 : c) }
+    /// The adaptive sliders follow the picture: Shadows lifts a mid grey more in a bright picture than in a dark one, and
+    /// Highlights lowers it more in a dark one.
+    @Test func adaptiveSlidersReadThePicture() {
+        func at(_ p: CameraRaw, _ level: Float) -> Float {
+            var q = p
+            q.statistics = CameraRawStatistics(brightest: level, logBrightest: level, luminance: level)
+            return Self.colors(q, [Self.grey(0.5)])[0].x
         }
-        for (s, hl, want) in [(Float(100), Float(0), Float(165.3)), (0, -100, 89.6)] {
-            var px = image(0.5)
-            Kit.LocalTone.apply(&px, n, n, s, hl, Self.srgb)
-            let got = px[175 * n + 100].x * 255
-            #expect(abs(got - want) < 5, "\(s) \(hl): \(got) vs \(want)")
+        let lift = Self.settings { $0.shadows = 100 }
+        #expect(at(lift, 224.0 / 255) > at(lift, 53.0 / 255) + 0.05)
+        let cut = Self.settings { $0.highlights = -100 }
+        #expect(at(cut, 53.0 / 255) < at(cut, 224.0 / 255) - 0.05)
+        // Measured from the pixels when the settings don't carry it.
+        let px = (0..<64).map { i in Self.grey(Float(i) / 63) }
+        let s = CameraRawStatistics.measure(px)
+        #expect(abs(s.luminance - 0.5) < 0.2 && s.brightest > 0.3)
+    }
+
+    /// Calibration, new with the fit: Red Hue moves reds, and leaves greys.
+    @Test func calibrationMovesPrimaries() {
+        let out = Self.colors(Self.settings { $0.calibrationRedHue = 100 }, [SIMD4(0.8, 0.1, 0.1, 1), Self.grey(0.5)])
+        #expect(abs(out[0].y - 0.1) > 0.02, "\(out[0])")
+        #expect(abs(out[1].x - 0.5) < 1.5 / 255 && abs(out[1].z - 0.5) < 1.5 / 255, "\(out[1])")
+        #expect(CameraRaw().isIdentity && !Self.settings { $0.calibrationBlueSaturation = 10 }.isIdentity)
+    }
+
+    /// The lattice develop applies stays near the stages themselves between its points too (the fitted stages bend
+    /// sharply at the gamut's edge, so its colors that fall between lattice points are a few levels off at worst).
+    @Test func theLatticeFollowsTheStages() {
+        let p = Self.settings {
+            $0.temperature = 30; $0.exposure = 0.6; $0.contrast = 40; $0.vibrance = 30; $0.hslHue[5] = -40
+            $0.gradeShadows = CameraRawWheel(hue: 210, sat: 40, lum: 0); $0.statistics = CameraRawStatistics()
         }
-    }
-
-    @Test func highlightsLowerABrightAreaAndKeepTheDarkest() {
-        let (w, h) = (192, 192)
-        var px = Self.grey(w, h) { x, y in (64..<128).contains(x) && (64..<128).contains(y) ? 0.8 : 0.2 }
-        Kit.LocalTone.apply(&px, w, h, 0, -100, Self.srgb)
-        #expect(px[96 * w + 96].x < 0.75, "\(px[96 * w + 96].x)")
-        #expect(abs(px[5 * w + 5].x - 0.2) < 0.01, "\(px[5 * w + 5].x)")
-    }
-
-    @Test func smoothGradientsStaySmooth() {
-        let (w, h) = (640, 48)
-        let px = Self.grey(w, h) { x, _ in ColorConvert.linearToSRGB(exp2f(Float(x) / Float(w - 1) * 8 - 9)) }
-        for (s, hl) in [(Float(100), Float(0)), (0, -100), (-100, 100)] {
-            var p = px
-            Kit.LocalTone.apply(&p, w, h, s, hl, Self.srgb)
-            let row = (0..<w).map { x in log2f(Float.maximum(ColorConvert.srgbToLinear(p[24 * w + x].x), 1e-6)) }
-            let steps = zip(row, row.dropFirst()).map { $1 - $0 }
-            #expect(steps.allSatisfy { $0 > 0 }, "\(s) \(hl): the ramp reverses")
-            let jumps = zip(steps, steps.dropFirst()).map { abs($1 - $0) }
-            let ripple = jumps[16..<(jumps.count - 16)].reduce(Float(0), max)
-            #expect(ripple < 0.004, "\(s) \(hl): slope jumps by \(ripple) stops per pixel")
+        var colors: [SIMD3<Float>] = (0..<2000).map { i in
+            SIMD3(CameraRawKit.hash01(Int64(i), 0, 1), CameraRawKit.hash01(Int64(i), 1, 1), CameraRawKit.hash01(Int64(i), 2, 1))
         }
-    }
-
-    @Test func theResultDoesNotDependOnTheImageSize() {
-        func at(_ n: Int) -> (Float, Float) {
-            var px = Self.grey(n, n) { x, y in x < n / 3 || y < n / 4 ? 0.08 : 0.7 }
-            Kit.LocalTone.apply(&px, n, n, 70, -60, Self.srgb)
-            return (px[(n / 8) * n + n / 8].x, px[(3 * n / 4) * n + 3 * n / 4].x)
-        }
-        let (a, b) = (at(96), at(384))
-        #expect(abs(a.0 - b.0) < 0.02 && abs(a.1 - b.1) < 0.02, "\(a) \(b)")
-    }
-
-    // MARK: photocraft whites_blacks.rs tests
-
-    @Test func fullRangeRowsMatchPhotoshop() {
-        typealias WB = Kit.WhitesBlacks
-        #expect(abs(WB.whites(97.1 / 255, 100) * 255 - 137.4) < 0.6)
-        #expect(abs(WB.whites(194.3 / 255, -100) * 255 - 167.6) < 0.6)
-        #expect(abs(WB.blacks(97.1 / 255, -100) * 255 - 60.0) < 0.6)
-        #expect(abs(WB.blacks(48.6 / 255, 100) * 255 - 67.0) < 0.6)
-        #expect(WB.whites(1, -100) == 1)
-        #expect(WB.blacks(0, 100) == 0)
-    }
-
-    @Test func theClippingDirectionsAdaptToTheImage() {
-        typealias WB = Kit.WhitesBlacks
-        let (w, _) = WB.amounts(50, 0, 0.05, 0.6)
-        #expect(abs(w - 94.5) < 2, "\(w)")
-        let (_, b) = WB.amounts(0, -40, 0.6, 1)
-        #expect(abs(b + 58) < 1, "\(b)")
-        #expect(abs(WB.amounts(0, -50, 0, 1).1 + 60) < 1e-3)
-        #expect(WB.amounts(-50, 50, 0.3, 0.6) == (-50, 50))
+        var px = colors.map { SIMD4($0, 1) }
+        ToneKit.cameraRawColors(&colors, p)
+        ToneKit.develop(&px, w: px.count, h: 1, p, float: false)
+        let errors = zip(colors, px).map { a, b in simd_reduce_max(simd_abs(a - SIMD3(b.x, b.y, b.z))) * 255 }.sorted()
+        let p99 = errors[Int(Double(errors.count) * 0.99)], mean = errors.reduce(0, +) / Float(errors.count)
+        // 65³ measured p99 2.2, mean 0.16 here (33³: 6.2 and 0.44).
+        #expect(p99 < 3 && mean < 0.25, "p99 \(p99) mean \(mean) max \(errors.last!)")
     }
 
     // MARK: photocraft histogram.rs (needs develop)

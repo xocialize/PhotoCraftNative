@@ -2,22 +2,21 @@
 //
 // Filter › Camera Raw Filter: a float develop pipeline over RGB pixels. Stages, in order (each
 // skipped when its controls are neutral, so defaults are an identity):
-// 1. White balance and exposure in linear light (sRGB curve as the working encoding).
-// 2. Dehaze (He, Sun, Tang, "Single Image Haze Removal Using Dark Channel Prior", CVPR 2009).
-// 3. Tone on luminance with colour ratios kept: Highlights / Shadows (a local Laplacian filter,
-//    see CameraRawLocalTone.swift), Contrast (an S-curve), Clarity (guided filter, He et al.
-//    2010) and Texture (band-pass); then Whites / Blacks (image-adaptive curves measured on
-//    Photoshop 25.4, see CameraRawWhitesBlacks.swift).
-// 4. Presence: Vibrance and Saturation. 5. Tone Curve: parametric regions, then point curves
-//    (monotone cubic, Fritsch–Carlson 1980). 6. Color Mixer (HSL, eight hue bands).
-// 7. Color Grading (shadows / midtones / highlights / global wheels).
-// 8. Detail: sharpening and noise reduction on luminance / chroma.
-// 9. Effects: post-crop vignette and grain (position-hashed, deterministic).
+// 1. Calibration, Exposure and white balance; 2. Dehaze (He, Sun, Tang, "Single Image Haze Removal
+//    Using Dark Channel Prior", CVPR 2009); 3. Texture (band-pass) and Clarity (guided filter, He et
+//    al. 2010) on luminance; 4. Contrast, Highlights, Shadows, Whites, Blacks, Saturation, Vibrance,
+//    the parametric curve, the point curves (monotone cubic, Fritsch–Carlson 1980), the Color Mixer
+//    and Color Grading; 5. Detail: sharpening and noise reduction on luminance / chroma; 6. Effects:
+//    post-crop vignette and grain (position-hashed, deterministic).
 //
-// GPU: stages 1, 3 (Contrast alone), 4–7 and 9 are per pixel and run as one Metal kernel
-// (`CameraRawFilter` / `ToneKit.develop(on:)`); settings that use Dehaze, Highlights/Shadows,
-// Clarity, Texture, Whites/Blacks or Detail (image statistics, pyramids, guided filters) run the
-// CPU reference.
+// The sliders of 1 and 4 are Photoshop's Camera Raw Filter's, fitted to its behaviour (AB-T-0241,
+// CameraRawModel.swift), not photocraft's formulas: per pixel, composed over a lattice of colors per
+// run. Contrast, Highlights and Shadows read the picture's brightness (`CameraRawStatistics`), measured
+// from the pixels unless the settings carry it.
+//
+// GPU: when no stage needs a neighbourhood (Dehaze, Texture, Clarity, Detail) and the adaptive
+// sliders' brightness is known, the lattice, vignette and grain run as one Metal kernel
+// (`CameraRawFilter` / `ToneKit.develop(on:)`); otherwise the CPU reference runs.
 
 import Foundation
 import PCFoundation
@@ -60,6 +59,13 @@ public struct CameraRaw: Codable, Sendable, Hashable {
     public var dehaze: Float = 0
     public var vibrance: Float = 0
     public var saturation: Float = 0
+    // Calibration: the primaries' hue and saturation, −100…100.
+    public var calibrationRedHue: Float = 0
+    public var calibrationRedSaturation: Float = 0
+    public var calibrationGreenHue: Float = 0
+    public var calibrationGreenSaturation: Float = 0
+    public var calibrationBlueHue: Float = 0
+    public var calibrationBlueSaturation: Float = 0
     // Tone curve
     public var curveHighlights: Float = 0
     public var curveLights: Float = 0
@@ -108,11 +114,16 @@ public struct CameraRaw: Codable, Sendable, Hashable {
     public var pixelScale: Float = 1
     /// The document's transfer curve: 0 for sRGB's, else the gamma of a power-law space.
     public var encodingGamma: Float = 0
+    /// What Contrast, Highlights and Shadows read from the picture, when the caller has measured it already (a
+    /// preview of a larger picture, say); nil measures the pixels being developed. Not encoded.
+    public var statistics: CameraRawStatistics?
 
     public init() {}
 
     enum CodingKeys: String, CodingKey {
         case temperature, tint, exposure, contrast, highlights, shadows, whites, blacks, texture, clarity, dehaze, vibrance, saturation
+        case calibrationRedHue, calibrationRedSaturation, calibrationGreenHue, calibrationGreenSaturation, calibrationBlueHue
+        case calibrationBlueSaturation
         case curveHighlights, curveLights, curveDarks, curveShadows, curveSplits, pointCurve, pointCurveRed, pointCurveGreen, pointCurveBlue
         case hslHue, hslSat, hslLum, gradeShadows, gradeMidtones, gradeHighlights, gradeGlobal, gradeBlending, gradeBalance
         case sharpenAmount, sharpenRadius, sharpenDetail, sharpenMasking, noiseLuminance, noiseLuminanceDetail, noiseColor, noiseColorDetail
@@ -135,6 +146,9 @@ public struct CameraRaw: Codable, Sendable, Hashable {
         try f(.temperature, &temperature); try f(.tint, &tint); try f(.exposure, &exposure); try f(.contrast, &contrast)
         try f(.highlights, &highlights); try f(.shadows, &shadows); try f(.whites, &whites); try f(.blacks, &blacks)
         try f(.texture, &texture); try f(.clarity, &clarity); try f(.dehaze, &dehaze); try f(.vibrance, &vibrance); try f(.saturation, &saturation)
+        try f(.calibrationRedHue, &calibrationRedHue); try f(.calibrationRedSaturation, &calibrationRedSaturation)
+        try f(.calibrationGreenHue, &calibrationGreenHue); try f(.calibrationGreenSaturation, &calibrationGreenSaturation)
+        try f(.calibrationBlueHue, &calibrationBlueHue); try f(.calibrationBlueSaturation, &calibrationBlueSaturation)
         try f(.curveHighlights, &curveHighlights); try f(.curveLights, &curveLights); try f(.curveDarks, &curveDarks); try f(.curveShadows, &curveShadows)
         try a(.curveSplits, &curveSplits, 3)
         try pc(.pointCurve, &pointCurve); try pc(.pointCurveRed, &pointCurveRed); try pc(.pointCurveGreen, &pointCurveGreen); try pc(.pointCurveBlue, &pointCurveBlue)
@@ -188,6 +202,10 @@ public struct CameraRaw: Codable, Sendable, Hashable {
 
     // MARK: Neutrality
 
+    var calibrationNeutral: Bool {
+        [calibrationRedHue, calibrationRedSaturation, calibrationGreenHue, calibrationGreenSaturation, calibrationBlueHue,
+         calibrationBlueSaturation].allSatisfy { $0 == 0 }
+    }
     var wbNeutral: Bool { temperature == 0 && tint == 0 && exposure == 0 }
     var localToneNeutral: Bool { [contrast, highlights, shadows, texture, clarity].allSatisfy { $0 == 0 } }
     var toneNeutral: Bool { localToneNeutral && whites == 0 && blacks == 0 }
@@ -197,32 +215,32 @@ public struct CameraRaw: Codable, Sendable, Hashable {
     var curvesNeutral: Bool {
         parametricNeutral && [pointCurve, pointCurveRed, pointCurveGreen, pointCurveBlue].allSatisfy(CameraRawKit.isLinear)
     }
+    /// Contrast, Highlights or Shadows is on: they read the picture's brightness.
+    var isAdaptive: Bool { contrast != 0 || highlights != 0 || shadows != 0 }
 
     /// True when every control is neutral (the filter is an identity).
     public var isIdentity: Bool {
-        wbNeutral && toneNeutral && dehaze == 0 && vibrance == 0 && saturation == 0 && curvesNeutral && hslNeutral && gradeNeutral
-            && sharpenAmount == 0 && noiseLuminance == 0 && noiseColor == 0 && grainAmount == 0 && vignetteAmount == 0
+        calibrationNeutral && wbNeutral && toneNeutral && dehaze == 0 && vibrance == 0 && saturation == 0 && curvesNeutral && hslNeutral
+            && gradeNeutral && sharpenAmount == 0 && noiseLuminance == 0 && noiseColor == 0 && grainAmount == 0 && vignetteAmount == 0
     }
 
-    /// Whether every active stage is per pixel (the Metal path handles it).
+    /// Whether every active stage is per pixel (the Metal path handles it): no stage reads a neighbourhood, and the
+    /// adaptive sliders' brightness is in the settings when one is on.
     public var isPerPixel: Bool {
-        dehaze == 0 && highlights == 0 && shadows == 0 && texture == 0 && clarity == 0 && whites == 0 && blacks == 0
-            && !(noiseLuminance > 0 || noiseColor > 0 || sharpenAmount > 0)
+        dehaze == 0 && texture == 0 && clarity == 0 && !(noiseLuminance > 0 || noiseColor > 0 || sharpenAmount > 0)
+            && (statistics != nil || !isAdaptive)
     }
 }
 
 /// Camera Raw's shared maths (photocraft `camera_raw` private functions).
 enum CameraRawKit {
     /// How the pixels encode light: the sRGB curve (gamma 0) or a pure power law.
-    struct Encoding: Equatable {
+    struct Encoding: Equatable, Sendable {
         var gamma: Float
         static func of(_ gamma: Float) -> Encoding { Encoding(gamma: gamma.isFinite && gamma > 0 ? clampf(gamma, 0.5, 4) : 0) }
         @inline(__always) func decode(_ v: Float) -> Float { gamma > 0 ? powf(Float.maximum(v, 0), gamma) : ColorConvert.srgbToLinear(v) }
         @inline(__always) func encode(_ v: Float) -> Float { gamma > 0 ? powf(Float.maximum(v, 0), 1 / gamma) : ColorConvert.linearToSRGB(v) }
     }
-
-    /// Hue band centres of the Color Mixer (degrees).
-    static let hslBands: [Float] = [0, 30, 60, 120, 180, 240, 270, 300]
 
     @inline(__always)
     static func luma(_ c: SIMD3<Float>) -> Float { 0.2126 * c.x + 0.7152 * c.y + 0.0722 * c.z }
@@ -420,47 +438,6 @@ enum CameraRawKit {
         return lut
     }
 
-    @inline(__always)
-    static func rgbToHSV(_ c: SIMD3<Float>) -> SIMD3<Float> {
-        let mx = Float.maximum(Float.maximum(c.x, c.y), c.z), mn = Float.minimum(Float.minimum(c.x, c.y), c.z)
-        let d = mx - mn
-        let h: Float
-        if d <= 1e-9 { h = 0 }
-        else if mx == c.x { h = 60 * euclidMod((c.y - c.z) / d, 6) }
-        else if mx == c.y { h = 60 * ((c.z - c.x) / d + 2) }
-        else { h = 60 * ((c.x - c.y) / d + 4) }
-        return SIMD3(h, mx > 1e-9 ? d / mx : 0, mx)
-    }
-
-    @inline(__always)
-    static func hsvToRGB(_ h0: Float, _ s: Float, _ v: Float) -> SIMD3<Float> {
-        let h = euclidMod(h0, 360) / 60
-        let c = v * s
-        let x = c * (1 - abs(fmodf(h, 2) - 1))
-        let seg: UInt32 = h.isNaN || h <= 0 ? 0 : (h >= 4_294_967_296 ? .max : UInt32(h))
-        let rgb: SIMD3<Float>
-        switch seg {
-        case 0: rgb = SIMD3(c, x, 0)
-        case 1: rgb = SIMD3(x, c, 0)
-        case 2: rgb = SIMD3(0, c, x)
-        case 3: rgb = SIMD3(0, x, c)
-        case 4: rgb = SIMD3(x, 0, c)
-        default: rgb = SIMD3(c, 0, x)
-        }
-        let m = v - c
-        return SIMD3(rgb.x + m, rgb.y + m, rgb.z + m)
-    }
-
-    /// Weights of the eight HSL bands at hue `h` (hat functions between neighbouring centres).
-    static func bandWeights(_ h: Float) -> [Float] {
-        (0..<8).map { k in
-            let (c, prev, next) = (hslBands[k], hslBands[(k + 7) % 8], hslBands[(k + 1) % 8])
-            let diff = fmodf(h - c + 540, 360) - 180
-            let span = diff >= 0 ? euclidMod(next - c, 360) : euclidMod(c - prev, 360)
-            return Float.maximum(1 - abs(diff) / Float.maximum(span, 1e-3), 0)
-        }
-    }
-
     /// photocraft `photo_util::hash01`: 64-bit position hash → 0…1.
     @inline(__always)
     static func hash01(_ x: Int64, _ y: Int64, _ seed: UInt64) -> Float {
@@ -494,24 +471,25 @@ enum CameraRawKit {
 }
 
 extension ToneKit {
-    /// Camera Raw's white-balance channel gains for Temperature / Tint (−100…100): warmer raises
-    /// red and lowers blue (±35 %), a negative tint raises green, a positive one lowers it (±25 %)
-    /// (photocraft `white_balance_gains`).
-    public static func whiteBalanceGains(temperature: Float, tint: Float) -> SIMD3<Float> {
-        let t = temperature / 100, tn = tint / 100
-        return SIMD3(1 + 0.35 * t, 1 - 0.25 * tn, 1 - 0.35 * t)
-    }
-
     /// Monotone cubic LUT of a point curve (photocraft `curve_lut`).
     public static func curveLUT(_ points: [SIMD2<Float>], count n: Int) -> [Float] { CameraRawKit.curveLUT(points, n) }
-
-    /// Weights of the eight Color Mixer bands at hue `h` (photocraft `band_weights`).
-    public static func bandWeights(_ h: Float) -> [Float] { CameraRawKit.bandWeights(h) }
 
     /// Runs the Camera Raw pipeline on straight RGBA pixels (`w × h`, display-encoded RGB);
     /// `float` keeps values above 1 (32-bit documents) — photocraft `camera_raw::develop`.
     public static func develop(_ px: inout [SIMD4<Float>], w: Int, h: Int, _ p: CameraRaw, float: Bool) {
         CameraRawKit.develop(&px, w, h, p, float)
+    }
+
+    /// Camera Raw's per-pixel color stages, Calibration through Color Grading (every control but Dehaze, Texture,
+    /// Clarity, Detail and the effects), on display-encoded colors 0…1, exactly rather than through a lattice: for a
+    /// caller composing its own lookup. Contrast, Highlights and Shadows read `p.statistics` (mid-grey when nil).
+    public static func cameraRawColors(_ colors: inout [SIMD3<Float>], _ p: CameraRaw) {
+        let chain = CameraRawKit.Model.chain(p, statistics: p.statistics, part: .all)
+        guard !chain.isIdentity else { return }
+        colors.withUnsafeMutableBufferPointer { c in
+            let cs = UnsafeSendable(c)
+            parallelChunks(c.count, minChunk: 1024) { r in for i in r { cs.value[i] = chain(cs.value[i]) } }
+        }
     }
 
     /// `develop` on the CPU (`.cpu`) or, for per-pixel settings (`CameraRaw.isPerPixel`), on the
@@ -527,47 +505,40 @@ extension CameraRawKit {
         if px.isEmpty || p.isIdentity { return }
         let ps = clampf(p.pixelScale, 0.01, 1)
         let long = Float(max(w, h))
-        // 1. White balance + exposure in linear light.
-        if !p.wbNeutral {
-            let g = wbGains(p)
-            forEach(&px) { q in
-                for c in 0..<3 { q[c] = ColorConvert.linearToSRGB(Float.maximum(ColorConvert.srgbToLinear(q[c]) * g[c], 0)) }
-            }
+        // What the adaptive sliders read: the picture as it came in.
+        let statistics = p.statistics ?? (p.isAdaptive ? CameraRawStatistics.measure(px, encodingGamma: p.encodingGamma) : nil)
+        // Float documents are scene-referred: Exposure is a gain in linear light there, and values past 1 keep it.
+        if float && p.exposure != 0 {
+            let g = exposureGain(p)
+            forEach(&px) { q in for c in 0..<3 { q[c] = ColorConvert.linearToSRGB(Float.maximum(ColorConvert.srgbToLinear(q[c]) * g, 0)) } }
         }
-        // 2. Dehaze.
-        if p.dehaze != 0 { dehaze(&px, w, h, p.dehaze / 100) }
-        // 3. Tone. Highlights and Shadows: a local Laplacian filter.
-        if p.highlights != 0 || p.shadows != 0 {
-            LocalTone.apply(&px, w, h, p.shadows, p.highlights, Encoding.of(p.encodingGamma))
-        }
-        if !p.localToneNeutral && [p.contrast, p.texture, p.clarity].contains(where: { $0 != 0 }) {
-            let l = px.map { Float.maximum(luma(SIMD3($0.x, $0.y, $0.z)), 0) }
-            let lc = l.map { Float.minimum($0, 1) }
-            let clar = p.clarity != 0 ? guidedFast(lc, lc, w, h, max(ToneKit.asIndex(long * 0.02), 3), 0.005) : nil
-            let tex = p.texture != 0 ? gauss(lc, w, h, Float.maximum(long * 0.002, 1.5 * ps)) : nil
-            let kCon = p.contrast / 100 * 0.6
-            px.withUnsafeMutableBufferPointer { q in
-                let qs = UnsafeSendable(q)
-                parallelChunks(q.count, minChunk: 4096) { r in
-                    for i in r { qs.value[i] = tonePixel(qs.value[i], l[i], lc[i], clar?[i], tex?[i], p.clarity, p.texture, kCon) }
+        if p.dehaze != 0 || p.texture != 0 || p.clarity != 0 {
+            // 1. Calibration, Exposure and white balance.
+            Model.apply(p, statistics: statistics, part: .before, exposure: !float, to: &px, float: float)
+            // 2. Dehaze.
+            if p.dehaze != 0 { dehaze(&px, w, h, p.dehaze / 100) }
+            // 3. Texture and Clarity on luminance, colour ratios kept.
+            if p.texture != 0 || p.clarity != 0 {
+                let l = px.map { Float.maximum(luma(SIMD3($0.x, $0.y, $0.z)), 0) }
+                let lc = l.map { Float.minimum($0, 1) }
+                let clar = p.clarity != 0 ? guidedFast(lc, lc, w, h, max(ToneKit.asIndex(long * 0.02), 3), 0.005) : nil
+                let tex = p.texture != 0 ? gauss(lc, w, h, Float.maximum(long * 0.002, 1.5 * ps)) : nil
+                px.withUnsafeMutableBufferPointer { q in
+                    let qs = UnsafeSendable(q)
+                    parallelChunks(q.count, minChunk: 4096) { r in
+                        for i in r { qs.value[i] = tonePixel(qs.value[i], l[i], lc[i], clar?[i], tex?[i], p.clarity, p.texture) }
+                    }
                 }
             }
+            // 4. The rest of the sliders.
+            Model.apply(p, statistics: statistics, part: .after, exposure: !float, to: &px, float: float)
+        } else {
+            // 1 and 4 together.
+            Model.apply(p, statistics: statistics, part: .all, exposure: !float, to: &px, float: float)
         }
-        // 3b. Whites and Blacks: global curves adapted to the image's black and white points.
-        if p.whites != 0 || p.blacks != 0 {
-            let enc = Encoding.of(p.encodingGamma)
-            let (bp, wp) = luminancePoints(px, w, h, enc)
-            let (xw, xb) = WhitesBlacks.amounts(clampf(p.whites, -100, 100), clampf(p.blacks, -100, 100), bp, wp)
-            WhitesBlacks.apply(&px, xw, xb, enc)
-        }
-        // 4–7: per-pixel colour stages.
-        if p.needsColor {
-            let plan = ColorPlan(p)
-            forEach(&px) { q in q = plan.apply(q) }
-        }
-        // 8. Detail.
+        // 5. Detail.
         if p.noiseLuminance > 0 || p.noiseColor > 0 || p.sharpenAmount > 0 { detail(&px, w, h, p, ps) }
-        // 9. Effects.
+        // 6. Effects.
         if p.vignetteAmount != 0 {
             let v = Vignette(p, w, h)
             px.withUnsafeMutableBufferPointer { q in
@@ -599,18 +570,13 @@ extension CameraRawKit {
         }
     }
 
-    /// Stage 1's channel gains: white balance normalised to keep luminance, times 2^exposure.
-    static func wbGains(_ p: CameraRaw) -> SIMD3<Float> {
-        let g = ToneKit.whiteBalanceGains(temperature: p.temperature, tint: p.tint)
-        let norm = luma(g)
-        let e = powf(2, p.exposure)
-        return SIMD3(g.x / norm * e, g.y / norm * e, g.z / norm * e)
-    }
+    /// Exposure's gain in a float document's linear light.
+    static func exposureGain(_ p: CameraRaw) -> Float { exp2f(clampf(p.exposure, -5, 5)) }
 
-    /// Stage 3's per-pixel Contrast / Clarity / Texture on luminance with colour ratios kept.
+    /// Stage 3's per-pixel Texture and Clarity on luminance with colour ratios kept.
     @inline(__always)
-    static func tonePixel(_ q0: SIMD4<Float>, _ l0: Float, _ lci: Float, _ clar: Float?, _ tex: Float?, _ clarity: Float, _ texture: Float,
-                          _ kCon: Float) -> SIMD4<Float> {
+    static func tonePixel(_ q0: SIMD4<Float>, _ l0: Float, _ lci: Float, _ clar: Float?, _ tex: Float?, _ clarity: Float,
+                          _ texture: Float) -> SIMD4<Float> {
         var q = q0
         var lv = lci
         if let c = clar {
@@ -619,121 +585,13 @@ extension CameraRawKit {
             lv += clarity / 100 * 0.8 * (lci - c) * mw
         }
         if let t = tex { lv += texture / 100 * 0.9 * clampf(lci - t, -0.1, 0.1) }
-        if kCon != 0 {
-            let xx = clampf(lv, 0, 1)
-            lv += -kCon * sinf(PCAMath.tau * xx) / PCAMath.tau
-        }
         let lv2 = Float.maximum(lv, 0) + (l0 - lci)
         let ratio: Float = l0 > 1e-5 ? lv2 / l0 : 1
         for c in 0..<3 { q[c] = l0 > 1e-5 ? q[c] * ratio : q[c] + (lv2 - l0) }
         return q
     }
 
-    /// The image's black and white points as sRGB-encoded grey levels: the 3rd percentile of
-    /// the luminance and the 99.5th of the brightest channel, on a copy at most 256 px across.
-    static func luminancePoints(_ px: [SIMD4<Float>], _ w: Int, _ h: Int, _ enc: Encoding) -> (Float, Float) {
-        let f = max((max(w, h) + 255) / 256, 1)
-        let sw = (w + f - 1) / f, sh = (h + f - 1) / f
-        var sum = [SIMD4<Double>](repeating: .zero, count: sw * sh)
-        for y in 0..<h {
-            for x in 0..<w {
-                let q = px[y * w + x]
-                let k = (y / f) * sw + x / f
-                for c in 0..<3 { sum[k][c] += Double(clampf(enc.decode(q[c]), 0, 1)) }
-                sum[k][3] += 1
-            }
-        }
-        let cells: [SIMD3<Float>] = sum.filter { $0[3] > 0 }.map { s in SIMD3(Float(s.x / s.w), Float(s.y / s.w), Float(s.z / s.w)) }
-        if cells.isEmpty { return (0, 1) }
-        func pct(_ v: [Float], _ q: Float) -> Float {
-            let s = ToneKit.totalSorted(v)
-            return s[Int((Float(s.count - 1) * q).rounded())]
-        }
-        let bp = pct(cells.map(luma), 0.03)
-        let wp = pct(cells.map { Float.maximum(Float.maximum($0.x, $0.y), $0.z) }, 0.995)
-        return (ColorConvert.linearToSRGB(bp), ColorConvert.linearToSRGB(wp))
-    }
-
-    // MARK: 4–7 Colour stages
-
-    /// The derived constants of the colour stages (photocraft `develop`'s `need_color` block).
-    struct ColorPlan {
-        var vibSat: Bool, saturation: Float, vibrance: Float
-        var par: [Float]?, master: [Float]?, chan: [[Float]?]
-        var hsl: Bool, hue: [Float], sat: [Float], lum: [Float]
-        var grade: Bool, tints: [SIMD3<Float>], lums: [Float], blend: Float, bal: Float
-
-        init(_ p: CameraRaw) {
-            vibSat = p.vibrance != 0 || p.saturation != 0
-            saturation = p.saturation; vibrance = p.vibrance
-            par = p.parametricNeutral ? nil : parametricLUT(p, 1024)
-            func pts(_ c: [SIMD2<Float>]) -> [Float]? { isLinear(c) ? nil : curveLUT(c, 1024) }
-            master = pts(p.pointCurve)
-            chan = [pts(p.pointCurveRed), pts(p.pointCurveGreen), pts(p.pointCurveBlue)]
-            hsl = !p.hslNeutral; hue = p.hslHue; sat = p.hslSat; lum = p.hslLum
-            grade = !p.gradeNeutral
-            func tint(_ wh: CameraRawWheel) -> SIMD3<Float> {
-                let c = hsvToRGB(wh.hue, 1, 1)
-                let l = luma(c)
-                return SIMD3((c.x - l) * wh.sat / 100 * 0.3, (c.y - l) * wh.sat / 100 * 0.3, (c.z - l) * wh.sat / 100 * 0.3)
-            }
-            tints = [tint(p.gradeShadows), tint(p.gradeMidtones), tint(p.gradeHighlights), tint(p.gradeGlobal)]
-            lums = [p.gradeShadows.lum, p.gradeMidtones.lum, p.gradeHighlights.lum, p.gradeGlobal.lum]
-            blend = 0.15 + clampf(p.gradeBlending, 0, 100) / 100 * 0.35
-            bal = clampf(p.gradeBalance, -100, 100) / 100 * 0.25
-        }
-
-        func apply(_ q: SIMD4<Float>) -> SIMD4<Float> {
-            var c = SIMD3(q.x, q.y, q.z)
-            if vibSat {
-                let l = luma(c)
-                let mx = Float.maximum(Float.maximum(c.x, c.y), c.z), mn = Float.minimum(Float.minimum(c.x, c.y), c.z)
-                let s: Float = mx > 1e-6 ? (mx - mn) / mx : 0
-                // Vibrance protects skin-ish hues (oranges) a little, like ACR.
-                let hh = rgbToHSV(c).x
-                let skin = clampf(1 - abs(hh - 25) / 25, 0, 1) * 0.5
-                let k = Float.maximum(1 + saturation / 100 + vibrance / 100 * (1 - s) * (1 - skin), 0)
-                c = SIMD3(l + (c.x - l) * k, l + (c.y - l) * k, l + (c.z - l) * k)
-            }
-            if let lut = par { lut.withUnsafeBufferPointer { b in c = SIMD3(lutEval(b, c.x), lutEval(b, c.y), lutEval(b, c.z)) } }
-            if let lut = master { lut.withUnsafeBufferPointer { b in c = SIMD3(lutEval(b, c.x), lutEval(b, c.y), lutEval(b, c.z)) } }
-            for ch in 0..<3 { if let lut = chan[ch] { lut.withUnsafeBufferPointer { b in c[ch] = lutEval(b, c[ch]) } } }
-            if hsl {
-                let hsv = rgbToHSV(SIMD3(Float.maximum(c.x, 0), Float.maximum(c.y, 0), Float.maximum(c.z, 0)))
-                let (hh, s, v) = (hsv.x, hsv.y, hsv.z)
-                if s > 1e-4 {
-                    let wts = bandWeights(hh)
-                    var dh: Float = 0, ds: Float = 0, dl: Float = 0
-                    for k in 0..<8 { dh += wts[k] * hue[k]; ds += wts[k] * sat[k]; dl += wts[k] * lum[k] }
-                    let nh = hh + dh / 100 * 30
-                    let ns = clampf(s * (1 + ds / 100), 0, 1)
-                    var out = hsvToRGB(nh, ns, v)
-                    // Keep the luminance, then apply the luminance shift weighted by saturation.
-                    let (l0, l1) = (luma(c), luma(out))
-                    if l1 > 1e-6 { out = SIMD3(out.x * l0 / l1, out.y * l0 / l1, out.z * l0 / l1) }
-                    let k = powf(2, dl / 100 * 1 * s)
-                    c = SIMD3(out.x * k, out.y * k, out.z * k)
-                }
-            }
-            if grade {
-                let l = clampf(luma(c), 0, 1)
-                let sh = 1 - smoothstep(0, 0.5 + bal + blend, l)
-                let hi = smoothstep(0.5 + bal - blend, 1, l)
-                let mid = Float.maximum(1 - sh - hi, 0)
-                let masks: [Float] = [sh, mid, hi, 1]
-                for k in 0..<4 {
-                    for ch in 0..<3 { c[ch] += masks[k] * tints[k][ch] }
-                    if lums[k] != 0 {
-                        let f = powf(2, masks[k] * lums[k] / 100 * 0.6)
-                        c = SIMD3(c.x * f, c.y * f, c.z * f)
-                    }
-                }
-            }
-            return SIMD4(c, q.w)
-        }
-    }
-
-    // MARK: 9 Effects
+    // MARK: 6 Effects
 
     struct Vignette {
         var amt: Float, hl: Float, style: String
@@ -815,7 +673,7 @@ extension CameraRawKit {
         }
     }
 
-    // MARK: 2 Dehaze, 8 Detail (CPU)
+    // MARK: 2 Dehaze, 5 Detail (CPU)
 
     static func dehaze(_ px: inout [SIMD4<Float>], _ w: Int, _ h: Int, _ amount: Float) {
         // Transmission on a ≤ 768 px proxy, upsampled.
@@ -938,9 +796,4 @@ extension CameraRawKit {
             px[i].x = rr; px[i].y = g; px[i].z = bb
         }
     }
-}
-
-extension CameraRaw {
-    /// Whether any of stages 4–7 is active.
-    var needsColor: Bool { vibrance != 0 || saturation != 0 || !curvesNeutral || !hslNeutral || !gradeNeutral }
 }
