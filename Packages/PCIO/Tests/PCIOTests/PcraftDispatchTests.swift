@@ -26,6 +26,23 @@ import Testing
         #expect(back.name == d.name)
     }
 
+    /// A package save (the editor's default) carries the single-file export's previews, and
+    /// `importFile(contentsOf:)` opens the package.
+    @Test func packagesSaveWithPreviewsAndOpenFromTheirURL() throws {
+        let d = genDoc(.rgb, .u16, .all)
+        let options = IOOptions(compositor: StoredPixelsCompositor())
+        let previews = try DocumentIO.pcraftPreviews(d, options: options)
+        let single = try DocumentIO.export(d, as: "x.pcraft", options: options).bytes
+        #expect(previews.thumbnail != nil && previews.composite != nil)
+        #expect(try PcraftFormat.save(d, options: previews) == single, "the same previews as the single-file export")
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("pcio-package-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appendingPathComponent("doc.pcraft")
+        try PcraftWriter().save(d, to: url, as: .package, previews)
+        #expect(FileManager.default.fileExists(atPath: url.appendingPathComponent("thumb.png").path))
+        expectDocsEqual(d, try DocumentIO.importFile(contentsOf: url).document, "package")
+    }
+
     @Test func previewsAreWrittenAtTheirSizes() throws {
         var d = Document(name: "p", size: PixelSize(width: 2048, height: 512), mode: .rgb, depth: .u8)
         var l = Layer.raster("a", format: d.pixelFormat)

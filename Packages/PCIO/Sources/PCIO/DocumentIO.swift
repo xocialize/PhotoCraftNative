@@ -100,6 +100,11 @@ public enum DocumentIO {
             r.warnings += TextImport.prepare(&r.document, renderer: options.renderer)
             return r
         }
+        // A `.pcraft` package (the editor's default save) is a directory too, read object by object.
+        if url.pathExtension.lowercased() == PcraftFormat.fileExtension, PcraftFormat.container(at: url) == .package {
+            try options.interrupt.check()
+            do { return ImportResult(document: try PcraftFormat.load(contentsOf: url)) } catch { throw PCIOError.format("pcraft", error.description) }
+        }
         let data: Data
         do { data = try Data(contentsOf: url, options: [.alwaysMapped]) } catch { throw PCIOError.io("\(error)") }
         let name = url.lastPathComponent
