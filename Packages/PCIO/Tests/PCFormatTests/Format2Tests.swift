@@ -197,6 +197,11 @@ import Testing
         var doc = Document(name: "ZIP64", size: PixelSize(width: side, height: side), mode: .rgb, depth: .u16)
         doc.layers = [Layer.raster("Noise", surface: surface)]
 
+        // A crashed earlier run (a trap skips `defer`) may have left its 4.5 GiB file behind.
+        let temp = URL(fileURLWithPath: NSTemporaryDirectory())
+        for name in (try? FileManager.default.contentsOfDirectory(atPath: temp.path)) ?? [] where name.hasPrefix("pcformat-zip64-big-") {
+            remove(temp.appendingPathComponent(name))
+        }
         let dir = tempDir("zip64-big")
         defer { remove(dir) }
         let url = dir.appendingPathComponent("big.pcraft")
@@ -239,8 +244,8 @@ import Testing
         }
         var usage = rusage()
         getrusage(RUSAGE_SELF, &usage)
-        print(String(format: "ZIP64 receipt: %d bytes (%.2f GiB), %d entries; save %@, load %@, unzip -t %@; peak RSS %.1f GB; %@, %@, %.0f GB RAM, macOS %@",
-                     size, Double(size) / Double(1 << 30), tilesPerSide * tilesPerSide + 1, "\(saved)", "\(loaded)", unzipped.map { "\($0)" } ?? "skipped",
+        print(String(format: "ZIP64 receipt: %@ bytes (%.2f GiB), %@ entries; save %@, load %@, unzip -t %@; peak RSS %.1f GB; %@, %@, %.0f GB RAM, macOS %@",
+                     "\(size)", Double(size) / Double(1 << 30), "\(tilesPerSide * tilesPerSide + 1)", "\(saved)", "\(loaded)", unzipped.map { "\($0)" } ?? "skipped",
                      Double(usage.ru_maxrss) / 1e9, Self.sysctl("hw.model"), Self.sysctl("machdep.cpu.brand_string"),
                      Double(ProcessInfo.processInfo.physicalMemory) / 1e9, ProcessInfo.processInfo.operatingSystemVersionString))
     }

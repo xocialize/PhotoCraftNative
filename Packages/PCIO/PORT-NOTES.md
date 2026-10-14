@@ -490,19 +490,56 @@ photocraft-format's, so bundles go both ways:
   coded iteratively (a 100-deep tree in 512 KiB of stack); directory bundles fall back to `fsync`
   where `F_FULLFSYNC` is refused (SMB), which photocraft fails on.
 
+### Format 2: ZIP64, the package type, Save (AB-T-0240, AB-D-0131)
+
+- **Two forms.** The package (directory) form is the editor's default Save. It is incremental (only
+  new tiles are written; every other object file keeps its inode and modification time) and has no
+  size limit. The single-file (ZIP) form is for sharing.
+- **ZIP64 when needed, and only then.** `ZipWriter` writes ZIP64 records only when an archive
+  outgrows classic ZIP: 65,535 entries, or 4 GiB for an entry, an offset or the central directory.
+  Every archive that fits is byte for byte the classic layout. `ZipReader` reads ZIP64 from any
+  writer, checked both ways against Info-ZIP (`zip -fz`, `unzip -t`). A missing ZIP64 field reads
+  as its classic value, as Info-ZIP and Python read it.
+- **Manifest version.** `pcraftFormatVersion` is 2, and version 1 migrates to 2 unchanged. Format 2
+  changes the container, not the document schema. A writer writes 1 (photocraft's) unless the
+  single file needs ZIP64, so photocraft opens every package and every single file it could open
+  before. A ZIP64 single file says 2, and photocraft can't open it either way. `saveZip` checksums
+  new objects on all cores and keeps their CRCs with the compressed objects.
+- **Types** (`DocumentTypes.swift`). The package is `com.xocialize.pcraft.package`, conforming to
+  `com.apple.package` and `public.composite-content`; the app exports it. The single file is
+  photocraft's `ai.storyteller.photocraft.document` (`public.data`, `public.image`); the app imports
+  it. That is iWork's pattern for one extension in two forms. A type's conformance exists only
+  where an Info.plist declares it. So `exportedTypeDeclaration`, `importedTypeDeclaration` and
+  `documentTypeDeclarations` are data for the app's Info.plist, and `declarationProblems(in:)`
+  checks a bundle's copy against them.
+- **Save** (PCEngine `SessionSave.swift`). `Session.savePlan` covers each case:
+  - untitled, or a flat or import-only source: a `.pcraft` package;
+  - a `.pcraft` keeps its own form;
+  - PSD, PSB and ORA save back to themselves, with warnings. PSD export now also names the
+    Timeline, Variables and Data Sets, and video layers, which it doesn't keep.
+
+  Automation sessions (`Headless`) write new `.pcraft` files as single files. A file system without
+  local folders always does.
+- **The >4 GiB receipt** is opt-in: `PCRAFT_ZIP64_BIG=1 swift test -c release --filter
+  PCFormatTests.Zip64BigTests`. It holds about 20 GB and deletes its temp file afterwards.
+  Receipt, 2026-10-13: a 4,835,768,048-byte (4.50 GiB) single file of 9,217 entries (96 × 96 tiles
+  of RGBA16 noise, 512 KiB each, incompressible). Save took 2.54 s, load 1.63 s (reopened equal),
+  and Info-ZIP's `unzip -t` 14.8 s (all CRCs good). Peak RSS was 20.1 GB. Release build on a Mac
+  Studio (Mac17,14, M5 Max, 128 GB, macOS 27.2), with another worktree's tests running alongside.
+
 
 ## Tests
 
 `swift build --build-tests` and `swift test` in `Packages/PCIO` (debug and release): zero warnings.
-838 tests in 8 targets (2026-10-13; zero warnings):
+854 tests in 8 targets (2026-10-13, after `.comp` import and `.pcraft` format 2; zero warnings):
 
 | Target | Tests | Content |
 |---|---|---|
-| `PCIOCoreTests` | 56 | ZIP, deflate/CRC, BLAKE3 vectors, blocks/pixels/gradient bake (Smooth against Photoshop's composite), `ImageIOCodec` (straight alpha, Gray+alpha, 16-bit, float), container metadata, source encoding (JPEG quality, WebP) |
+| `PCIOCoreTests` | 63 | ZIP (ZIP64 written only when needed, read from any writer, Info-ZIP interop both ways), deflate/CRC, BLAKE3 vectors, blocks/pixels/gradient bake (Smooth against Photoshop's composite), `ImageIOCodec` (straight alpha, Gray+alpha, 16-bit, float), container metadata, source encoding (JPEG quality, WebP) |
 | `PCIOTextTests` | 52 | TySh/EngineData/Txt2 read/write, styles, corpus (64/64 EngineData, 13/13 `Txt2` byte-exact) |
 | `PCIOMapsTests` | 91 | adjustment/effects/vector/pattern/channel/comps/slices/annotation maps + corpus |
 | `PCIOSmartTests` | 37 | smart maps, linked files, displace, Camera Raw + corpus (98 `SoLd`) |
-| `PCFormatTests` | 118 | all 115 photocraft-format tests, photocraft-shaped bundle, corruption, autosave/recovery, empty-blob frames |
+| `PCFormatTests` | 127 | all 115 photocraft-format tests, photocraft-shaped bundle, corruption, autosave/recovery, empty-blob frames, format 2 (versions per form, migration, forced ZIP64, package types, only new tiles written; the >4 GiB round trip is opt-in) |
 | `PCIOFormatsTests` | 139 | ORA, KRA, PDN, EXR (every compression), layered TIFF transcoder (corpus both byte orders), SVG, Compositor `.comp` (every version gate, deep/HDR layers, transforms, masks, clipping, adjustments, text/shapes) |
 | `PCIOAffinityTests` | 45 | `affinity.rs` and `affinity_artboards.rs` import tests on `PCAffinitySynth` inputs |
 | `PCIOTests` | 300 | photocraft's `crates/io/tests` (roundtrip, psd_structure, block layout/alignment, 32-bit, modes, multichannel, lab16, channels, banded, large PSB (29000² opt-in), thumbnails, progress/cancel, composite, adjust/effects/vector/comps/annotations/patterns, smart objects, type, tiff_layers/pages/corpus, flat/orientation/metadata/resolution/colour/HEIF, container dispatch, Affinity export halves), the inline tests of the PCIO-owned modules, Compositor's `.comp` fixtures against its own oracle, Photoshop record conventions, both corpora (round trip, oracle, `.pcraft`), EXR part selection, flat export, the Photoshop oracle's findings (type-layer completeness, blend modes per mode/depth, 4-alignment, matte order, `Txt2`, patterns), fill pixels against the live composite, adjustment availability per mode/depth (with the oracle run's proof), per-document CMYK |
