@@ -2,6 +2,7 @@
 // Team and the PhotoCraft contributors; plus deflate/zlib/gzip round trips.
 
 import Foundation
+import Synchronization
 import Testing
 @testable import PCIOCore
 
@@ -319,5 +320,147 @@ import Testing
         let r = try ZipReader([UInt8](try Data(contentsOf: dir.appendingPathComponent("theirs.zip"))))
         #expect(r.isZip64)
         #expect(try r.read(named: "p.bin", max: payload.count) == payload)
+    }
+}
+
+/// The streaming writer and the file reader (AB-T-0249): the same bytes and the same answers as
+/// their in-memory counterparts.
+@Suite struct ZipStreamingTests {
+    /// The archives the parity checks run on: classic, forced ZIP64, and one with a DEFLATE entry.
+    static func archives() throws -> [(String, [UInt8])] {
+        var classic = ZipWriter()
+        try classic.add("manifest.json", Array("{\"format_version\": 1}".utf8))
+        try classic.add("tiles/a.zst", [UInt8](repeating: 3, count: 5000))
+        try classic.add("empty", [])
+        var forced = ZipWriter(forceZip64: true)
+        try forced.add("manifest.json", Array("{}".utf8))
+        try forced.addStored("blob", [1, 2, 3], crc: CRC32.checksum([1, 2, 3]))
+        var deflated = ZipWriter()
+        try deflated.add("mimetype", Array("image/openraster".utf8))
+        try deflated.add("stack.xml", [UInt8](repeating: 65, count: 10_000), compress: true)
+        return [("classic", try classic.finish()), ("forced", try forced.finish()), ("deflated", try deflated.finish())]
+    }
+
+    /// An archive in a temporary file, open for reading (the reader owns the descriptor).
+    static func reader(_ bytes: [UInt8]) throws -> ZipFileReader {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("zip-file-reader-\(UUID().uuidString).zip")
+        try Data(bytes).write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let fd = open(url.path, O_RDONLY | O_CLOEXEC)
+        try #require(fd >= 0)
+        return try ZipFileReader(fileDescriptor: fd)
+    }
+
+    @Test(arguments: [false, true])
+    func streamWriterWritesZipWriterBytes(forceZip64: Bool) throws {
+        var memory = ZipWriter(forceZip64: forceZip64)
+        var stream = ZipStreamWriter(ZipMemorySink(), forceZip64: forceZip64)
+        for i in 0 ..< 200 {
+            let (name, data) = Zip64Tests.entry(i)
+            try memory.add(name, data)
+            if i % 2 == 0 { try stream.add(name, data) } else { try stream.addStored(name, data, crc: CRC32.checksum(data)) }
+            #expect(stream.size == memory.size)
+        }
+        #expect(stream.usesZip64 == memory.usesZip64)
+        #expect(try stream.finish().bytes == memory.finish())
+    }
+
+    /// More than 65,535 entries: the stream writer switches to ZIP64 where `ZipWriter` does.
+    @Test func streamWriterAgreesPastTheClassicCount() throws {
+        var memory = ZipWriter()
+        var stream = ZipStreamWriter(ZipMemorySink())
+        for i in 0 ..< 66_000 {
+            let (name, data) = Zip64Tests.entry(i)
+            try memory.add(name, data)
+            try stream.add(name, data)
+            if i == 65_533 || i == 65_534 { #expect(stream.usesZip64 == memory.usesZip64) }
+        }
+        #expect(stream.usesZip64)
+        #expect(try stream.finish().bytes == memory.finish())
+    }
+
+    /// A stored entry rewritten in place (a manifest whose version is only settled at the end):
+    /// its local header's CRC, its bytes and its central directory entry all change, nothing else.
+    @Test func replaceStoredRewritesOneEntryInPlace() throws {
+        let v1 = Array("{\"format_version\": 1}".utf8), v2 = Array("{\"format_version\": 2}".utf8)
+        var memory = ZipWriter()
+        var stream = ZipStreamWriter(ZipMemorySink())
+        for w in 0 ..< 2 {
+            for (name, data) in [("manifest.json", v1), ("tiles/a.zst", [UInt8](repeating: 9, count: 100))] {
+                if w == 0 { try memory.add(name, data) } else { try stream.add(name, data) }
+            }
+        }
+        try memory.replaceStored(0, v2, crc: CRC32.checksum(v2))
+        try stream.replaceStored(0, v2, crc: CRC32.checksum(v2))
+        var direct = ZipWriter()
+        try direct.add("manifest.json", v2)
+        try direct.add("tiles/a.zst", [UInt8](repeating: 9, count: 100))
+        let expected = try direct.finish()
+        #expect(try memory.finish() == expected)
+        #expect(try stream.finish().bytes == expected)
+        #expect(try ZipReader(expected).read(named: "manifest.json", max: 100) == v2)
+        // Only a stored entry, and only with as many bytes.
+        var w = ZipWriter()
+        try w.add("a", Array("hello".utf8))
+        try w.add("b", [UInt8](repeating: 65, count: 1000), compress: true)
+        #expect(throws: PCIOError.self) { try w.replaceStored(0, Array("hi".utf8), crc: 0) }
+        #expect(throws: PCIOError.self) { try w.replaceStored(1, [UInt8](repeating: 66, count: 1000), crc: 0) }
+        #expect(throws: PCIOError.self) { try w.replaceStored(2, [], crc: 0) }
+    }
+
+    @Test func fileReaderReadsWhatTheMemoryReaderReads() throws {
+        for (label, bytes) in try Self.archives() {
+            let memory = try ZipReader(bytes)
+            let file = try Self.reader(bytes)
+            #expect(file.entries == memory.entries, "\(label)")
+            #expect(file.isZip64 == memory.isZip64, "\(label)")
+            #expect(file.size == bytes.count)
+            for e in memory.entries {
+                #expect(try file.read(e, max: .max) == memory.read(e, max: .max), "\(label) \(e.name)")
+                #expect(file.find(e.name) == memory.find(e.name))
+            }
+            #expect(file.find("missing") == nil)
+            #expect(throws: PCIOError.corrupt("missing `missing`")) { try file.read(named: "missing", max: 1) }
+        }
+        // Many entries, read from every core at once.
+        var w = ZipWriter()
+        for i in 0 ..< 3000 { let (name, data) = Zip64Tests.entry(i); try w.add(name, data) }
+        let file = try Self.reader(try w.finish())
+        let failures = Atomic<Int>(0)
+        DispatchQueue.concurrentPerform(iterations: 3000) { i in
+            let (name, data) = Zip64Tests.entry(i)
+            if (try? file.read(named: name, max: 4)) != data { failures.add(1, ordering: .relaxed) }
+        }
+        #expect(failures.load(ordering: .relaxed) == 0)
+    }
+
+    /// Damaged archives fail the same way from a file as from memory.
+    @Test func fileReaderRejectsWhatTheMemoryReaderRejects() throws {
+        var w = ZipWriter(forceZip64: true)
+        try w.add("a", Array("hello".utf8))
+        let good = try w.finish()
+        let locator = good.count - 22 - 20
+        let record = Int(good[locator + 8]) | Int(good[locator + 9]) << 8
+        let central = Int(good[record + 48]) | Int(good[record + 49]) << 8
+        func put64(_ b: inout [UInt8], _ at: Int, _ v: UInt64) { for k in 0 ..< 8 { b[at + k] = UInt8(v >> (8 * UInt64(k)) & 0xFF) } }
+        var variants: [[UInt8]] = [[], Array(good.prefix(21)), Array(good.dropLast()), Array(good.dropFirst(4))]
+        for (at, value): (Int, UInt64) in [(locator + 8, UInt64(good.count)), (locator + 8, .max), (record + 32, 1 << 62), (record + 40, 1 << 20),
+                                           (central + 46 + 1 + 4 + 8, 1 << 40), (central + 46 + 1 + 4 + 16, UInt64(good.count))] {
+            var bad = good
+            put64(&bad, at, value)
+            variants.append(bad)
+        }
+        var crc = good
+        crc[30 + 1] ^= 1
+        variants.append(crc)
+        for (k, bytes) in variants.enumerated() {
+            let fromMemory = Result { try ZipReader(bytes).read(named: "a", max: 100) }
+            let fromFile = Result { try Self.reader(bytes).read(named: "a", max: 100) }
+            switch (fromMemory, fromFile) {
+            case let (.success(a), .success(b)): #expect(a == b, "variant \(k)")
+            case let (.failure(a), .failure(b)): #expect("\(a)" == "\(b)", "variant \(k)")
+            default: Issue.record("variant \(k): memory \(fromMemory), file \(fromFile)")
+            }
+        }
     }
 }
