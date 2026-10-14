@@ -136,7 +136,7 @@ side, 10,000 layers, 800 MP of images and of masks.
 
 | Compositor | PCDocument |
 |---|---|
-| layer PNG/EXR + transform (box, clockwise rotation, flips, sampling) | a pixel layer: copied exactly when the grid sits one-to-one on whole pixels; otherwise drawn as `LayerRenderer.draw` draws it (same CTM, interpolation and antialiasing) into a 16-bit context (half float for HDR), with a warning. CoreGraphics' 32-bit float contexts are avoided: scaled with interpolation off they repeat a row's first pixel along the last row |
+| layer PNG/EXR + transform (box, clockwise rotation, flips, sampling) | a pixel layer copied exactly when the grid sits one-to-one on whole pixels. Otherwise (scaled, turned, flipped or at a fractional position) a **smart object** (AB-D-0140, AB-T-0275): the layer's full-resolution image, decoded to the document's format and embedded losslessly (`<layer name>.png` at 8 or 16 bits, `.tif` float in a 32-bit document, with the document's profile), `SmartObject.transform` = `pixelToDocument` (quarter turns exact), and as its rendered appearance the pixels drawn as `LayerRenderer.draw` draws them (same CTM, interpolation and antialiasing) into a 16-bit context (half float for HDR). A transform back to 100 % re-renders the image itself (PCAlgo's `placeSource` is an exact shift there); a Nearest layer re-renders bicubic when its transform changes (warned). `CompImport.TransformedLayers.pixels` keeps the drawn pixels alone, warned, as before. Type and shape layers keep the drawn pixels as their cache. CoreGraphics' 32-bit float contexts are avoided: scaled with interpolation off they repeat a row's first pixel along the last row |
 | 8-bit / 16-bit PNG / OpenEXR | an 8-bit document; any 16-bit layer makes it 16-bit; an OpenEXR passing white makes it 32-bit linear sRGB (OpenEXR holds linear light) with 8/16-bit layers decoded to linear, warned; an OpenEXR within white is a 16-bit layer, as Compositor loads it |
 | folders | Pass Through groups with their opacity and mask (the mask hides beyond the folder's box). Compositor multiplies a folder's opacity and mask into each layer inside; Photoshop applies them to the folder's result, so overlapping layers inside differ (warned when the folder holds more than one) |
 | layer masks (1×1 uniform, linked, unlinked `maskPlacement`, disabled) | `LayerMask` at the document's depth; beyond its box an unlinked mask keeps the value most of its edge has (`LayerMask.background`) |
@@ -150,6 +150,25 @@ side, 10,000 layers, 800 MP of images and of masks.
 | text metadata | a type layer: runs from the UTF-16 colour/face runs, size and leading in points at the document's resolution, tracking in 1/1000 em, box or point text placed as Compositor lays it out (12 px padding); Compositor's PNG is its rendered pixels until edited |
 | shape metadata | a shape layer (live rectangle/ellipse/line when upright) with Compositor's PNG as its pixels |
 | guides, resolution | `Document.guides`, `resolutionDpi` (72 when missing) |
+
+**Transformed layers as smart objects (AB-T-0275, AB-D-0140).** `PCEngineTests/CompSmartObjectTests`
+imports a package of layers scaled to 25 % (a 300 × 220 image, more than one tile), turned 30°,
+flipped at 200 % from a fractional origin, and turned a quarter and flipped, at 8 and 16 bits:
+- every one is a smart object whose embedded file decodes to the layer's image exactly;
+- a `.pcraft` save (package and single file) and reopen keeps the file, the transform and the
+  rendered pixels exactly;
+- a PSD or PSB save writes them as placed layers (`PlLd`/`SoLd`, the file in `lnk2`), and PCPSD's
+  re-read keeps the file and the rendered pixels exactly, and the transform exactly except the 30°
+  turn's, which comes back within an ulp of each term (a placed layer stores the corners the source
+  lands on, not the matrix);
+- after every round trip, a Free Transform back to 100 % at a whole pixel re-renders each image
+  pixel for pixel (PCEngine's `snapAffine` and PCAlgo's exact shift);
+- PCRender composites them (their rendered pixels) on the GPU within 2 levels of the CPU reference,
+  at full resolution and at levels 1 and 2.
+
+Photoshop 27.11 (`ps-oracle sweep`, 2026-10-14, after the offline pre-screens) opens the 8- and
+16-bit PSDs of that document with the layer tree matching, the four layers as smart objects
+(`layerKind` 5), and its composite within 1 level (mean 0.003) at 8 bits and 0.012 levels at 16.
 
 **Parity with Compositor's own oracle** (`PCIOTests/CompCorpusTests`): every file of the
 CanvasFixtureGenerator set (`PCIO_COMP_FIXTURES`, default `<fixtures>/comp-fixtures`; 43

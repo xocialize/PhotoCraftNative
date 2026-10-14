@@ -3,7 +3,8 @@
 // draws it with CoreGraphics; PCDocument layers are pixels in document space. A layer whose grid
 // lands one-to-one on whole document pixels is copied exactly; any other is drawn the way
 // Compositor's `LayerRenderer.draw` draws it (same placement, interpolation and antialiasing), into
-// a float context so nothing is lost to 8-bit premultiplication.
+// a float context so nothing is lost to 8-bit premultiplication: a smart object's rendered
+// appearance, or a pixel layer's pixels (`CompImport.TransformedLayers`).
 // Written from Compositor's Rendering/LayerRenderer.swift, Document/LayerMask.swift and
 // Document/BrushStroke.swift (`pixelToDocument`); Compositor is MIT, © 2026 Wonder Assembly LLC.
 
@@ -33,6 +34,22 @@ enum CompPixels {
         } }
         func clampI(_ v: Double) -> Int32 { Int32(max(-2_000_000, min(2_000_000, v))) }
         return PixelRect(x0: clampI(minX.rounded(.down)), y0: clampI(minY.rounded(.down)), x1: clampI(maxX.rounded(.up)), y1: clampI(maxY.rounded(.up)))
+    }
+
+    /// The transform a smart object holding the `w` × `h` grid is placed by: source pixels →
+    /// document pixels, as `pixelToDocument`, with quarter turns exact (cos 90° is 0, not 6e-17),
+    /// so a turn or flip back to 100 % lands on whole pixels.
+    static func affine(_ t: CompTransform, _ w: Int, _ h: Int) -> PCAffine {
+        var m = t.pixelToDocument(w, h)
+        if t.rotation.truncatingRemainder(dividingBy: 90) == 0 {
+            let scale = max(abs(m.a), abs(m.b), abs(m.c), abs(m.d))
+            func snap(_ v: Double) -> Double { abs(v) < scale * 1e-9 ? 0 : v }
+            (m.a, m.b, m.c, m.d) = (snap(m.a), snap(m.b), snap(m.c), snap(m.d))
+            let cx = t.originX + t.width / 2, cy = t.originY + t.height / 2
+            let hx = Double(w) / 2, hy = Double(h) / 2
+            (m.tx, m.ty) = (cx - m.a * hx - m.c * hy, cy - m.b * hx - m.d * hy)
+        }
+        return PCAffine(a: m.a, b: m.b, c: m.c, d: m.d, e: m.tx, f: m.ty)
     }
 
     /// `LayerRenderer.interpolation` at export scale (one device pixel per document pixel; the

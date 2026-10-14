@@ -4,8 +4,11 @@
 // AB-D-0131); a document opened from one saves as `.pcraft` or PSD.
 //
 // Mapping (each documented where it happens):
-// - pixel layers: Compositor's non-destructive transform is applied to the pixels (copied exactly
-//   when the layer sits one-to-one on whole pixels, else drawn as Compositor draws it);
+// - pixel layers: copied exactly when the layer sits one-to-one on whole pixels; a layer Compositor
+//   shows scaled, turned, flipped or at a fractional position is a smart object (bridge decision
+//   AB-D-0140): its full-resolution image, embedded losslessly, plus the transform, with the pixels
+//   drawn as Compositor draws them as its rendered appearance (`TransformedLayers.pixels` keeps
+//   the drawn pixels alone);
 // - depth: 8-bit layers make an 8-bit document, any 16-bit layer a 16-bit one, any OpenEXR layer
 //   a 32-bit linear document (OpenEXR holds linear light, as File › Open treats it);
 // - folders are Pass Through groups with their opacity and mask;
@@ -84,14 +87,28 @@ public enum CompImport {
         return header.format == CompManifest.formatID
     }
 
+    /// What a pixel layer becomes when Compositor shows it scaled, turned, flipped or at a
+    /// fractional position: anywhere its pixels don't land one-to-one on whole document pixels.
+    public enum TransformedLayers: Sendable {
+        /// A smart object (AB-D-0140): the layer's full-resolution image, embedded losslessly (PNG
+        /// at the document's 8 or 16 bits, a float TIFF in a 32-bit document), and the transform,
+        /// so the transform stays non-destructive. Its rendered appearance is the pixels drawn as
+        /// Compositor draws them.
+        case smartObjects
+        /// A pixel layer holding those drawn pixels alone; the image's own resolution is lost.
+        case pixels
+    }
+
     /// Imports the package at `url`.
-    public static func importDocument(contentsOf url: URL, codec: any FlatImageCodec, interrupt: Interrupt = .none) throws -> ImportResult {
-        try importDocument(.directory(url), codec: codec, interrupt: interrupt)
+    public static func importDocument(contentsOf url: URL, codec: any FlatImageCodec, interrupt: Interrupt = .none,
+                                      transformedLayers: TransformedLayers = .smartObjects) throws -> ImportResult {
+        try importDocument(.directory(url), codec: codec, interrupt: interrupt, transformedLayers: transformedLayers)
     }
 
     /// Imports a package. Refusals are `PCIOError.format("Compositor", …)` naming the rule.
-    public static func importDocument(_ package: Package, codec: any FlatImageCodec, interrupt: Interrupt = .none) throws -> ImportResult {
-        do { return try load(package, codec: codec, interrupt: interrupt) } catch let e as CompError {
+    public static func importDocument(_ package: Package, codec: any FlatImageCodec, interrupt: Interrupt = .none,
+                                      transformedLayers: TransformedLayers = .smartObjects) throws -> ImportResult {
+        do { return try load(package, codec: codec, interrupt: interrupt, transformedLayers: transformedLayers) } catch let e as CompError {
             throw PCIOError.format("Compositor", e.description)
         }
     }
@@ -201,10 +218,11 @@ public enum CompImport {
 
     // MARK: Import
 
-    static func load(_ package: Package, codec: any FlatImageCodec, interrupt: Interrupt) throws -> ImportResult {
+    static func load(_ package: Package, codec: any FlatImageCodec, interrupt: Interrupt,
+                     transformedLayers: TransformedLayers = .smartObjects) throws -> ImportResult {
         let m = try manifest(try package.read(manifestName, CompManifest.maxManifestBytes))
         let (images, masks) = try decodeAssets(m, package, codec, interrupt)
-        var b = Builder(m: m, images: images, masks: masks, interrupt: interrupt)
+        var b = Builder(m: m, images: images, masks: masks, interrupt: interrupt, transformedLayers: transformedLayers)
         let doc = try b.build(name: package.name)
         interrupt.progress(1)
         return ImportResult(document: doc, warnings: b.warnings.list, sourceReadOnly: true)
@@ -222,6 +240,7 @@ public enum CompImport {
         let images: [UUID: Image]
         let masks: [UUID: Mask]
         let interrupt: Interrupt
+        let transformedLayers: TransformedLayers
         var warnings = Warnings()
 
         let byID: [UUID: CompLayer]
@@ -232,9 +251,12 @@ public enum CompImport {
         let limit: PixelRect
         var format = PixelFormat.rgba8
         var maskFormat = PixelFormat.gray8
+        var iccProfile: [UInt8]?
         /// Placed pixels and masks, by layer.
         var placed: [UUID: Surface] = [:]
         var placedMasks: [UUID: Surface] = [:]
+        /// The full-resolution images (in the document's format) of the layers that become smart objects.
+        var smartSources: [UUID: Surface] = [:]
         var coverageCache: [UUID: [Float]] = [:]
         /// Layers clipped to the layer below (Photoshop clipping), and links baked into masks.
         var clipped = Set<UUID>()
@@ -242,8 +264,8 @@ public enum CompImport {
         /// Clipped adjustment layers Compositor never draws (no clipping stack to apply them in).
         var inert = Set<UUID>()
 
-        init(m: CompManifest, images: [UUID: Image], masks: [UUID: Mask], interrupt: Interrupt) {
-            self.m = m; self.images = images; self.masks = masks; self.interrupt = interrupt
+        init(m: CompManifest, images: [UUID: Image], masks: [UUID: Mask], interrupt: Interrupt, transformedLayers: TransformedLayers = .smartObjects) {
+            self.m = m; self.images = images; self.masks = masks; self.interrupt = interrupt; self.transformedLayers = transformedLayers
             byID = Dictionary(m.layers.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
             children = Dictionary(grouping: m.layers, by: \.parentID)
             canvas = PixelRect(x: 0, y: 0, width: m.width, height: m.height)
@@ -332,8 +354,16 @@ public enum CompImport {
                     if format.sample == .f32, !img.exr { hdrLinearized = true }
                     src = CompPixels.toDocument(src, format)
                     let p = CompPixels.placeLayer(src, img.width, img.height, l.transform, format: format, limit: limit)
-                    if p.resampled { warnings.add("Layer \"\(l.name)\": its transform (scale, rotation, flip or a fractional position) is applied to the pixels") }
-                    if p.cropped { warnings.add("Layer \"\(l.name)\": pixels more than a canvas beyond the canvas were left out") }
+                    if p.resampled, transformedLayers == .smartObjects, l.text == nil, l.shape == nil {
+                        // The image keeps every pixel; only its rendered appearance is drawn within the limit.
+                        smartSources[l.id] = src
+                        if l.transform.sampling == .nearest {
+                            warnings.add("Layer \"\(l.name)\": a smart object re-renders with bicubic resampling when its transform changes; Compositor drew it with Nearest Neighbor")
+                        }
+                    } else {
+                        if p.resampled { warnings.add("Layer \"\(l.name)\": its transform (scale, rotation, flip or a fractional position) is applied to the pixels") }
+                        if p.cropped { warnings.add("Layer \"\(l.name)\": pixels more than a canvas beyond the canvas were left out") }
+                    }
                     placed[l.id] = p.surface
                 }
                 if let mk = masks[l.id] {
@@ -464,6 +494,8 @@ public enum CompImport {
                         warnings.add("Type layers keep Compositor's rendered pixels until edited; editing re-sets the text with PhotoCraft's type engine, which can shift it slightly")
                     } else if let shape = r.shape {
                         l.content = .shape(CompMap.shape(shape, r.transform, img.width, img.height, cache: surface))
+                    } else if let source = smartSources[r.id] {
+                        l.content = .smart(try smartObject(r, source, img, cache: surface))
                     }
                 }
                 if let e = r.effects, !e.isEmpty {
@@ -485,6 +517,32 @@ public enum CompImport {
             return l
         }
 
+        /// The smart object of a transformed pixel layer (AB-D-0140): `source` (its `img.width` ×
+        /// `img.height` image in the document's format) embedded losslessly, placed by the layer's
+        /// transform, with `cache` (the pixels drawn as Compositor draws them) as its appearance.
+        /// The source decodes to `source` exactly, so a transform back to 100 % gives the image
+        /// itself.
+        func smartObject(_ r: CompLayer, _ source: Surface, _ img: Image, cache: Surface) throws -> SmartObject {
+            let grid = PixelRect(x: 0, y: 0, width: img.width, height: img.height)
+            let type: FlatImageType = format.sample == .f32 ? .tiff : .png
+            let bytes: [UInt8]
+            do {
+                bytes = try ImageIOCodec().encode(source, rect: grid, as: type, quality: nil, iccProfile: iccProfile, metadata: FlatMetadata.Metadata(),
+                                                  dpi: m_resolution)
+            } catch {
+                throw CompError.missingImage("layer \"\(r.name)\"'s image can't be embedded in its smart object (\(error))")
+            }
+            let source = SmartSource.embedded(fileName: Self.sourceFileName(r.name, type), bytes: bytes)
+            return SmartObject(source: source, transform: CompPixels.affine(r.transform, img.width, img.height), cache: cache)
+        }
+
+        /// The embedded file's name: the layer's, as a file name, with the image type's extension.
+        static func sourceFileName(_ layer: String, _ type: FlatImageType) -> String {
+            let stem = layer.map { "/:\\".contains($0) || $0.isNewline ? "-" : $0 }.prefix(200)
+            let name = String(stem).trimmingCharacters(in: .whitespaces)
+            return (name.isEmpty ? "Layer" : name) + (type == .tiff ? ".tif" : ".png")
+        }
+
         var m_resolution: Double { m.resolution ?? 72 }
 
         mutating func build(name: String) throws -> Document {
@@ -498,6 +556,7 @@ public enum CompImport {
             // Compositor documents are sRGB; OpenEXR ones are linear light with sRGB primaries.
             let space = depth == .f32 ? CGColorSpace.linearSRGB : CGColorSpace.sRGB
             doc.iccProfile = CGColorSpace(name: space)?.copyICCData().map { [UInt8]($0 as Data) }
+            iccProfile = doc.iccProfile
             planClipping()
             try placeAll()
             interrupt.progress(0.8)

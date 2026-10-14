@@ -253,6 +253,15 @@ enum CompKit {
         let s = r.document.layers[2].surface!
         #expect(abs(s.rgba(x: 1, y: 3).x - CompPixels.srgbToLinear(3)) < 0.05 && abs(s.rgba(x: 3, y: 0).x - CompPixels.srgbToLinear(0.25)) < 0.002,
                 "\(s.rgba(x: 1, y: 3)) \(s.rgba(x: 3, y: 0))")
+        // Its smart object embeds the 2×2 image as a float TIFF in linear light, highlights kept.
+        guard case .smart(let sm) = r.document.layers[2].content, case .embedded(let file, let bytes) = sm.source else {
+            Issue.record("the scaled HDR layer is \(r.document.layers[2].content.kindName)")
+            return
+        }
+        #expect(file == "Scaled HDR.tif" && sm.transform == .scale(2))
+        let source = try ImageIOCodec().decode(bytes)
+        #expect(source.surface.format.sample == .f32 && source.width == 2)
+        #expect(abs(source.surface.rgba(x: 0, y: 0).x - CompPixels.srgbToLinear(3)) < 0.05 && abs(source.surface.rgba(x: 1, y: 0).x - CompPixels.srgbToLinear(0.25)) < 0.002)
         let d = r.document
         #expect(d.depth == .f32)
         let lin = CGColorSpace(name: CGColorSpace.linearSRGB)!.copyICCData().map { [UInt8]($0 as Data) }
@@ -273,23 +282,64 @@ enum CompKit {
         #expect(abs(p.x - 0.5) < 0.002 && abs(p.y - 0.25) < 0.002 && abs(p.z - 1) < 0.002, "\(p)")
     }
 
-    @Test func transformsAreAppliedToThePixels() throws {
-        // A 2×2 image scaled to 4×4 with Nearest, and the same one flipped horizontally in place.
+    /// A 2×2 image scaled to 4×4 with Nearest, the same one flipped horizontally in place, and turned.
+    static func transformed() -> (manifest: [UInt8], images: [String: [UInt8]]) {
         let img = K.png(2, 2) { x, y in SIMD4(x == 0 ? 1 : 0, y == 0 ? 1 : 0, 0, 1) }
         let m = K.manifest(layers: [
             K.layer(1, "Scaled", ["transform": K.transform(0, 0, 4, 4, sampling: "Nearest")]),
             K.layer(2, "Flipped", ["transform": K.transform(1, 1, 2, 2, flipX: true, sampling: "Nearest")]),
             K.layer(3, "Turned", ["transform": K.transform(0, 0, 2, 2, rotation: 90, sampling: "Nearest")]),
         ])
-        let r = try K.load(m, ["\(K.id(1)).png": img, "\(K.id(2)).png": img, "\(K.id(3)).png": img])
-        let s = r.document.layers[0].surface!
+        return (m, ["\(K.id(1)).png": img, "\(K.id(2)).png": img, "\(K.id(3)).png": img])
+    }
+
+    /// AB-D-0140: a layer Compositor shows scaled, flipped or turned is a smart object, its image
+    /// embedded losslessly and its transform exact (quarter turns included), and it shows the pixels
+    /// Compositor draws.
+    @Test func transformedLayersBecomeSmartObjects() throws {
+        let (m, images) = Self.transformed()
+        let r = try K.load(m, images)
+        let expected: [(String, PCAffine)] = [
+            ("Scaled", .scale(2)),
+            ("Flipped", PCAffine(a: -1, b: 0, c: 0, d: 1, e: 3, f: 1)),
+            ("Turned", PCAffine(a: 0, b: 1, c: -1, d: 0, e: 2, f: 0)),
+        ]
+        let original = try ImageIOCodec().decode(images["\(K.id(1)).png"]!).surface.readRGBA(PixelRect(x: 0, y: 0, width: 2, height: 2))
+        for (i, (name, transform)) in expected.enumerated() {
+            let l = r.document.layers[i]
+            guard case .smart(let sm) = l.content, case .embedded(let file, let bytes) = sm.source else {
+                Issue.record("\(name) is \(l.content.kindName), not an embedded smart object")
+                continue
+            }
+            #expect(l.name == name && file == "\(name).png")
+            #expect(sm.transform == transform, "\(name): \(sm.transform)")
+            let decoded = try ImageIOCodec().decode(bytes)
+            #expect(decoded.width == 2 && decoded.height == 2 && decoded.surface.format == .rgba8)
+            #expect(decoded.surface.readRGBA(PixelRect(x: 0, y: 0, width: 2, height: 2)) == original, "\(name): the embedded image isn't the layer's")
+        }
+        try Self.expectDrawnAsCompositorDraws(r.document)
+        #expect(r.warnings.contains { $0.contains("\"Scaled\": a smart object re-renders with bicubic") })
+        #expect(!r.warnings.contains { $0.contains("applied to the pixels") })
+    }
+
+    @Test func transformsCanStillBeAppliedToThePixels() throws {
+        let (m, images) = Self.transformed()
+        let r = try CompImport.load(K.package(m, images), codec: ImageIOCodec(), interrupt: .none, transformedLayers: .pixels)
+        for l in r.document.layers {
+            guard case .raster = l.content else { Issue.record("\(l.name) is \(l.content.kindName)"); continue }
+        }
+        try Self.expectDrawnAsCompositorDraws(r.document)
+        #expect(r.warnings.contains { $0.contains("\"Scaled\": its transform") })
+    }
+
+    static func expectDrawnAsCompositorDraws(_ d: Document) throws {
+        let s = d.layers[0].surface!
         #expect(s.rgba(x: 1, y: 1) == SIMD4(1, 1, 0, 1) && s.rgba(x: 2, y: 1) == SIMD4(0, 1, 0, 1) && s.rgba(x: 3, y: 3) == SIMD4(0, 0, 0, 1), "\((0..<4).map { y in (0..<4).map { x in s.rgba(x: Int32(x), y: Int32(y)) } })")
-        let f = r.document.layers[1].surface!
+        let f = d.layers[1].surface!
         #expect(f.rgba(x: 1, y: 1) == SIMD4(0, 1, 0, 1) && f.rgba(x: 2, y: 1) == SIMD4(1, 1, 0, 1))
         // Clockwise 90°: the top-left pixel goes to the top right.
-        let t = r.document.layers[2].surface!
+        let t = d.layers[2].surface!
         #expect(t.rgba(x: 1, y: 0) == SIMD4(1, 1, 0, 1) && t.rgba(x: 0, y: 0) == SIMD4(1, 0, 0, 1), "\(t.rgba(x: 0, y: 0)) \(t.rgba(x: 1, y: 0))")
-        #expect(r.warnings.contains { $0.contains("\"Scaled\": its transform") })
     }
 
     @Test func masksKeepTheirPlacementAndWhatLiesBeyond() throws {
