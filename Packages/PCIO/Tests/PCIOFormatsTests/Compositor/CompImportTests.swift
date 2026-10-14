@@ -391,8 +391,8 @@ enum CompKit {
         ])
         let r = try K.load(m)
         let a = r.document.layers.compactMap { l -> Adjustment? in if case .adjustment(let x) = l.content { x } else { nil } }
-        #expect(a.count == 8)
-        guard a.count == 8 else { return }
+        #expect(a.count == 12)
+        guard a.count == 12 else { return }
         if case .hueSaturation(let h) = a[0] {
             #expect(h.hue == 20 && h.saturation == 10 && h.ranges[0].hue == -30 && h.ranges[0].lightness == 5)
             #expect(h.ranges[0].bounds == HueRange.canonicalBounds(SIMD4(300, 330, 20, 50)))
@@ -414,9 +414,12 @@ enum CompKit {
         #expect(a[5] == .invert)
         if case .blackWhite(let b) = a[6] { #expect(b.weights == [40, 60, 40, 60, 20, 80] && b.tint != nil) } else { Issue.record("B&W") }
         if case .colorBalance(let c) = a[7] { #expect(c.midtones == SIMD3(40, 0, -35) && !c.preserveLuminosity) } else { Issue.record("Color Balance") }
-        for kind in ["Grain", "Add Noise", "Gaussian Blur (radius 4 px)", "Motion Blur (30°, 12 px)"] {
-            #expect(r.warnings.contains { $0.hasPrefix(kind) && $0.contains("left out") }, "\(kind): \(r.warnings)")
-        }
+        // Grain, Add Noise and the blurs are filter adjustment layers (AB-T-0258), seeds kept.
+        #expect(a[8] == .filter(.grain(.init(amount: 25, size: 1.5, roughness: 50, seed: 7))))
+        #expect(a[9] == .filter(.addNoise(.init(amount: 12, gaussian: false, monochromatic: false, seed: 3))))
+        #expect(a[10] == .filter(.gaussianBlur(.init(radius: 4))))
+        #expect(a[11] == .filter(.motionBlur(.init(angle: 30, distance: 12))))
+        #expect(!r.warnings.contains { $0.contains("left out") }, "\(r.warnings)")
         #expect(r.warnings.contains { $0.contains("pencil") })
     }
 

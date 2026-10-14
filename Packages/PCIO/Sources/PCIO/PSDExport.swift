@@ -1182,7 +1182,13 @@ struct Exporter {
             if !keep {
                 raw.removeAll { AdjustMap.adjustmentKeys.contains($0.key) || $0.key == "CgEd" }
                 let w = AdjustMap.write(a)
-                if w.isEmpty { warnings.append("layer \"\(l.name)\": \(a.label) adjustment is not yet written to PSD") }
+                if let f = a.asFilter {
+                    // No live filter layer in Photoshop (AB-T-0258): the record stays, as an empty
+                    // pixel layer; the merged image still shows the filter.
+                    warnings.append("layer \"\(l.name)\": \(f.label) adjustment layer has no PSD equivalent; written as an empty pixel layer (its mask, opacity and blend mode kept), so Photoshop shows the layers below it unfiltered; save as .pcraft to preserve it")
+                } else if w.isEmpty {
+                    warnings.append("layer \"\(l.name)\": \(a.label) adjustment is not yet written to PSD")
+                }
                 // Photoshop's `clrL` descriptor has no interpolation setting.
                 if case let .colorLookup(c) = a, c.tetrahedral {
                     warnings.append("layer \"\(l.name)\": Color Lookup tetrahedral interpolation is saved as trilinear (PSD has no interpolation setting)")

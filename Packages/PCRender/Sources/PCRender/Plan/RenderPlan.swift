@@ -124,7 +124,46 @@ public struct AdjustMix: Hashable, Sendable {
     /// Opacity × fill.
     public var opacity: Float
     public var mask: MaskSpec?
-    public init(mode: BlendMode = .normal, opacity: Float = 1, mask: MaskSpec? = nil) { self.mode = mode; self.opacity = opacity; self.mask = mask }
+    /// The result's coverage differs from the backdrop's (a blur spreads into clear pixels and thins
+    /// at the canvas edge): Normal then mixes premultiplied colour and coverage, as Compositor draws
+    /// these layers; the other modes blend colours and keep the backdrop's coverage.
+    public var coverage: Bool
+    public init(mode: BlendMode = .normal, opacity: Float = 1, mask: MaskSpec? = nil, coverage: Bool = false) {
+        self.mode = mode; self.opacity = opacity; self.mask = mask; self.coverage = coverage
+    }
+}
+
+/// A filter adjustment as a plan applies it: `filter` (clamped to its ranges) at `scale` plan
+/// pixels per document pixel (1 at full resolution, 2^-level at a level of detail), so lengths
+/// shrink with the plan and patterns stay fixed in the document.
+public struct FilterSpec: Hashable, Sendable {
+    public var filter: FilterAdjustment
+    public var scale: Float
+    public init(_ filter: FilterAdjustment, scale: Float = 1) { self.filter = filter.clamped; self.scale = scale }
+
+    /// The filter in a plan at level of detail `level` (one plan pixel per 2^level document pixels).
+    public func atLevel(_ level: Int) -> FilterSpec {
+        var f = self
+        f.scale = scale / Float(1 << min(max(level, 0), 30))
+        return f
+    }
+}
+
+/// A filter that reads around each pixel (the blurs) applied to the backdrop beneath its layer.
+/// Tiles and cells can't see past their own pixels, so the backdrop has a program of its own:
+/// `program` is the plan up to the layer (the ops that made the backdrop, then `.remove` and
+/// `.dropFloor` until it is alone on the stack). The compositor runs it once per render, over the
+/// render region plus the filter's reach within the canvas, filters that, and each tile or cell
+/// reads its part (Filters.swift).
+public struct BackdropFilter: Hashable, Sendable {
+    public var spec: FilterSpec
+    public var program: [DrawOp]
+    /// The op also pushes the backdrop itself, beneath the result: the planner dropped the ops that
+    /// made it (the layer sat alone on the root stack), so the program's render stands in for them.
+    public var pushesBackdrop: Bool
+    public init(spec: FilterSpec, program: [DrawOp], pushesBackdrop: Bool) {
+        self.spec = spec; self.program = program; self.pushesBackdrop = pushesBackdrop
+    }
 }
 
 /// Channel restrictions and Blend If applied to a finished layer composite.
@@ -192,6 +231,13 @@ public enum DrawOp: Hashable, Sendable {
     case clipped(LayerBlend)
     /// [x] → [x adjusted] (`adjust::apply_in`; transparent pixels untouched).
     case adjust(Adjustment)
+    /// [x] → [x filtered]: a filter adjustment on the buffer itself (Grain and Add Noise read each
+    /// pixel alone; a blur here sees clear pixels past the buffer). Transparent pixels untouched by
+    /// the pointwise kinds.
+    case filter(FilterSpec)
+    /// [] → [filtered backdrop], or [backdrop, filtered backdrop] (`pushesBackdrop`): see
+    /// `BackdropFilter`.
+    case backdropFilter(BackdropFilter)
     /// [backdrop, adjusted] → [backdrop + (blend(backdrop, adjusted) − backdrop) × opacity × mask].
     case adjustMix(AdjustMix)
     /// [x] → [x rounded to `q` steps per unit] (adjustment results in integer documents).
@@ -257,6 +303,27 @@ public struct RenderPlan: Hashable, Sendable {
     public var ops: [DrawOp]
     public init(context: RenderContext, ops: [DrawOp]) { self.context = context; self.ops = ops }
 
+    /// The stack depth and saved floors after `ops` run from an empty stack (no checks: see
+    /// `validate`).
+    static func stackState(_ ops: [DrawOp]) -> (depth: Int, floors: Int) {
+        var depth = 0, floors = 0
+        for op in ops {
+            switch op {
+            case .pushGroup(.isolated), .pushTransparent, .drawTiles, .fill, .pushMaskShape, .pushGroup(.passThrough), .pick, .pushFloor: depth += 1
+            case .backdropFilter(let b): depth += b.pushesBackdrop ? 2 : 1
+            case .popGroup(.passThrough), .drop, .remove, .composite, .clipped, .adjustMix, .effect, .restrictTo: depth -= 1
+            case .finishLayer(let f): depth -= f.hasOwn ? 2 : 1
+            case .knockoutBegin: depth += 1
+            case .knockoutEnd: depth -= 3
+            case .mixBy, .addDifference: depth -= 2
+            case .saveFloor: floors += 1
+            case .dropFloor: floors -= 1
+            case .popGroup(.isolated), .swap, .mask, .adjust, .filter, .quantize, .beginClipBase: break
+            }
+        }
+        return (depth, floors)
+    }
+
     /// Checks the program's stack discipline: no underflow, one buffer at the end, floors balanced.
     public func validate() throws(PlanError) {
         var depth = 0, floors = 0
@@ -271,7 +338,8 @@ public struct RenderPlan: Hashable, Sendable {
             case .drop: try need(1, i); depth -= 1
             case .swap: try need(2, i)
             case .remove(let n): try need(n + 1, i); depth -= 1
-            case .mask, .adjust, .quantize: try need(1, i)
+            case .mask, .adjust, .filter, .quantize: try need(1, i)
+            case .backdropFilter(let b): depth += b.pushesBackdrop ? 2 : 1
             case .beginClipBase: try need(1, i)
             case .composite, .clipped, .adjustMix, .effect, .restrictTo: try need(2, i); depth -= 1
             case .finishLayer(let f): try need(f.hasOwn ? 3 : 2, i); depth -= f.hasOwn ? 2 : 1

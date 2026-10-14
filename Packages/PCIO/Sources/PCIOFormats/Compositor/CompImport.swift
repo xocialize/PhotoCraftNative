@@ -447,7 +447,7 @@ public enum CompImport {
             } else if let a = r.adjustment {
                 var notes: [String] = []
                 guard let adj = CompMap.adjustment(a, layer: r.name, warn: { notes.append($0) }) else {
-                    warnings.add("\(CompMap.unmappedReason(a)) adjustment layer \"\(r.name)\" has no Photoshop adjustment layer and was left out: the layers below show without it")
+                    warnings.add("\(CompMap.unmappedReason(a)) adjustment layer \"\(r.name)\" is a kind this version doesn't know and was left out: the layers below show without it")
                     return nil
                 }
                 notes.forEach { warnings.add($0) }

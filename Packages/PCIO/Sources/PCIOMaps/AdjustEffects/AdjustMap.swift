@@ -175,11 +175,14 @@ public enum AdjustMap {
     }
 
     /// Serializes an adjustment into its PSD blocks: `(key, data)` pairs (Brightness/Contrast also
-    /// writes a `CgEd` descriptor). Every evaluated kind has an encoding; the result is empty only
-    /// for an `Adjustment.unsupported` with a malformed key.
+    /// writes a `CgEd` descriptor). Every evaluated kind has an encoding but filter adjustments,
+    /// which Photoshop has no adjustment layer for; the result is empty for those and for an
+    /// `Adjustment.unsupported` with a malformed key.
     public static func write(_ adj: Adjustment) -> RawBlocks {
         var v = BEWriter()
         switch adj {
+        case .filter:
+            return []
         case .invert:
             return [("nvrt", [])]
         case let .threshold(level):

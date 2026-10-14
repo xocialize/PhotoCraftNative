@@ -1209,6 +1209,9 @@ public struct PreparedAdjustment: @unchecked Sendable {
             }
         case .colorLookup, .unsupported:
             break
+        case .filter:
+            // Planned as `.filter` / `.backdropFilter` ops (Filters.swift), never `.adjust`.
+            break
         }
         _ = rect
     }

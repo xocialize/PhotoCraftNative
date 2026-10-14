@@ -1,5 +1,6 @@
-// `.comp` layer features → PCDocument: blend modes, the 12 adjustment kinds, the 6 layer effects,
-// and the text and shape metadata Compositor keeps beside a layer's PNG.
+// `.comp` layer features → PCDocument: blend modes, the 12 adjustment kinds (Grain, Add Noise and
+// the blurs as filter adjustment layers, AB-T-0258), the 6 layer effects, and the text and shape
+// metadata Compositor keeps beside a layer's PNG.
 // Written from Compositor's Document/LayerAppearance.swift, LayerAdjustment.swift,
 // ImageAdjustments.swift, Levels.swift, Curves.swift, HueSaturation.swift, LayerEffects.swift,
 // TypeTool.swift and ShapeTool.swift; Compositor is MIT, © 2026 Wonder Assembly LLC.
@@ -21,8 +22,9 @@ enum CompMap {
 
     // MARK: Adjustments
 
-    /// The PCDocument adjustment for `a`, or nil (with the reason) for the kinds that sample
-    /// neighbouring pixels or add noise, which Photoshop has no adjustment layer for.
+    /// The PCDocument adjustment for `a`, or nil for a kind this version doesn't know. Grain, Add
+    /// Noise, Gaussian Blur and Motion Blur, which Photoshop has no adjustment layer for, are filter
+    /// adjustment layers with Compositor's settings and seeds.
     static func adjustment(_ a: CompAdjustment, layer: String, warn: (String) -> Void) -> Adjustment? {
         guard let kind = a.kind else { return nil }
         switch kind {
@@ -71,24 +73,22 @@ enum CompMap {
             func v(_ x: [Double]) -> SIMD3<Float> { SIMD3(Float(x[0]), Float(x[1]), Float(x[2])) }
             return .colorBalance(.init(shadows: v(cb.shadows), midtones: v(cb.midtones), highlights: v(cb.highlights),
                                        preserveLuminosity: cb.preserveLuminosity))
-        case .grain, .addNoise, .gaussianBlur, .motionBlur:
-            return nil
+        case .grain:
+            let g = a.grain
+            return .filter(.grain(.init(amount: Float(g?.amount ?? 25), size: Float(g?.size ?? 1.5), roughness: Float(g?.roughness ?? 50),
+                                        seed: g?.seed ?? 0)))
+        case .addNoise:
+            return .filter(.addNoise(.init(amount: Float(a.noiseAmount ?? 10), gaussian: a.noiseGaussian ?? false,
+                                           monochromatic: a.noiseMonochromatic ?? false, seed: a.noiseSeed ?? 0)))
+        case .gaussianBlur:
+            return .filter(.gaussianBlur(.init(radius: Float(a.blurRadius ?? 10))))
+        case .motionBlur:
+            return .filter(.motionBlur(.init(angle: Float(a.motionAngle ?? 0), distance: Float(a.motionDistance ?? 10))))
         }
     }
 
-    /// Why a kind has no adjustment layer here, with its settings.
-    static func unmappedReason(_ a: CompAdjustment) -> String {
-        switch a.kind {
-        case .grain:
-            let g = a.grain
-            return "Grain (amount \(fmt(g?.amount ?? 25)), size \(fmt(g?.size ?? 1.5)), roughness \(fmt(g?.roughness ?? 50)))"
-        case .addNoise:
-            return "Add Noise (\(fmt(a.noiseAmount ?? 10)) %\((a.noiseGaussian ?? false) ? ", Gaussian" : "")\((a.noiseMonochromatic ?? false) ? ", monochromatic" : ""))"
-        case .gaussianBlur: return "Gaussian Blur (radius \(fmt(a.blurRadius ?? 10)) px)"
-        case .motionBlur: return "Motion Blur (\(fmt(a.motionAngle ?? 0))°, \(fmt(a.motionDistance ?? 10)) px)"
-        default: return a.kindName
-        }
-    }
+    /// What an adjustment layer `adjustment` leaves out holds (its kind's name, as stored).
+    static func unmappedReason(_ a: CompAdjustment) -> String { a.kindName }
 
     static func fmt(_ v: Double) -> String { v.rounded() == v ? String(Int(v)) : String(format: "%g", v) }
 

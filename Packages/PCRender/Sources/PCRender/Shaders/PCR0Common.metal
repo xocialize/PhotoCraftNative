@@ -48,6 +48,7 @@ constant uint PCR_F_DITHER = 8192u;   // gradient fill: dither
 constant uint PCR_F_QUANT = 16384u;   // gradient fill dither rounded to p[1].x steps
 constant uint PCR_F_NLAB = 1u << 25;  // native Lab buffers (L/100, (a+128)/255, (b+128)/255): Lab blend rules
 constant uint PCR_F_KPLANE = 1u << 26;// CMYK black plane (1 − K): non-separable modes keep base / take source K
+constant uint PCR_F_COVERAGE = 1u << 29; // adjust mix: the result's coverage mixes too (AdjustMix.coverage)
 
 // Blend space bits (`pcr_sp`): 32-bit document, native Lab, CMYK black plane.
 constant uint PCR_SP_HDR = 1u, PCR_SP_LAB = 2u, PCR_SP_K = 4u, PCR_SP_8 = 8u;

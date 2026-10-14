@@ -51,6 +51,8 @@ struct PCROp {
     static let fxNoPaint: UInt32 = 1 << 24, fxSplit: UInt32 = 1 << 28
     // Native blend spaces (PCR0Common.metal `pcr_sp`).
     static let flagNativeLab: UInt32 = 1 << 25, flagKPlane: UInt32 = 1 << 26, flagPS8: UInt32 = 1 << 27
+    /// Adjust mix: the result's coverage mixes too (`AdjustMix.coverage`).
+    static let flagCoverage: UInt32 = 1 << 29
 }
 
 /// Bindings of the accumulator kernels.
@@ -164,7 +166,7 @@ public enum AccumulatorPrecision: Sendable, Hashable {
             switch op {
             case .composite(let b), .clipped(let b): if amplifies(b.mode) { return true }
             case .adjustMix(let a): if amplifies(a.mode) { return true }
-            case .adjust, .quantize: return true
+            case .adjust, .filter, .backdropFilter, .quantize: return true
             case .effect(let spec, _):
                 if amplifies(spec.blend) { return true }
                 for e in spec.effects.items where e.isEnabled {

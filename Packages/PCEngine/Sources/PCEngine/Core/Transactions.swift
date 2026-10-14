@@ -236,7 +236,9 @@ public enum TransactionBuilder {
                 break
             }
         }
-        return out
+        // Blur adjustment layers spread a change beneath them by their reach (AB-T-0258).
+        let reach = max(LayerGeometry.filterReach(before.layers, nested: true), LayerGeometry.filterReach(after.layers, nested: true))
+        return reach > 0 && !out.isEmpty ? out.outset(by: reach) : out
     }
 
     /// The pixels adding or removing layer `id` of `d` can change (photocraft `inert_at` +

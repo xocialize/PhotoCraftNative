@@ -2,8 +2,10 @@
 // opens, and PCRender's composite of the imported document matches the oracle PNG Compositor
 // exported for it. Levels are compared premultiplied at 8 bits, with PCRender's composite rounded
 // to the 8-bit straight RGBA a PNG export would hold. The blend, opacity, mask and clip sets are
-// held to 2 levels; the folder, effects, adjust and motion sets are measured and reported (their
-// semantics differ by design: Pass Through folders, Photoshop's layer styles and adjustments).
+// held to 2 levels; the filter adjustment layers (Grain, Add Noise, the blurs: AB-T-0258) to the
+// bounds measured for them (`filterBounds`); the folder, effects and other adjust fixtures are
+// measured and reported (their semantics differ by design: Pass Through folders, Photoshop's layer
+// styles and adjustments).
 // New; MIT OR Apache-2.0, © ArtCraft Team and the PhotoCraft contributors.
 
 import CoreGraphics
@@ -99,6 +101,39 @@ struct CompParity {
         "blend/vividLight": (255, 2, "the two 0/0 ends (base 0 under blend 255, base 255 under blend 0): Core Image gives 0 and 255, PCRender 255 and 0 (photocraft's psblend expectations; no Photoshop sample of them in the corpus). Core Image's Vivid Light is up to 25 levels off Photoshop on blend-vividLight.psd"),
     ]
 
+    /// Filter adjustment layers against Compositor's renders (AB-T-0258), as measured: the largest
+    /// difference in levels and the pixels more than 2 levels off (of 4,096; mean ≤ 1.1 levels in
+    /// each). Grain and Add Noise are Compositor's own patterns; the blurs are Core Image's as
+    /// Compositor draws them, which PCRender's exact kernels follow but for Core Image's own
+    /// approximations: `CIGaussianBlur`'s at radius 10, and `CIMotionBlur` off the axes, which isn't
+    /// the Gaussian streak it is along them (an impulse sums to 0.91–1.13 instead of 1, and spreads
+    /// across the line: at 60°, 4 px its covariance is (0.59, 1.39, −0.65) against the streak's
+    /// (0.33, 1.00, −0.58)), so short diagonal streaks differ most at sharp edges.
+    static let filterBounds: [String: (levels: Float, pixels: Int)] = [
+        "adjust/grain": (1, 0),
+        "adjust/addNoise": (0, 0),
+        "adjust/gaussianBlur": (3, 30),
+        "adjust/motionBlur": (2, 0),
+        "motion/angle0-d30": (2, 0),
+        "motion/angle90-d15": (2, 0),
+        "motion/angle45-d20": (13, 115),
+        "motion/angle-30-d25": (7, 76),
+        "motion/angle60-d4": (34, 806),
+    ]
+
+    /// Every fixture of `filterBounds` among `rows` within its bound, on both backends.
+    static func checkFilterBounds(_ rows: [Row]) {
+        for r in rows {
+            let key = "\(r.group)/\(r.name)"
+            guard let bound = filterBounds[key] else { continue }
+            for (backend, p) in [("CPU", Optional(r.cpu)), ("Metal", r.metal)] {
+                guard let p else { continue }
+                #expect(p.maxLevels <= bound.levels && p.pixelsOver2 <= bound.pixels, "\(key): \(backend) \(p.maxLevels) levels, \(p.pixelsOver2) px over 2")
+            }
+            #expect(!r.warnings.contains { $0.contains("left out") }, "\(key): \(r.warnings)")
+        }
+    }
+
     /// Imports and composites every fixture of `index`, printing one `COMP` line each.
     static func run(_ index: String) throws -> (rows: [Row], failed: [String]) {
         guard let dir = CompFixtures.directory else { return ([], []) }
@@ -176,6 +211,8 @@ struct CompParity {
             }
         }
         for (k, v) in Self.engineDeviations.sorted(by: { $0.key < $1.key }) { print("COMP-ENGINE \(k): \(v.why)") }
+        Self.checkFilterBounds(rows)
+        #expect(rows.filter { Self.filterBounds["\($0.group)/\($0.name)"] != nil }.count == 4)
     }
 
     /// The folder fixture differs from its oracle by design (a Pass Through folder's opacity and mask
@@ -274,13 +311,14 @@ struct CompParity {
     }
 
     @Test(.enabled(if: CompFixtures.available, "Compositor fixtures not present (set PHOTOCRAFT_FIXTURES or PCIO_COMP_FIXTURES)"))
-    func motionFixturesImport() throws {
+    func motionFixturesMatchTheirOracles() throws {
         let entries = try CompFixtures.entries("index-motion.json")
         let (rows, failed) = try Self.run("index-motion.json")
         Self.table(rows)
         #expect(failed.isEmpty)
         #expect(rows.count == entries.count)
-        // Motion Blur has no adjustment layer here: every one of them says so.
-        for r in rows { #expect(r.warnings.contains { $0.contains("Motion Blur") }) }
+        // Motion Blur adjustment layers (AB-T-0258), within their measured bounds.
+        Self.checkFilterBounds(rows)
+        #expect(rows.allSatisfy { Self.filterBounds["\($0.group)/\($0.name)"] != nil })
     }
 }

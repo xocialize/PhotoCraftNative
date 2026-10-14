@@ -225,6 +225,9 @@ public enum Adjustment: Hashable, Sendable, Codable {
     /// Per range (reds, yellows, greens, cyans, blues, magentas, whites, neutrals, blacks) the
     /// cyan, magenta, yellow and black change in percent (-100...100), as in Photoshop.
     case selectiveColor(SelectiveColor)
+    /// A filter over the composite beneath (Grain, Add Noise, Gaussian Blur, Motion Blur): no
+    /// Photoshop adjustment layer, see `FilterAdjustment`.
+    case filter(FilterAdjustment)
     /// A PSD adjustment we can't evaluate yet; preserved raw for round-trip.
     case unsupported(psdKey: String, raw: [UInt8])
 
@@ -553,6 +556,7 @@ public enum Adjustment: Hashable, Sendable, Codable {
         case .threshold: "Threshold"
         case .gradientMap: "Gradient Map"
         case .selectiveColor: "Selective Color"
+        case .filter(let f): f.label
         case .unsupported: "Adjustment"
         }
     }
@@ -595,6 +599,7 @@ public enum Adjustment: Hashable, Sendable, Codable {
         case "Threshold": self = .threshold(level: try v.payload(ThresholdPayload.self).level)
         case "GradientMap": self = .gradientMap(try v.payload())
         case "SelectiveColor": self = .selectiveColor(try v.payload())
+        case "Filter": self = .filter(try v.payload())
         case "Unsupported":
             let p = try v.payload(UnsupportedPayload.self)
             self = .unsupported(psdKey: p.psdKey, raw: p.raw)
@@ -620,6 +625,7 @@ public enum Adjustment: Hashable, Sendable, Codable {
         case .threshold(let level): try Tagged.variant("Threshold", ThresholdPayload(level: level), to: encoder)
         case .gradientMap(let p): try Tagged.variant("GradientMap", p, to: encoder)
         case .selectiveColor(let p): try Tagged.variant("SelectiveColor", p, to: encoder)
+        case .filter(let p): try Tagged.variant("Filter", p, to: encoder)
         case .unsupported(let key, let raw): try Tagged.variant("Unsupported", UnsupportedPayload(psdKey: key, raw: raw), to: encoder)
         }
     }

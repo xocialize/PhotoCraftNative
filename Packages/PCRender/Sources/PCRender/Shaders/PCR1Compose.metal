@@ -92,6 +92,15 @@ kernel void pcr_adjust_mix(PCR_ARGS, PCR_IN a [[texture(0)]], PCR_IN b [[texture
     float4 bd = a.read(t);
     float k = op.opacity * pcr_mask(op, mtex, vtex, d);
     if (k <= 0.0f) { out.write(bd, t); return; }
+    if ((op.flags & PCR_F_COVERAGE) != 0u && op.mode == PC_NORMAL) {
+        // Colour and coverage mixed premultiplied (a blur spreads into clear pixels).
+        float4 ad = b.read(t);
+        float alpha = bd.a + (ad.a - bd.a) * k;
+        float3 pb = bd.rgb * bd.a, pa = ad.rgb * ad.a;
+        float3 c = pb + (pa - pb) * k;
+        out.write(alpha > 0.0f ? float4(precise::divide(c.x, alpha), precise::divide(c.y, alpha), precise::divide(c.z, alpha), alpha) : float4(0.0f), t);
+        return;
+    }
     float3 bl = pcr_blend_rgb(op.mode, bd.rgb, b.read(t).rgb, pcr_sp(op));
     out.write(float4(bd.rgb + (bl - bd.rgb) * k, bd.a), t);
 }

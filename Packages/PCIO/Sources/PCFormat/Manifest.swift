@@ -23,10 +23,21 @@ import PCFoundation
 ///   entries; AB-T-0240). Written only then: a reader without ZIP64 can't open the archive, and the
 ///   version tells one that gets past it (an unzipped copy) what it holds. Version 1 manifests
 ///   migrate to 2 unchanged.
-public let pcraftFormatVersion: UInt32 = 2
+/// - 3: a document holding a filter adjustment layer (`Adjustment.filter`: Grain, Add Noise,
+///   Gaussian Blur, Motion Blur; AB-T-0258), in either container. Written only then: a reader
+///   without the kind can't decode the layer, and the version has it refuse the file as too new
+///   (photocraft and PhotoCraftNative 0.3 do) instead of failing on an unknown adjustment. Version
+///   2 manifests migrate to 3 unchanged.
+public let pcraftFormatVersion: UInt32 = 3
 
 /// The manifest version photocraft reads and writes, written whenever a bundle doesn't need more.
 public let pcraftPhotocraftFormatVersion: UInt32 = 1
+
+/// The manifest version of a single file that needs ZIP64 (and nothing newer).
+public let pcraftZip64FormatVersion: UInt32 = 2
+
+/// The manifest version of a document holding a filter adjustment layer.
+public let pcraftFilterFormatVersion: UInt32 = 3
 
 /// Hex-encoded BLAKE3 hash (64 chars).
 public typealias Hash = String

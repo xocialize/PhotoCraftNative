@@ -147,7 +147,8 @@ struct GPUAdjustment {
                     p[0] = SIMD4(Float(size), tetrahedral ? 1 : 0, dither ? 1 : 0, 0)
                     data = Array(table.prefix(len))
                 }
-            case .colorLookup, .unsupported: kind = 0
+            // Filter adjustments are planned as `.filter` / `.backdropFilter` ops, never `.adjust`.
+            case .colorLookup, .unsupported, .filter: kind = 0
             }
         }
         self.kind = kind

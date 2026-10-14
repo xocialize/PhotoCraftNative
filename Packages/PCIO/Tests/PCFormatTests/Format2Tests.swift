@@ -34,16 +34,17 @@ import Testing
         #expect(try Self.manifestText(bytes).contains("\"format_version\": 2,"))
         #expect(PcraftFormat.isPcraft(bytes))
         #expect(try load(bytes) == doc)
-        #expect(try PcraftFormat.readManifest(bytes).formatVersion == 2)
+        // Read back migrated to the newest format.
+        #expect(try PcraftFormat.readManifest(bytes).formatVersion == PcraftFormat.formatVersion)
         // An incremental resave reuses every object (and its CRC) and stays format 2.
         let (again, s2) = try w.saveZip(doc)
         #expect(s2.tilesWritten == 0 && s2.tilesReused == s2.tilesTotal)
         #expect(again == bytes)
     }
 
-    /// Format 1 bundles (photocraft's, and every earlier save) open, migrated to 2 without a change
-    /// to the document; a format newer than 2 is refused.
-    @Test func format1OpensAndFormat3IsRefused() throws {
+    /// Format 1 bundles (photocraft's, and every earlier save) open, migrated to the newest
+    /// format (3) without a change to the document; a format newer than 3 is refused.
+    @Test func format1OpensAndFormat4IsRefused() throws {
         let doc = richDoc(.rgb, .f32)
         let v1 = try save(doc)
         #expect(try Self.manifestText(v1).contains("\"format_version\": 1,"))
@@ -56,18 +57,21 @@ import Testing
         #expect(try load(v2) == doc)
         #expect(try PcraftFormat.readManifest(v2).document == m.document)
         let v3 = try withManifest(v1) { $0["format_version"] = 3 }
-        #expect { try load(v3) } throws: { e in
-            if case FormatError.tooNew(found: 3, supported: 2) = e { return true }
+        #expect(try load(v3) == doc)
+        let v4 = try withManifest(v1) { $0["format_version"] = 4 }
+        #expect { try load(v4) } throws: { e in
+            if case FormatError.tooNew(found: 4, supported: 3) = e { return true }
             return false
         }
     }
 
+    /// 1 → 2 → 3 (the newest) change nothing but the version.
     @Test func v1ToV2MigrationChangesOnlyTheVersion() throws {
         let text = #"{"format_version":1,"generator":"photocraft-format 0.1.0","document":{"id":18446744073709551615,"x":0.30000001192092896}}"#
         var v = try JSONTree.parse(Array(text.utf8))
         let before = v
         #expect(try Migrate.migrate(&v) == 1)
-        #expect(v["format_version"] == .number("2"))
+        #expect(v["format_version"] == .number("3"))
         v["format_version"] = .number("1")
         #expect(v == before)
     }

@@ -155,7 +155,9 @@ final class PlanEmitter {
         self.doc = doc; self.region = region; canvas = doc.bounds; mode = doc.mode; depth = doc.depth
         self.source = source; self.cache = cache; self.rasterizer = rasterizer; self.options = options
         native = source.context.native
-        rect = region
+        // Blurs read their backdrop past the region (their programs run over it plus their reach,
+        // nested blurs adding up): layers there must stay in the plan.
+        rect = FilterMath.backdropArea(region, reach: LayerGeometry.filterReach(doc.layers, nested: true), canvas: doc.bounds)
     }
 
     // MARK: Pixels and leaves
@@ -198,6 +200,32 @@ final class PlanEmitter {
     /// Text blending gamma: Photoshop's "Blend Text Colors Using Gamma" applies to RGB documents
     /// (ps-corpus text-cmyk: type coverage mixes ink values linearly, 14 levels off with 1.45).
     var textGamma: Float { native == .none ? options.textGamma : 1 }
+
+    /// [B] → [B, B adjusted]: an adjustment layer's result over its backdrop (the top). A filter
+    /// that reads around each pixel (a blur) gets its backdrop from a program of its own
+    /// (`BackdropFilter`): the ops so far, left with the backdrop alone. When the backdrop is the
+    /// only buffer (an adjustment layer on the root stack), those ops are replaced by the program
+    /// itself, rendered once over the backdrop area and read for both.
+    func adjusted(_ adj: Adjustment) {
+        guard let f = adj.asFilter else {
+            ops.append(.pick(0))
+            ops.append(.adjust(planAdjustment(adj)))
+            return
+        }
+        let spec = FilterSpec(f)
+        guard f.samplesNeighbours else {
+            ops.append(.pick(0))
+            ops.append(.filter(spec))
+            return
+        }
+        let (depth, floors) = RenderPlan.stackState(ops)
+        let program = ops + Array(repeating: DrawOp.remove(1), count: max(depth - 1, 0)) + Array(repeating: DrawOp.dropFloor, count: floors)
+        if depth == 1 && floors == 0 {
+            ops = [.backdropFilter(BackdropFilter(spec: spec, program: program, pushesBackdrop: true))]
+        } else {
+            ops.append(.backdropFilter(BackdropFilter(spec: spec, program: program, pushesBackdrop: false)))
+        }
+    }
 
     /// An adjustment as this plan applies it (CMYK planes: per channel, see `NativeConvert`).
     func planAdjustment(_ a: Adjustment) -> Adjustment {
@@ -458,10 +486,9 @@ final class PlanEmitter {
             return
         }
         if case .adjustment(let adj) = l.content {
-            ops.append(.pick(0))
-            ops.append(.adjust(planAdjustment(adj)))
+            adjusted(adj)
             compositeClipped(clipped)
-            ops.append(.adjustMix(AdjustMix(mode: blendMode(l), opacity: opacity, mask: maskSpec(l))))
+            ops.append(.adjustMix(AdjustMix(mode: blendMode(l), opacity: opacity, mask: maskSpec(l), coverage: adj.asFilter?.samplesNeighbours == true)))
             return
         }
         if hasFx {
@@ -656,8 +683,9 @@ final class PlanEmitter {
     /// `composite_atop_any`.
     func atopAny(_ l: Layer) {
         if case .adjustment(let adj) = l.content {
-            ops.append(.pick(0))
-            ops.append(.adjust(planAdjustment(adj)))
+            // Clipped, a blur keeps its base's coverage (atop): it never spreads past the base's
+            // outline, and its colours come from the base's own pixels.
+            adjusted(adj)
             ops.append(.adjustMix(AdjustMix(mode: blendMode(l), opacity: l.opacity * l.fillOpacity, mask: maskSpec(l))))
             return
         }

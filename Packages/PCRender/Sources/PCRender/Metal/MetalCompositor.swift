@@ -130,8 +130,15 @@ public final class MetalCompositor: @unchecked Sendable {
     /// Why `plan` can't run on the GPU, or nil when it can.
     public func unsupportedReason(_ plan: RenderPlan) -> String? {
         for op in plan.ops {
-            if case .adjust(let a) = op, GPUAdjustment.needsCPU(a, plan.context) {
+            switch op {
+            case .adjust(let a) where GPUAdjustment.needsCPU(a, plan.context):
                 return "\(a.label) in a CMYK tone space with a managed CMYK converter"
+            case .filter(let f) where f.filter.samplesNeighbours:
+                return "\(f.filter.label) of a buffer on its own"
+            case .backdropFilter(let b):
+                if !b.spec.filter.samplesNeighbours { return "\(b.spec.filter.label) of a backdrop" }
+                if let why = unsupportedReason(RenderPlan(context: plan.context, ops: b.program)) { return why }
+            default: break
             }
         }
         return nil
@@ -193,14 +200,17 @@ public final class MetalCompositor: @unchecked Sendable {
         return result
     }
 
-    private func renderLocked(_ plan: RenderPlan, region: PixelRect, source: any RenderSource, out: any MTLTexture,
-                              lap: (WritableKeyPath<MetalRenderStats, Double>) -> Void) throws -> MetalRenderResult {
-        let accFormat = precision.format(for: plan)
+    /// `format`: the accumulators' (default: `precision`'s for the plan; a backdrop filter's
+    /// program takes its plan's).
+    func renderLocked(_ plan: RenderPlan, region: PixelRect, source: any RenderSource, out: any MTLTexture, format: MTLPixelFormat? = nil,
+                      lap: (WritableKeyPath<MetalRenderStats, Double>) -> Void) throws -> MetalRenderResult {
+        let accFormat = format ?? precision.format(for: plan)
         var gpuTime = 0.0
         // Effect maps and feathered masks first (their own command buffer; the cells read them).
         // Command buffers are committed back to back and waited for once: the queue runs them in
-        // order, and textures recycled between cells are hazard-tracked.
-        let prepared = try prepare(plan, source: source)
+        // order, and textures recycled between cells are hazard-tracked. Backdrop filters' programs
+        // render (and wait) before that, so what they build is complete when the cells read it.
+        let prepared = try prepare(plan, region: region, source: source, format: accFormat)
         lap(\.prepare)
         var committed: [any MTLCommandBuffer] = []
         if let cb = prepared.commandBuffer {
@@ -274,12 +284,16 @@ public final class MetalCompositor: @unchecked Sendable {
         var maps: [Int: GPUFxMaps] = [:]
         var masks: [MaskSpec: GPUMask] = [:]
         var adjustments: [Int: GPUAdjustment] = [:]
+        var backdrops: [Int: GPUBackdrop] = [:]
         var commandBuffer: (any MTLCommandBuffer)?
     }
 
-    private func prepare(_ plan: RenderPlan, source: any RenderSource) throws -> Prepared {
+    private func prepare(_ plan: RenderPlan, region: PixelRect, source: any RenderSource, format: MTLPixelFormat) throws -> Prepared {
         var p = Prepared()
         let ctx = plan.context
+        for (i, op) in plan.ops.enumerated() {
+            if case .backdropFilter(let b) = op { p.backdrops[i] = try gpuBackdrop(b, ctx: ctx, region: region, source: source, format: format) }
+        }
         var enc: (any MTLComputeCommandEncoder)?
         func encoder() throws -> any MTLComputeCommandEncoder {
             if let enc { return enc }
@@ -576,9 +590,20 @@ struct CellRun {
                                         buffers: [1: adj.buffer])
             push(out)
             release(a)
+        case .filter(let f):
+            let a = pop()
+            var o = baseOp()
+            let name = FilterGPU.encode(f, plan.context, &o)
+            push(try run(name, o, [Slot.a: a.texture]))
+            release(a)
+        case .backdropFilter:
+            guard let g = prepared.backdrops[index] else { throw MetalCompositorError.gpu("backdrop filter \(index) not prepared") }
+            if let back = g.backdrop { push(try drawTexture(back, at: g.area)) }
+            push(try drawTexture(g.filtered, at: g.region))
         case .adjustMix(let a):
             let adjusted = pop(), b = pop()
             var o = baseOp(); o.mode = a.mode.rawValue; o.opacity = a.opacity
+            if a.coverage { o.flags |= PCROp.flagCoverage }
             var tex: [Int: any MTLTexture] = [Slot.a: b.texture, Slot.b: adjusted.texture]
             try bindMask(a.mask, &o, &tex)
             push(try run("pcr_adjust_mix", o, tex))
@@ -655,6 +680,17 @@ struct CellRun {
             push(try run("pcr_restrict", o, [Slot.a: before.texture, Slot.b: after.texture]))
             release(before, after)
         }
+    }
+
+    /// A fresh accumulator holding `texture`'s straight RGBA (texel (0, 0) at document pixel
+    /// `rect`'s corner; clear outside it).
+    mutating func drawTexture(_ texture: any MTLTexture, at rect: PixelRect) throws -> any MTLTexture {
+        var o = baseOp()
+        o.flags |= PCROp.flagLeaf
+        o.leafOrigin = SIMD2(rect.x0, rect.y0)
+        o.leafSize = SIMD2(Int32(rect.width), Int32(rect.height))
+        o.leafOutside = .zero
+        return try run("pcr_draw_leaf", o, [Slot.leaf: texture])
     }
 
     /// Fill-layer content (`compose::render_fill`).

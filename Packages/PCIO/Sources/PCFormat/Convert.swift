@@ -37,6 +37,15 @@ enum Convert {
         if tooDeepAt(layers, 0) { throw tooDeep() }
     }
 
+    /// Whether any layer of `layers` (groups included, hidden or not) is a filter adjustment layer:
+    /// a manifest holding one is format 3 (`pcraftFilterFormatVersion`).
+    static func holdsFilterAdjustment(_ layers: [Layer]) -> Bool {
+        layers.contains { l in
+            if case .adjustment(.filter) = l.content { return true }
+            return l.children.map(holdsFilterAdjustment) ?? false
+        }
+    }
+
     static func hex(_ bytes: [UInt8]) -> String {
         let h = Array("0123456789abcdef".utf8)
         var out = [UInt8]()

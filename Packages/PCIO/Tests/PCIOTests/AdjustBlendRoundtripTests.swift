@@ -102,6 +102,9 @@ import Testing
             case .brightnessContrast, .levels, .curves, .exposure, .vibrance, .hueSaturation, .colorBalance, .blackWhite, .photoFilter, .channelMixer,
                  .colorLookup, .invert, .posterize, .threshold, .gradientMap, .selectiveColor, .unsupported:
                 break
+            case .filter:
+                // No PSD form: written as an empty pixel layer with a warning (FilterAdjustmentTests).
+                break
             }
         }
         return all

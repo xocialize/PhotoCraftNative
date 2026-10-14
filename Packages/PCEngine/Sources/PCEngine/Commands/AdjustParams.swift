@@ -101,8 +101,21 @@ public enum AdjustParams {
         case .gradientMap: "gradientMap"
         case .selectiveColor: "selectiveColor"
         case .colorLookup: "colorLookup"
+        case .filter(let f): f.kind.rawValue
         default: "invert"
         }
+    }
+
+    /// The filter adjustment kinds (`FilterAdjustment.Kind` raw values): adjustment layers only, no
+    /// Image › Adjustments twin.
+    public static let filterKinds = FilterAdjustment.Kind.allCases.map(\.rawValue)
+
+    /// A Grain or Add Noise pattern of the layer's own when the params name none: derived from its
+    /// id, so each new layer's pattern differs and a layer keeps its own.
+    public static func seed(for id: LayerId) -> UInt32 {
+        var x = id.rawValue &* 0x9e37_79b9_7f4a_7c15
+        x ^= x >> 32
+        return UInt32(truncatingIfNeeded: x)
     }
 
     /// The neutral adjustment of `kind` (what "Reset to defaults" restores).
@@ -259,6 +272,38 @@ public enum AdjustParams {
             var b: Adjustment?
             if case .colorLookup? = base { b = base }
             return try AdjustCommands.lookupFromParams(p, base: b)
+        case "grain":
+            var g = FilterAdjustment.Grain()
+            if case .filter(.grain(let b))? = base { g = b }
+            g.amount = try r.num("amount", g.amount, 0, 100)
+            g.size = try r.num("size", g.size, 0.5, 20)
+            g.roughness = try r.num("roughness", g.roughness, 0, 100)
+            g.seed = try r.seed(g.seed)
+            return .filter(.grain(g))
+        case "addNoise":
+            var n = FilterAdjustment.AddNoise()
+            if case .filter(.addNoise(let b))? = base { n = b }
+            n.amount = try r.num("amount", n.amount, 0.1, 400)
+            switch r.get("distribution") {
+            case nil: break
+            case .string("uniform")?: n.gaussian = false
+            case .string("gaussian")?: n.gaussian = true
+            case _?: throw EngineError.bad(cmd, "`distribution` must be \"uniform\" or \"gaussian\"")
+            }
+            n.monochromatic = try r.boolean("monochromatic", n.monochromatic)
+            n.seed = try r.seed(n.seed)
+            return .filter(.addNoise(n))
+        case "gaussianBlur":
+            var b = FilterAdjustment.GaussianBlur()
+            if case .filter(.gaussianBlur(let x))? = base { b = x }
+            b.radius = try r.num("radius", b.radius, 0.1, 250)
+            return .filter(.gaussianBlur(b))
+        case "motionBlur":
+            var m = FilterAdjustment.MotionBlur()
+            if case .filter(.motionBlur(let x))? = base { m = x }
+            m.angle = try r.num("angle", m.angle, -90, 90)
+            m.distance = try r.num("distance", m.distance, 1, 2000)
+            return .filter(.motionBlur(m))
         default:
             throw EngineError.bad("adjustment", "unknown adjustment kind `\(kind)`")
         }
@@ -343,6 +388,15 @@ public enum AdjustParams {
             return .object(v)
         case .colorLookup(let cl):
             return ["interpolation": .string(cl.tetrahedral ? "tetrahedral" : "trilinear"), "dither": .bool(cl.dither)]
+        case .filter(.grain(let g)):
+            return ["amount": num(g.amount), "size": num(g.size), "roughness": num(g.roughness), "seed": .int(Int(g.seed))]
+        case .filter(.addNoise(let n)):
+            return ["amount": num(n.amount), "distribution": .string(n.gaussian ? "gaussian" : "uniform"), "monochromatic": .bool(n.monochromatic),
+                    "seed": .int(Int(n.seed))]
+        case .filter(.gaussianBlur(let b)):
+            return ["radius": num(b.radius)]
+        case .filter(.motionBlur(let m)):
+            return ["angle": num(m.angle), "distance": num(m.distance)]
         }
     }
 
@@ -379,6 +433,15 @@ public enum AdjustParams {
             guard let v = get(key) else { return def }
             guard case .bool(let b) = v else { throw EngineError.bad(cmd, "`\(key)` must be true or false") }
             return b
+        }
+
+        /// `seed`: a whole number 0…4294967295 (a JSON number holds it exactly).
+        func seed(_ def: UInt32) throws -> UInt32 {
+            guard let v = get("seed") else { return def }
+            guard let x = v.doubleValue, x.isFinite, x == x.rounded(), x >= 0, x <= Double(UInt32.max) else {
+                throw EngineError.bad(cmd, "`seed` must be a whole number from 0 to 4294967295")
+            }
+            return UInt32(x)
         }
 
         /// An array of exactly `n` numbers.

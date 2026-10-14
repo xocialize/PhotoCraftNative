@@ -514,8 +514,10 @@ public final class PcraftWriter {
         var previews: [(String, [UInt8])] = []
         if let t = opts.thumbnail { previews.append((Store.thumb, try Store.png(t))) }
         if let t = opts.composite { previews.append((Store.composite, try Store.png(t))) }
-        // photocraft's version unless the container needs more (`saveZip` decides that).
-        let manifest = Manifest(formatVersion: pcraftPhotocraftFormatVersion, generator: PcraftWriter.generator, document: document,
+        // photocraft's version unless the document (a filter adjustment layer) or the container
+        // (`saveZip` decides that) needs more.
+        let version = Convert.holdsFilterAdjustment(doc.layers) ? pcraftFilterFormatVersion : pcraftPhotocraftFormatVersion
+        let manifest = Manifest(formatVersion: version, generator: PcraftWriter.generator, document: document,
                                 thumbnail: opts.thumbnail == nil ? nil : Store.thumb, composite: opts.composite == nil ? nil : Store.composite)
         // JSON can't hold NaN or the infinities (they would load as errors): refuse the save
         // instead, naming the value (photocraft #1101).
@@ -559,15 +561,16 @@ public final class PcraftWriter {
     static let zipBatchBytes = 32 << 20
 
     /// Writes prepared bundle `p` as a ZIP archive into `sink`, entry by entry: manifest, previews,
-    /// then the objects in path order, compressed a batch at a time. The manifest is written as
-    /// format 1 and rewritten in place as format 2 (the same length) if the archive turns out to
-    /// need ZIP64. Holds the central directory and at most two batches beyond the document.
+    /// then the objects in path order, compressed a batch at a time. A format 1 manifest is
+    /// rewritten in place as format 2 (the same length) if the archive turns out to need ZIP64; a
+    /// format 3 one (a filter adjustment layer) already allows it. Holds the central directory and
+    /// at most two batches beyond the document.
     func writeZip<Sink: ZipSink>(_ p: Prepared, into sink: Sink) throws(FormatError) -> (Sink, SaveStats) {
         var model = p.model
         var manifest = p.manifest
         var stats = p.stats
-        if forceZip64 {
-            model.formatVersion = pcraftFormatVersion
+        if forceZip64 && model.formatVersion < pcraftZip64FormatVersion {
+            model.formatVersion = pcraftZip64FormatVersion
             manifest = try ManifestJSON.encode(model)
         }
         var z = ZipStreamWriter(sink, forceZip64: forceZip64)
@@ -632,8 +635,8 @@ public final class PcraftWriter {
             batch.objects = []
         }
         do {
-            if z.usesZip64 && model.formatVersion != pcraftFormatVersion {
-                model.formatVersion = pcraftFormatVersion
+            if z.usesZip64 && model.formatVersion < pcraftZip64FormatVersion {
+                model.formatVersion = pcraftZip64FormatVersion
                 let v2 = try ManifestJSON.encode(model)
                 guard v2.count == manifest.count else { throw FormatError.unsupported("manifest: format 2 changes its length") }
                 try z.replaceStored(0, v2, crc: CRC32.checksum(v2))

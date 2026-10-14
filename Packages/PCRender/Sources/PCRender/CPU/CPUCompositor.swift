@@ -71,7 +71,7 @@ public final class CPUCompositor: @unchecked Sendable {
     public func render(_ plan: RenderPlan, region: PixelRect, source: any RenderSource) throws -> RGBABuffer {
         try plan.validate()
         if region.isEmpty { return RGBABuffer(transparent: region) }
-        let prepared = try prepare(plan, source: source)
+        let prepared = try prepare(plan, region: region, source: source)
         var out = RGBABuffer(transparent: region)
         var tiles: [PixelRect] = []
         let ts = Int32(tileSize)
@@ -111,14 +111,17 @@ public final class CPUCompositor: @unchecked Sendable {
 
     // MARK: Preparation
 
-    /// What the tiles share: effect maps, combined masks and adjustment tables per op index.
+    /// What the tiles share: effect maps, combined masks, adjustment tables and filtered backdrops
+    /// per op index.
     struct Prepared: @unchecked Sendable {
         var maps: [Int: FxMaps] = [:]
         var masks: [MaskSpec: CombinedMask] = [:]
         var adjustments: [Int: PreparedAdjustment] = [:]
+        /// A backdrop filter's backdrop (when the op pushes it) and result, over the render region.
+        var backdrops: [Int: (backdrop: RGBABuffer?, filtered: RGBABuffer)] = [:]
     }
 
-    private func prepare(_ plan: RenderPlan, source: any RenderSource) throws -> Prepared {
+    private func prepare(_ plan: RenderPlan, region: PixelRect, source: any RenderSource) throws -> Prepared {
         var p = Prepared()
         let ctx = plan.context
         func needMask(_ m: MaskSpec?) throws {
@@ -129,6 +132,8 @@ public final class CPUCompositor: @unchecked Sendable {
             switch op {
             case .adjust(let a):
                 p.adjustments[i] = PreparedAdjustment(a, transfer: ctx.transfer, depth: ctx.depth, mode: ctx.mode, native: ctx.native)
+            case .backdropFilter(let b):
+                p.backdrops[i] = try backdrop(b, ctx: ctx, region: region, source: source)
             case .effect(let spec, _):
                 p.maps[i] = try effectMaps(spec, ctx: ctx, source: source)
                 try needMask(spec.vectorStrokeMask)
@@ -146,6 +151,21 @@ public final class CPUCompositor: @unchecked Sendable {
     }
 
     private func touch() -> UInt64 { tick += 1; return tick }
+
+    /// `b`'s program composited over the backdrop area of `region` (the region and the filter's
+    /// reach within the canvas), and the filter of it over `region`.
+    func backdrop(_ b: BackdropFilter, ctx: RenderContext, region: PixelRect, source: any RenderSource) throws -> (backdrop: RGBABuffer?, filtered: RGBABuffer) {
+        let area = FilterMath.backdropArea(region, reach: FilterMath.reach(b.spec), canvas: ctx.canvas)
+        let back = try render(RenderPlan(context: ctx, ops: b.program), region: area, source: source)
+        var filtered: RGBABuffer
+        if b.spec.filter.samplesNeighbours {
+            filtered = FilterCPU.blur(b.spec, backdrop: back, canvas: ctx.canvas, over: region)
+        } else {
+            filtered = back.cropped(to: region)
+            FilterCPU.apply(b.spec, to: &filtered, canvas: ctx.canvas, hdr: ctx.depth == .f32, native: ctx.native)
+        }
+        return (b.pushesBackdrop ? back : nil, filtered)
+    }
 
     func combinedMask(_ spec: MaskSpec, ctx: RenderContext, source: any RenderSource) throws -> CombinedMask {
         func version(_ id: LeafID?) throws -> UInt64 {
@@ -311,6 +331,13 @@ public final class CPUCompositor: @unchecked Sendable {
                 Compose.atop(&stack[stack.count - 1], src, lb, space)
             case .adjust:
                 prepared.adjustments[index]?.apply(to: &stack[stack.count - 1])
+            case .filter(let spec):
+                let ctx = plan.context
+                FilterCPU.apply(spec, to: &stack[stack.count - 1], canvas: ctx.canvas, hdr: ctx.depth == .f32, native: ctx.native)
+            case .backdropFilter:
+                guard let b = prepared.backdrops[index] else { throw PlanError.stackUnderflow(op: index) }
+                if let back = b.backdrop { stack.append(back.cropped(to: rect)) }
+                stack.append(b.filtered.cropped(to: rect))
             case .adjustMix(let a):
                 let adjusted = pop()
                 let mv = try maskValues(a.mask)
@@ -453,10 +480,19 @@ enum Compose {
 
     /// An adjustment layer's result mixed back in with its blend mode, opacity and mask.
     static func adjustMix(_ backdrop: inout RGBABuffer, _ adjusted: RGBABuffer, _ a: AdjustMix, _ mask: [Float]?, _ space: BlendSpace) {
+        let premultiplied = a.coverage && a.mode == .normal
         for i in backdrop.px.indices {
             let k = a.opacity * (mask?[i] ?? 1)
             if k <= 0 { continue }
             let b = backdrop.px[i], ad = adjusted.px[i]
+            if premultiplied {
+                // Colour and coverage mixed premultiplied (a blur spreads into clear pixels).
+                let alpha = b.w + (ad.w - b.w) * k
+                let pb = SIMD3(b.x, b.y, b.z) * b.w, pa = SIMD3(ad.x, ad.y, ad.z) * ad.w
+                let c = pb + (pa - pb) * k
+                backdrop.px[i] = alpha > 0 ? SIMD4(c / alpha, alpha) : .zero
+                continue
+            }
             let cb = SIMD3(b.x, b.y, b.z)
             let bl = PSBlend.blend(a.mode, cb, SIMD3(ad.x, ad.y, ad.z), space)
             backdrop.px[i] = SIMD4(cb + (bl - cb) * k, b.w)

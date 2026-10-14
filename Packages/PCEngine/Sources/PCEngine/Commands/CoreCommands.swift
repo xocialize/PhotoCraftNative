@@ -644,11 +644,14 @@ enum CoreCommands: CommandModule {
             guard case .adjustment(let adj) = l.content else { throw EngineError.other("not an adjustment layer") }
             if case .unsupported = adj { throw EngineError.other("this adjustment can't be edited (kept as imported)") }
             let kind = AdjustParams.kind(of: adj)
-            let new: Adjustment
+            var new: Adjustment
             if let eyedropped {
                 new = eyedropped
             } else if AdjustParams.userKeys(p).isEmpty {
                 new = try AdjustParams.defaultFor(kind, mode: mode)
+                // Resetting Grain or Add Noise keeps the layer's pattern.
+                if case .filter(.grain(let old)) = adj, case .filter(.grain(var g)) = new { g.seed = old.seed; new = .filter(.grain(g)) }
+                if case .filter(.addNoise(let old)) = adj, case .filter(.addNoise(var n)) = new { n.seed = old.seed; new = .filter(.addNoise(n)) }
             } else {
                 new = try AdjustParams.fromParams(kind, p, base: adj, mode: mode)
             }
@@ -769,6 +772,16 @@ enum CoreCommands: CommandModule {
 
     static let newLayerPath = #""path":"work"|saved path name|{…path}? (the active path: becomes the vector mask; else the selection is the layer mask, or white with no selection)"#
 
+    /// Filter adjustment layers (AB-T-0258: Compositor's Grain, Add Noise, Gaussian Blur and Motion
+    /// Blur over everything beneath, live). No Photoshop counterpart and no Image › Adjustments twin
+    /// (the Filter menu's filters are their own commands); PSD keeps none of them.
+    static let filterAdjustments: [(String, String, String)] = [
+        ("grain", "Grain…", #"{"amount":0..100=25,"size":0.5..20=1.5,"roughness":0..100=50,"seed":0..4294967295?} (size in document pixels; seed: the pattern, fixed in the document; default one of the layer's own)"#),
+        ("addNoise", "Add Noise…", #"{"amount":0.1..400=10,"distribution":"uniform|gaussian"="uniform","monochromatic":bool=false,"seed":0..4294967295?} (amount in percent; seed: the pattern, fixed in the document; default one of the layer's own)"#),
+        ("gaussianBlur", "Gaussian Blur…", #"{"radius":0.1..250=10} (the blur's standard deviation in document pixels)"#),
+        ("motionBlur", "Motion Blur…", #"{"angle":-90..90=0,"distance":1..2000=10} (angle counterclockwise from horizontal; distance: the streak's length in document pixels)"#),
+    ]
+
     static func adjustmentCommands() -> [CommandSpec] {
         var out: [CommandSpec] = []
         for (kind, label, params) in adjustments {
@@ -800,6 +813,14 @@ enum CoreCommands: CommandModule {
                 return try destructiveAdjust(s, adj.label, adj, p)
             })
         }
+        for (kind, label, params) in filterAdjustments {
+            let id = "layer.newAdjustmentLayer.\(kind)"
+            out.append(CommandSpec(id, label, menu: ["Layer", "New Adjustment Layer"], params: "\(params) + {\(newLayerPath)}",
+                                   module: m, enabled: Pre.hasDoc) { s, p in
+                let adj = try AdjustParams.fromParams(kind, p, base: nil, mode: s.active?.doc.mode ?? .rgb)
+                return try newAdjustment(s, adj, p, id)
+            })
+        }
         out.append(CommandSpec("image.adjustments.desaturate", "Desaturate", menu: ["Image", "Adjustments"], shortcut: "Cmd+Shift+U",
                                module: m, enabled: Pre.hasPixelLayer) { s, _ in
             var hs = Adjustment.HueSaturation()
@@ -826,6 +847,15 @@ enum CoreCommands: CommandModule {
     static func newAdjustment(_ s: Session, _ adj: Adjustment, _ p: JSONValue, _ cmd: String) throws -> JSONValue {
         let id = try s.edit("New \(adj.label) Layer") { doc, active -> LayerId in
             var l = Layer(name: doc.nextLayerName(adj.label), content: .adjustment(adj))
+            // Grain and Add Noise without a `seed` get a pattern of the layer's own.
+            if p["seed"] == nil || p["seed"] == .null, case .filter(var f) = adj {
+                switch f {
+                case .grain(var g): g.seed = AdjustParams.seed(for: l.id); f = .grain(g)
+                case .addNoise(var n): n.seed = AdjustParams.seed(for: l.id); f = .addNoise(n)
+                case .gaussianBlur, .motionBlur: break
+                }
+                l.content = .adjustment(.filter(f))
+            }
             try maskNewLayer(doc, &l, p, cmd)
             let id = doc.insertAbove(active, l)
             active = id

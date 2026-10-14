@@ -7,11 +7,15 @@ enum Migrate {
     typealias Step = @Sendable (inout JSONTree) throws(FormatError) -> Void
 
     /// `steps[i]` upgrades version `i + 1` to `i + 2`.
-    static let steps: [Step] = [v1ToV2]
+    static let steps: [Step] = [v1ToV2, v2ToV3]
 
     /// 1 → 2: format 2 changes the single-file container (ZIP64 when needed), not the document
     /// schema, so a version 1 manifest is already a valid version 2 one.
     static let v1ToV2: Step = { (_: inout JSONTree) throws(FormatError) in }
+
+    /// 2 → 3: format 3 adds an adjustment kind (filter adjustment layers), so a version 2 manifest
+    /// is already a valid version 3 one.
+    static let v2ToV3: Step = { (_: inout JSONTree) throws(FormatError) in }
 
     /// Upgrades `v` in place to `target` using `steps`; returns the version found.
     @discardableResult

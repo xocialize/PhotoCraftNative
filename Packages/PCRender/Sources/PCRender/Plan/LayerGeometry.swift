@@ -203,7 +203,9 @@ public enum LayerGeometry {
         switch l.content {
         case .group(let g):
             if let ab = g.artboard { return ab.rect }
+            // Blurs inside spread the children's pixels by their reach.
             return g.children.filter(\.visible).reduce(PixelRect.empty) { $0.union(layerBounds($1, canvas: canvas, pixels: pixels)) }
+                .inflated(filterReach(g.children))
         case .fill: return canvas
         default:
             let b = pixels(l).map(ContentBounds.of) ?? .empty
@@ -218,9 +220,24 @@ public enum LayerGeometry {
             return g.children.filter(\.visible).reduce(PixelRect.empty) { acc, c in
                 let m = hasEffects(c) ? margin(c) : 0
                 return acc.union(effectSourceBounds(c, canvas: canvas, pixels: pixels).inflated(m))
-            }
+            }.inflated(filterReach(g.children))
         }
         return layerBounds(l, canvas: canvas, pixels: pixels)
+    }
+
+    /// How far blur adjustment layers among `layers` spread what is beneath them (their reaches
+    /// added up; `nested`: inside groups too), in document pixels: how much a change beneath them
+    /// can grow on the canvas.
+    public static func filterReach(_ layers: [Layer], nested: Bool = false) -> Int32 {
+        var total: Int64 = 0
+        for l in layers where l.visible {
+            if case .adjustment(let a) = l.content, let f = a.asFilter, f.samplesNeighbours {
+                total += Int64(FilterMath.reach(FilterSpec(f)))
+            } else if nested, let c = l.children {
+                total += Int64(filterReach(c, nested: true))
+            }
+        }
+        return Int32(clamping: total)
     }
 
     /// `transparent_outside`: every surface the layer draws from is transparent by default.
@@ -279,6 +296,7 @@ public enum LayerGeometry {
                 guard let b = compositeBounds(c, canvas: canvas, pixels: pixels) else { return nil }
                 own = own.union(b)
             }
+            own = own.inflated(filterReach(g.children))
         case .adjustment: own = .empty
         default: own = layerBounds(l, canvas: canvas, pixels: pixels)
         }
