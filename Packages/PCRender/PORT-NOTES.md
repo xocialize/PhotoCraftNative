@@ -829,7 +829,7 @@ whole region plus a margin, waited for. A canvas makes these off its main thread
 
 In PixelAgencyEditor's canvas (`aLargeDocumentAtDisplayRate`, three quiet runs, frames paced at 120 Hz),
 the document shows 83.5–83.9 ms after it is made, against 108.6–118.2 ms on the same bench before
-AB-T-0289 (its receipt has both).
+AB-T-0289 (AB-R-0552 has both).
 
 At fit the view holds 542.6 MiB (visible level pages 306.9, visible effect maps 89.0, display 146.7:
 composite 109.3 and chain 37.4), with a 203.9 MiB transient. Before this, the same frame at full
