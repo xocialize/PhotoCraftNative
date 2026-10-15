@@ -766,6 +766,19 @@ document region at 2^-level from reduced sources, in level pixels
   ones no view uses (other levels' and full-resolution pages included), never the view's. Effect maps
   and masks at a level are ordinary entries of their caches. A view at a level therefore has a floor
   bounded by the viewport: its composite and chain, and the visible pages and effect maps at that level.
+* **The cold first frame** (AB-T-0289). A render brings the level pages its cells will bind (drawn
+  leaves and unfeathered masks, `MetalCompositor.boundLeaves`) up to their source tiles in one
+  parallel pass before it prepares anything (`ResidencyCache.prefill`, reported as
+  `MetalRenderStats.fill`), instead of a leaf at a time as its cells bind them. Prefilled pages count
+  as used by the frame, not shown, so visibility and gather accounting are what cell binds give; an
+  effect shape's nested render and a render in low-footprint cells bind as before. The pass's blocks
+  share no reference-counted state (each block took and dropped several from every thread).
+  `ContentBounds`, which the first plan of a document pays for every tile, skips rows that equal the
+  default pixel with `memcmp` (a materialised transparent tile was compared byte by byte) and caches
+  by tile generation per default pixel. Modern Brightness/Contrast works out its curve's parameters
+  once per LUT, not per entry (every frame with such a layer paid two bisections over `pow` per
+  entry). The chamfer's interior skips bounds tests (bit-identical), and a stroke's two or three
+  distance fields are built at once.
 
 **Parity with the exact reduction** (`renderReduced` of the full-resolution CPU composite, in
 premultiplied 8-bit levels; `LevelOfDetailTests`):
@@ -802,17 +815,21 @@ tiles, 19.5 GiB of pixels; 5K drawable; Release, M5 Max, GPU idle). Each is one 
 whole region plus a margin, waited for. A canvas makes these off its main thread, in tiles
 (PixelAgencyEditor's `CanvasJob`):
 
-| Frame | Region at the level | ms | of which |
+| Frame | Region at the level | ms (AB-T-0256 → AB-T-0289) | of which, now |
 |---|---|---|---|
-| First frame at fit: a sampled preview, level 5 | 938² | 185 | plan 32 (cold), prepare 53, encode 57, chain and display 33 |
-| Fit, level 3, cold | 3750² | 569 | prepare 127, encode 425 (89,337 blocks reduced) |
-| Fit again, warm (min of 5) | 3750² | 41 | |
-| Zoom 0.154, level 2 | 7500 × 6564 | 919 | prepare 372, encode 530 |
-| Zoom 0.307, level 1 | 10417 × 6771 | 1,271 | prepare 535, encode 717 |
-| Zoom 0.5, level 0 (cropped effect maps) | 12800 × 8320 | 1,132 | wait 557 |
-| Zoom 1, level 0 | 6400 × 4160 | 295 | wait 259 |
-| Pan at level 1, past the margin | 9375–10417 × 6771 | 690–761 | |
-| A 256² change at fit | 4 blocks | 16.6 | |
+| First frame at fit: a sampled preview, level 5 | 938² | 185 → **85** | plan 15 (cold), fill 37, prepare 17, encode 3, wait 7, chain and display 6 |
+| Fit, level 3, cold | 3750² | 569 → 399 | fill 305 (89,337 blocks reduced), prepare 51, wait 37 |
+| Fit again, warm (min of 5) | 3750² | 41 → 29 | |
+| Zoom 0.154, level 2 | 7500 × 6564 | 919 → 675 | fill 337, prepare 245, wait 81 |
+| Zoom 0.307, level 1 | 10417 × 6771 | 1,271 → 1,013 | fill 425, prepare 451, wait 122 |
+| Zoom 0.5, level 0 (cropped effect maps) | 12800 × 8320 | 1,132 → 1,187 | encode 308, wait 796 (GPU-bound) |
+| Zoom 1, level 0 | 6400 × 4160 | 295 → 283 | wait 254 |
+| Pan at level 1, past the margin | 9375–10417 × 6771 | 690–761 → 689–817 | |
+| A 256² change at fit | 4 blocks | 16.6 → 5.0 | |
+
+In PixelAgencyEditor's canvas (`aLargeDocumentAtDisplayRate`, three quiet runs, frames paced at 120 Hz),
+the document shows 83.5–83.9 ms after it is made, against 108.6–118.2 ms on the same bench before
+AB-T-0289 (its receipt has both).
 
 At fit the view holds 542.6 MiB (visible level pages 306.9, visible effect maps 89.0, display 146.7:
 composite 109.3 and chain 37.4), with a 203.9 MiB transient. Before this, the same frame at full
