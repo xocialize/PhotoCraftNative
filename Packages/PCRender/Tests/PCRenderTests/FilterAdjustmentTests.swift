@@ -346,6 +346,11 @@ enum FilterFixtures {
             let g = try best(5) { _ = try gpu.renderMetal(d, region: d.bounds) }
             let c = try best(2) { _ = try DT.cpu.render(d, region: part) }
             print(String(format: "FILTER-BENCH %@: GPU 4096² %.1f ms (+%.1f), CPU 1024² %.0f ms (+%.0f)", name, g, g - g0, c, c - c0))
+            // PSD export's bake of the layer (AB-D-0143): the whole canvas into an 8-bit surface.
+            let id = d.layers[2].id
+            _ = try gpu.bakeFilterLayer(d, layer: id)
+            let b = try best(3) { _ = try gpu.bakeFilterLayer(d, layer: id) }
+            print(String(format: "FILTER-BENCH %@ bake: 4096² %.0f ms", name, b))
         }
     }
 }

@@ -63,6 +63,12 @@ public final class EngineRenderer: Sendable {
         do { return try compositor.renderCPU(doc, region: region) } catch { throw EngineError.other("compositing failed: \(error)") }
     }
 
+    /// A filter adjustment layer baked to pixels for PSD/PSB (AB-D-0143, PCRender `FilterBake`).
+    public func bakeFilterLayer(_ doc: Document, layer: LayerId) throws -> Surface? {
+        lock.lock(); defer { lock.unlock() }
+        do { return try compositor.bakeFilterLayer(doc, layer: layer) } catch { throw EngineError.other("baking a filter layer failed: \(error)") }
+    }
+
     /// One composite pixel (photocraft `document.pixel`), at full precision (`renderExact`).
     public func pixel(_ doc: Document, x: Int32, y: Int32) throws -> SIMD4<Float> {
         let r = PixelRect(x0: x, y0: y, x1: x &+ 1, y1: y &+ 1)

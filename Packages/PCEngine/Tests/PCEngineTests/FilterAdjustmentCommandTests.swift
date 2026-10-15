@@ -1,6 +1,7 @@
 // Filter adjustment layers through the engine (AB-T-0258): `layer.newAdjustmentLayer.grain`,
 // `.addNoise`, `.gaussianBlur` and `.motionBlur` create them, `layer.setAdjustment` edits them,
-// `.pcraft` keeps them and a PSD save warns that it can't. New; no photocraft counterpart.
+// `.pcraft` keeps them, and a PSD save bakes them to pixels with a warning (AB-D-0143). New; no
+// photocraft counterpart.
 
 import Foundation
 @testable import PCEngine
@@ -78,7 +79,7 @@ import Testing
         #expect(streak.prefix(3) == [0, 0, 0] && streak[3] > 0.8 && streak[3] < 1, "\(streak)")
     }
 
-    @Test func pcraftKeepsThemAndPSDWarns() throws {
+    @Test func pcraftKeepsThemAndPSDBakesThem() throws {
         let dir = try ioDir("filters")
         defer { try? FileManager.default.removeItem(at: dir) }
         let s = try session()
@@ -93,8 +94,17 @@ import Testing
         let psd = dir.appendingPathComponent("filters.psd").path
         let r = try s.execute("file.saveACopy", ["path": .string(psd)])
         let w = r["warnings"]?.arrayValue?.compactMap(\.stringValue) ?? []
-        #expect(w.filter { $0.contains("no PSD equivalent") }.count == 2, "\(w)")
-        dropForOracle(URL(fileURLWithPath: psd), as: "filter-adjustments.psd")
+        #expect(w.filter { $0.contains("baked to pixels") }.count == 2, "\(w)")
+        // The engine's renderer bakes them: the layers come back holding pixels that draw the live
+        // composite, away from the canvas edge (where the live blur thins it and a pixel layer can't).
+        let (j, _, _) = try s.openFile(psd)
+        let back = s.documents[j].doc
+        #expect(back.layers.suffix(2).allSatisfy { if case .raster(let p) = $0.content { !p.contentBounds.isEmpty } else { false } })
+        let inner = saved.bounds.inset(by: 8)
+        let live = try s.services.renderer.renderCPU(saved, region: inner), layers = try s.services.renderer.renderCPU(back, region: inner)
+        let m = zip(live.px, layers.px).map { p, q in (0..<4).map { abs(p[$0] - q[$0]) }.max() ?? 0 }.max() ?? 0
+        #expect(m * 255 <= 2, "\(m * 255) levels")
+        dropForOracle(URL(fileURLWithPath: psd), as: "filter-bake.psd")
     }
 
     /// A fill beneath a blur damages its own rect grown by the blur's reach, and nothing outside

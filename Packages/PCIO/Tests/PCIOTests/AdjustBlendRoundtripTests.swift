@@ -103,7 +103,7 @@ import Testing
                  .colorLookup, .invert, .posterize, .threshold, .gradientMap, .selectiveColor, .unsupported:
                 break
             case .filter:
-                // No PSD form: written as an empty pixel layer with a warning (FilterAdjustmentTests).
+                // No PSD form: baked to a pixel layer with a warning (FilterAdjustmentPSDTests).
                 break
             }
         }

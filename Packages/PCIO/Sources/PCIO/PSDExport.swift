@@ -829,7 +829,10 @@ struct SmartOut {
 
 /// The export state (photocraft `Ex`).
 struct Exporter {
-    let doc: Document
+    /// The document whose layers are written (filter layers baked, `bakeFilterLayers`).
+    var doc: Document
+    /// The document as it renders live, for the merged image.
+    let live: Document
     let options: PSDExportOptions
     var fmt: PixelFormat
     var dpi: Float
@@ -859,6 +862,7 @@ struct Exporter {
         let missingPatterns = PatternMap.addMissingPatterns(&doc)
         self.doc = doc
         self.options = options
+        live = doc
         warnings += missingPatterns
         fmt = doc.pixelFormat
         // Photoshop has no 32-bit CMYK or Lab mode (a file in either is refused): write 16-bit.
@@ -1183,8 +1187,9 @@ struct Exporter {
                 raw.removeAll { AdjustMap.adjustmentKeys.contains($0.key) || $0.key == "CgEd" }
                 let w = AdjustMap.write(a)
                 if let f = a.asFilter {
-                    // No live filter layer in Photoshop (AB-T-0258): the record stays, as an empty
-                    // pixel layer; the merged image still shows the filter.
+                    // No live filter layer in Photoshop, and the compositor couldn't bake this one
+                    // (`bakeFilterLayers`): the record stays, as an empty pixel layer; the merged
+                    // image still shows the filter.
                     warnings.append("layer \"\(l.name)\": \(f.label) adjustment layer has no PSD equivalent; written as an empty pixel layer (its mask, opacity and blend mode kept), so Photoshop shows the layers below it unfiltered; save as .pcraft to preserve it")
                 } else if w.isEmpty {
                     warnings.append("layer \"\(l.name)\": \(a.label) adjustment is not yet written to PSD")
@@ -1617,6 +1622,36 @@ struct Exporter {
         return PSDLayerRecord(channels: emptyChannels(), flags: flags, blendingRanges: ranges, name: Array("</Layer group>".utf8), blocks: blocks)
     }
 
+    /// Filter adjustment layers have no PSD form, so each is baked (AB-D-0143): written as a pixel
+    /// layer holding the filter applied to its backdrop (the compositor's `bakeFilterLayer`), with
+    /// its name, masks, opacity, blend mode and clipping. Bottom to top, so each backdrop holds the
+    /// baked layers beneath it, as Photoshop shows them. Effects, which an adjustment layer doesn't
+    /// draw, are dropped. The merged image stays the live composite (`live`). A compositor that
+    /// can't bake leaves the layer to `contentBlocks`, which writes it empty.
+    mutating func bakeFilterLayers() {
+        var filters: [(LayerId, FilterAdjustment)] = []
+        doc.forEachLayer { _, _, l in
+            if case let .adjustment(a) = l.content, let f = a.asFilter { filters.append((l.id, f)) }
+        }
+        for (id, f) in filters {
+            if options.interrupt.isCancelled { return }
+            let name = doc.layer(id)?.name ?? ""
+            let pixels: Surface?
+            do {
+                pixels = try options.compositor.bakeFilterLayer(doc, layer: id)
+            } catch {
+                warnings.append("layer \"\(name)\": \(f.label) adjustment layer could not be baked to pixels (\(error))")
+                continue
+            }
+            guard let pixels else { continue }
+            doc.updateLayer(id) { l in
+                l.content = .raster(pixels)
+                l.effects = Effects(enabled: true)
+            }
+            warnings.append("layer \"\(name)\": \(f.label) adjustment layer baked to pixels for PSD; it won't update if the layers below change; save as .pcraft to keep it live")
+        }
+    }
+
     mutating func run() -> (file: PSDFile, warnings: [String]) {
         let sample = fmt.sample
         let big = doc.size.width > 30_000 || doc.size.height > 30_000
@@ -1628,6 +1663,7 @@ struct Exporter {
             warnings.append("estimated encoded size exceeds 2 GB; written as PSB")
         }
         if fmt.mode != doc.mode { warnings.append("\(doc.mode.serdeName) document written as \(fmt.mode.serdeName)") }
+        bakeFilterLayers()
         // Assign layer ids up front (stable across round trips): keep unique `psdId`s, number the
         // rest after them; dividers come after all.
         var walk: [Layer] = []
@@ -1668,7 +1704,7 @@ struct Exporter {
 
         // Merged composite, rendered and encoded in bands.
         let mergedEnd = layersShare + (1 - layersShare) * 0.8
-        let merged = MergedImage.planes(doc, fmt: fmt, compositor: options.compositor, matte: options.mergedMatte,
+        let merged = MergedImage.planes(live, fmt: fmt, compositor: options.compositor, matte: options.mergedMatte,
                                         interrupt: interrupt.span(layersShare, mergedEnd))
         var planes = merged.planes
         if case let .failure(e) = merged.status { warnings.append("the merged image could not be rendered (\(e)); it was written white") }

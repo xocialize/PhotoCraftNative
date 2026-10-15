@@ -43,6 +43,17 @@ public protocol DocumentCompositor: Sendable {
     /// the values the whole reduction gives them. A preview kept from an earlier save is updated
     /// with it where an edit can have changed the composite. The default reduces the whole canvas.
     func reduced(_ document: Document, width: Int, height: Int, damage: PixelRect) throws -> (rect: PixelRect, pixels: [SIMD4<Float>])
+
+    /// A filter adjustment layer (`Adjustment.filter`) baked to pixels, for a container with no live
+    /// form of it (PSD/PSB, AB-D-0143): the filter applied to the layer's backdrop as this
+    /// compositor evaluates the layer, in `document.pixelFormat`, written so that the pixels
+    /// composited with the layer's own mask, opacity, blend mode and clipping give the live layer's
+    /// result. nil: this compositor can't (the default); the layer is then written empty.
+    func bakeFilterLayer(_ document: Document, layer: LayerId) throws -> Surface?
+}
+
+extension DocumentCompositor {
+    public func bakeFilterLayer(_ document: Document, layer: LayerId) throws -> Surface? { nil }
 }
 
 /// A compositor from a closure producing straight sRGB RGBA (photocraft `render_bands`' output),

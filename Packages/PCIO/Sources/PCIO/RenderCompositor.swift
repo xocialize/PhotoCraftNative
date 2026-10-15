@@ -62,6 +62,15 @@ public final class RenderCompositor: PCIOCore.DocumentCompositor, @unchecked Sen
         }
     }
 
+    /// PCRender's bake of a filter adjustment layer (AB-D-0143, PCRender `FilterBake`).
+    public func bakeFilterLayer(_ document: Document, layer: LayerId) throws -> Surface? {
+        do {
+            return try lock.withLock { try compositor.bakeFilterLayer(document, layer: layer) }
+        } catch {
+            throw PCIOError.codec("filter layer bake failed: \(error)")
+        }
+    }
+
     /// PCRender's reduction of only the damaged cells, for an RGB document (the default, which
     /// reduces the whole canvas, for the others).
     public func reduced(_ document: Document, width: Int, height: Int, damage: PixelRect) throws -> (rect: PixelRect, pixels: [SIMD4<Float>]) {

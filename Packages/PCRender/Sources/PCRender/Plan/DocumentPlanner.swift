@@ -76,23 +76,36 @@ public enum DocumentPlanner {
                              options: PlanOptions = PlanOptions()) -> DocumentPlan {
         var doc = document
         if let comp = options.comp { doc = applying(comp, to: doc) }
+        return build(doc, region: region, space: nativeSpace(doc, options), bake: nil, rasterizer: rasterizer, cache: cache,
+                     subRenderer: subRenderer, options: options).plan
+    }
+
+    /// `build` in `space`. With `bake`, each plane's program renders that filter layer's baked
+    /// pixels instead (`FilterBake`), and the probe that made them is returned.
+    static func build(_ doc: Document, region: PixelRect, space: NativeSpace, bake: LayerId?, rasterizer: any LayerRasterizer,
+                      cache: DocumentLeafCache, subRenderer: CPUCompositor, options: PlanOptions) -> (plan: DocumentPlan, probe: FilterBake.Probe?) {
+        var probe: FilterBake.Probe?
         func one(_ native: NativeSpace) -> (RenderPlan, DocumentRenderSource) {
             let ctx = RenderContext(canvas: doc.bounds, mode: doc.mode, depth: doc.depth, globalLight: doc.globalLight, native: native)
             let source = DocumentRenderSource(document: doc, context: ctx, cache: cache, rasterizer: rasterizer, subRenderer: subRenderer)
             let e = PlanEmitter(doc: doc, region: region, source: source, cache: cache, rasterizer: rasterizer, options: options)
+            e.bakeTarget = bake
             e.root()
-            return (RenderPlan(context: ctx, ops: e.ops), source)
+            guard bake != nil else { return (RenderPlan(context: ctx, ops: e.ops), source) }
+            probe = probe ?? e.bake
+            // Not reached: the layer's masks hide it in `region`.
+            return (RenderPlan(context: ctx, ops: e.bake?.ops ?? [.pushTransparent]), source)
         }
-        switch nativeSpace(doc, options) {
+        switch space {
         case .lab:
             let (p, s) = one(.lab)
-            return DocumentPlan(plan: p, source: s, region: region)
+            return (DocumentPlan(plan: p, source: s, region: region), probe)
         case .cmykInk:
             let (p, s) = one(.cmykInk), (pk, sk) = one(.cmykBlack)
-            return DocumentPlan(plan: p, source: s, region: region, black: (pk, sk))
+            return (DocumentPlan(plan: p, source: s, region: region, black: (pk, sk)), probe)
         default:
             let (p, s) = one(.none)
-            return DocumentPlan(plan: p, source: s, region: region)
+            return (DocumentPlan(plan: p, source: s, region: region), probe)
         }
     }
 
@@ -148,6 +161,10 @@ final class PlanEmitter {
     /// The area the ops being emitted will run over (the region, or an effect region for nested
     /// plans): `empty_in` pruning is decided against it.
     var rect: PixelRect
+    /// The filter layer being baked (`FilterBake`): reaching it, the emitter keeps its backdrop's
+    /// program in `bake`.
+    var bakeTarget: LayerId?
+    var bake: FilterBake.Probe?
     private var rasterMemo: [LayerId: Surface?] = [:]
     private var identityMemo: [LayerId: UInt64] = [:]
 
@@ -227,6 +244,15 @@ final class PlanEmitter {
         } else {
             ops.append(.backdropFilter(BackdropFilter(spec: spec, program: program, pushesBackdrop: false)))
         }
+    }
+
+    /// At the layer being baked: the ops so far, left with its backdrop alone (as `adjusted`
+    /// builds a blur's program), and how the live layer mixes its result in.
+    func probe(_ l: Layer, _ adj: Adjustment, coverage: Bool, atop: Bool) {
+        guard l.id == bakeTarget, bake == nil, let f = adj.asFilter else { return }
+        let (depth, floors) = RenderPlan.stackState(ops)
+        let program = ops + Array(repeating: DrawOp.remove(1), count: max(depth - 1, 0)) + Array(repeating: DrawOp.dropFloor, count: floors)
+        bake = FilterBake.Probe(backdrop: program, filter: f, coverage: coverage, atop: atop)
     }
 
     /// An adjustment as this plan applies it (CMYK planes: per channel, see `NativeConvert`).
@@ -496,9 +522,11 @@ final class PlanEmitter {
             return
         }
         if case .adjustment(let adj) = l.content {
+            let coverage = adj.asFilter?.samplesNeighbours == true
+            probe(l, adj, coverage: coverage && blendMode(l) == .normal, atop: false)
             adjusted(adj)
             compositeClipped(clipped)
-            ops.append(.adjustMix(AdjustMix(mode: blendMode(l), opacity: opacity, mask: maskSpec(l), coverage: adj.asFilter?.samplesNeighbours == true)))
+            ops.append(.adjustMix(AdjustMix(mode: blendMode(l), opacity: opacity, mask: maskSpec(l), coverage: coverage)))
             return
         }
         if hasFx {
@@ -714,6 +742,7 @@ final class PlanEmitter {
         if case .adjustment(let adj) = l.content {
             // Clipped, a blur keeps its base's coverage (atop): it never spreads past the base's
             // outline, and its colours come from the base's own pixels.
+            probe(l, adj, coverage: false, atop: true)
             adjusted(adj)
             ops.append(.adjustMix(AdjustMix(mode: blendMode(l), opacity: l.opacity * l.fillOpacity, mask: maskSpec(l))))
             return
