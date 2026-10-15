@@ -16,7 +16,8 @@ seven File-menu ids its app shell owns (`file.open`, `file.save`, `file.saveAs`,
 nine PCIntelligence commands, and the four filter adjustment layers (AB-T-0258:
 `layer.newAdjustmentLayer.grain`, `.addNoise`, `.gaussianBlur`, `.motionBlur`, created with
 Compositor's settings and edited by `layer.setAdjustment`; Grain's and Add Noise's `seed` defaults
-to one derived from the new layer's id, and a reset keeps it). Files go through PCIO (PSD, PSB, .pcraft, OpenRaster, layered
+to one derived from the new layer's id, and a reset keeps it; a PSD/PSB save bakes them into pixel
+layers through `EngineRenderer.bakeFilterLayer`, AB-D-0143). Files go through PCIO (PSD, PSB, .pcraft, OpenRaster, layered
 TIFF, Krita/Paint.NET/Affinity import, SVG, EXR parts) with the engine's compositor and PCPlatform's
 text, vector and image codecs injected; smart objects re-render from their sources. `pccli`, the
 control channel and MCP read and write every format.

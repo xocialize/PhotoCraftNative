@@ -52,6 +52,7 @@ PCDocument ──DocumentPlanner──▶ RenderPlan (DrawOp stack program) + Do
 | `Plan/LayerRasterizer.swift` | compose `render_content` / shape_split entry points, vector `path_coverage` | `LayerRasterizer` protocol, `PlaceholderRasterizer`, `RasterMiss` |
 | `Plan/PathCoverage.swift` | vector raster.rs | exact-area path coverage (vector masks, effect outlines) when the rasterizer has none |
 | `Plan/NativeSpace.swift` | compose native.rs (`flatten_cmyk`), extended | Lab / CMYK plans in the document's own channels: colour, pixel and pattern conversion, plane-safe adjustments, merging for display |
+| `Plan/FilterBake.swift` | (new) | filter adjustment layers baked to pixels for PSD/PSB (AB-D-0143): `DocumentCompositor.bakeFilterLayer`, `FilterBake.bounds` |
 | `Plan/FillLayerRenderer.swift` | compose `render_fill_content`, gradient_fill.rs `render_cmyk_fill` | public: a fill layer's stored pixels in any format |
 | `DocumentCompositor.swift` | compose `render`, `render_bands`, `band_rows_for`, `composite_to_surface`, `render_reduced*`, `thumbnail*` | façade (Metal with CPU fallback), bands, reductions, surfaces, `CompositeOracle` |
 | `CPU/CPUCompositor.swift` | compose lib.rs, advanced.rs | CPU executor (tiles, effect-map and mask caches), `Compose`, `FillRender` |
@@ -816,6 +817,44 @@ whole region plus a margin, waited for. A canvas makes these off its main thread
 At fit the view holds 542.6 MiB (visible level pages 306.9, visible effect maps 89.0, display 146.7:
 composite 109.3 and chain 37.4), with a 203.9 MiB transient. Before this, the same frame at full
 resolution averaged down would have read all 19.5 GiB.
+
+## Filter layers baked to pixels (AB-D-0143, AB-T-0281)
+
+PSD/PSB has no live filter layer, so PCIO's export writes each as a pixel layer:
+`DocumentCompositor.bakeFilterLayer(_:layer:)` gives its pixels, the filter applied to its
+backdrop, in the document's pixel format. New; no photocraft counterpart.
+
+* **The backdrop as the layer sees it.** `FilterBake.probeDocument` cuts the document to what the
+  layer's backdrop needs (nothing above it in any stack around it) and shows the layer, its groups
+  and its clipping base. The planner then runs with `bakeTarget` set: reaching the layer (`plain`
+  unclipped, `atopAny` clipped, so pass-through and isolated groups, clipping bases, knockouts and
+  Blend Clipped Layers as Group all come out as they do live), it keeps the ops so far, left with
+  the backdrop alone: the program a blur reads its backdrop from (`FilterBake.Probe`). The plan
+  then filters that backdrop (`.backdropFilter` with `pushesBackdrop`, or `.filter` for Grain and
+  Add Noise) and mixes it in at full strength in Normal (`.adjustMix`), on either backend. The space
+  is the live document's (`nativeSpace` of the whole document: what lies above can decide CMYK's).
+* **Coverage, so the pixel layer composites like the live one.** Live, a Normal blur mixes
+  premultiplied colour and coverage, so the bake keeps the filtered coverage; every other
+  unclipped layer blends colours and keeps the backdrop's coverage, so the bake has the backdrop's
+  (`AdjustMix` with `coverage` off); clipped, the layer blends atop its base, so the bake is
+  opaque wherever the base has coverage. Composited with the layer's mask, opacity, blend mode and
+  clipping, that is exact wherever the backdrop is opaque or clear. A pixel layer can't remove
+  coverage, so where a Normal blur thins it (the canvas edge, past which the backdrop counts as
+  clear, and inside the edge of translucent content) the bake can't follow.
+* **Bounds.** Only the canvas within the layer's enabled masks is rendered (`FilterBake.bounds`;
+  a mask at full density with a black default, or a vector mask, each grown by its feather's
+  reach), band by band (`bandRows`), clear elsewhere.
+* **Tests** (`FilterBakeTests`, 16-bit; 11 settings × masked, five blend modes, isolated and
+  pass-through groups, clipped in two modes, stacked between two blurs): the baked layers draw the
+  live composite within 2·10⁻⁴ (a few 16-bit steps) away from coverage edges, and within them too
+  except under a Normal blur, where the test checks that the thinning shows. GPU bakes equal the
+  CPU's within the filters' parity bounds; any region of a bake equals the same pixels of the
+  whole. Lab ≤ 0.015 levels, Gray ≤ 0.006 but for colour Add Noise (7.9: colour a gray layer can't
+  hold), CMYK ≤ 0.03 in display RGB, where a CMYK document holding a filter layer composites.
+* **Cost** (`FilterAdjustmentTests/bench`, release, M5 Max): about 230 ms per filter layer over a
+  4096² canvas (Grain 210, Gaussian Add Noise 229, Gaussian Blur 10 / 50 231 / 248 ms); the render
+  itself is 13–94 ms, the rest is the read-back and the 8-bit surface. RGB documents write the
+  straight RGBA as it is (a per-pixel conversion was 1.2 s).
 
 ## For the next phase
 

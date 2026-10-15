@@ -145,7 +145,7 @@ side, 10,000 layers, 800 MP of images and of masks.
 | Hue/Saturation (master, six ranges with their bands, colorize) | `.hueSaturation`; "invert range" has no equivalent (warned) |
 | Levels, Exposure, Invert, Black & White (+ tint), Color Balance, Gradient Map | the same adjustment; a tint becomes Photoshop's tint colour (HSL at ½ lightness); Gradient Map reads brightness with Photoshop's weights (warned: Compositor's are Rec. 709's) |
 | Curves | pencil curves holding the 256 levels Compositor's monotone Hermite curves evaluate to (exact at 8 bits; the handles are not kept, warned) |
-| Grain, Add Noise, Gaussian Blur, Motion Blur | filter adjustment layers (`Adjustment.filter`, AB-T-0258) with Compositor's settings and seeds; PCRender draws them (no Photoshop adjustment layer: a PSD save writes them as empty pixel layers, below) |
+| Grain, Add Noise, Gaussian Blur, Motion Blur | filter adjustment layers (`Adjustment.filter`, AB-T-0258) with Compositor's settings and seeds; PCRender draws them (no Photoshop adjustment layer: a PSD save bakes them into pixel layers, AB-D-0143, below) |
 | stroke, drop shadow, inner shadow, outer glow, inner glow, colour overlay | Photoshop layer styles in Normal (Compositor's renderer), sizes scaled from layer pixels to document pixels; Compositor's own effect shapes differ (its outside stroke is a square dilation) |
 | text metadata | a type layer: runs from the UTF-16 colour/face runs, size and leading in points at the document's resolution, tracking in 1/1000 em, box or point text placed as Compositor lays it out (12 px padding); Compositor's PNG is its rendered pixels until edited |
 | shape metadata | a shape layer (live rectangle/ellipse/line when upright) with Compositor's PNG as its pixels |
@@ -418,6 +418,58 @@ carries a 2-byte `Patt`; PCIO's export now drops it as unreadable.
   merged image are grey); the generated test document therefore uses Selective Color only in the
   colour modes.
 
+### Filter adjustment layers in PSD/PSB: baked (AB-D-0143, AB-T-0281)
+
+Photoshop has no live backdrop-filter layer, so `Exporter.bakeFilterLayers` writes each filter
+adjustment layer (Grain, Add Noise, Gaussian Blur, Motion Blur) as a pixel layer holding **the
+filter applied to its backdrop**, with its name, masks, opacity, blend mode and clipping (effects,
+which an adjustment layer doesn't draw, are dropped). The warning: "… adjustment layer baked to
+pixels for PSD; it won't update if the layers below change; save as .pcraft to keep it live". The
+merged image stays the live composite.
+
+- **Where the pixels come from.** The injected compositor's `bakeFilterLayer(_:layer:)`
+  (`PCIOCore.DocumentCompositor`, default nil): `RenderCompositor` and PCEngine's `EngineRenderer`
+  call PCRender's `DocumentCompositor.bakeFilterLayer`, which runs the planner up to the layer and
+  keeps the program that leaves its backdrop alone, as PCRender evaluates the layer: its group,
+  pass-through or isolated, and its clipping base (PCRender `FilterBake`). Hidden layers are baked
+  too. Only the canvas within the layer's masks (feathers included) is rendered, band by band.
+- **Bottom to top.** Each filter layer is replaced by its bake before the next is baked, so a
+  filter layer's backdrop holds the baked ones beneath it, as Photoshop shows them.
+- **Coverage.** The pixels are written so that compositing them with the layer's own mask, opacity,
+  blend mode and clipping gives the live layer's result: a blur in Normal keeps its filtered
+  coverage; any other unclipped layer the backdrop's; a clipped one full coverage over its base.
+  That is exact wherever the backdrop is opaque or clear. A pixel layer can only add coverage, so
+  where a live Normal blur **thins** it (within the blur's reach of the canvas edge, past which
+  PCRender's blurs read clear, as Compositor's do, and inside the edge of translucent content) the
+  layers can't follow: there Photoshop shows the unthinned backdrop under the blur.
+- **A compositor that can't bake** (nil, e.g. `StoredPixelsCompositor`) leaves the layer to
+  `contentBlocks`, which writes the old empty pixel layer with the old warning; one that throws adds
+  "could not be baked".
+- **Tests** (`FilterAdjustmentPSDTests`, both record conventions, 8 and 16 bits): every kind, a mask,
+  opacities under 100 %, Overlay / Screen / Soft Light, a clipped layer, one in a pass-through and
+  one in an isolated group, two stacked. The layers come back as pixel layers equal to PCRender's
+  bake (exactly), the tree as written, and their composite is the live composite within **1.80
+  levels at 8 bits** (each stamp is rounded to whole levels where the live layer is rounded to the
+  adjustment quantum: under a level per layer) and **0.012 at 16**. `normalBlursThinningCoverage`
+  pins the limit: 0 levels away from the thinned areas, 173 in the canvas rim and 113 inside the
+  card's edge.
+- **Photoshop 27.11** (receipt AB-R-0547, `ps-oracle sweep`, files in
+  `$PHOTOCRAFT_FIXTURES/ps-oracle-tmp/ab-t-0281`): the four `filter-bake-*.psd`, the two
+  `filter-bake-limits-*.psd` and PCEngine's Save a Copy, **7 of 7 opened with no dialog**, trees
+  match, layer pixels within 0 levels at 8 bits and 0.012 at 16. Photoshop's composite against the
+  live composite (our merged image): **2 levels max, mean 0.275, at 8 bits** (156 of 6,144 pixels at
+  2); **0.016 at 16 bits**. The limits files and PCEngine's (an unmasked Normal Gaussian Blur): 0
+  levels away from the thinned bands, 163–167 inside them.
+- **Cost** (PCRender, release, M5 Max): about 230 ms per filter layer covering a 4096² canvas,
+  whatever the filter; a masked one renders only its mask's extent.
+- **Other modes** (PCRender `FilterBakeTests.otherModes`): Lab bakes and composites in Lab (≤ 0.015
+  levels). A CMYK document holding a filter layer composites in display RGB (filters don't run per
+  ink plane), and the bake is made there (≤ 0.03 levels so composited); without its filter layers
+  the saved document composites in CMYK, as Photoshop does, 30–95 levels away on that fixture. In
+  Gray, colour Add Noise (not monochromatic) leaves colour a gray layer can't hold (7.9 levels).
+- No private marker restores the live layer on reopen: the PSD round trip of these layers is lossy,
+  and `.pcraft` keeps them.
+
 
 ## photocraft's Photoshop-exchange issues, and what the Swift path does about them
 
@@ -528,17 +580,10 @@ photocraft-format's, so bundles go both ways:
 - A reader that doesn't know the kind must reject the file, and the version makes it: photocraft
   and PhotoCraftNative 0.3 (format 2) refuse it as "written by a newer version" instead of failing
   on an unknown adjustment. Version 2 manifests migrate to 3 unchanged.
-- PSD/PSB has no such layer: each is written as an empty pixel layer (its name, mask, opacity, blend
-  mode and clipping kept) with a warning naming it, and the merged image shows the filters
-  (`FilterAdjustmentPSDTests`, both record conventions, PCPSD's linter clean). Rasterizing them
-  instead would stamp the filtered backdrop as pixels, which needs the backdrop of each layer
-  rendered inside PSD export; not done.
-- **Photoshop 27.11 opens them** (receipt AB-R-0539, `ps-oracle sweep`): the four
-  `filter-adjustments-*.psd` the test drops (8 and 16 bits, both conventions) and PCEngine's Save a
-  Copy, 5 of 5, with no dialog. Trees match: each filter layer reads as an empty pixel layer with its
-  name, blend mode, opacity, mask and clipping. Layer pixels are within 0.012 levels. Photoshop's
-  composite equals the layers without the filters (0 levels at 8 bits, 0.01 at 16), 209 levels off
-  our merged image, which keeps them.
+- PSD/PSB has no such layer: a save **bakes** each into a pixel layer holding the filter applied to
+  its backdrop (AB-D-0143, AB-T-0281; "Filter adjustment layers in PSD/PSB" below). It used to
+  write an empty pixel layer (AB-D-0142's "drop", which Photoshop 27.11 opened, AB-R-0539); that
+  form remains only for a compositor that can't bake.
 
 ### Format 2: ZIP64, the package type, Save (AB-T-0240, AB-D-0131)
 
