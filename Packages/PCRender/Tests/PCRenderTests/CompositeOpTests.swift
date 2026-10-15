@@ -230,12 +230,12 @@ enum OpFixtures {
     }
 
     @Test func halfAccumulatorsStayWithinAMeasuredTolerance() throws {
-        guard let m = TS.metal else { return }
+        // A compositor of its own: the parity suites render through `TS.metal` in parallel, at `.float`.
+        guard TS.metal != nil, let m = try? MetalCompositor(chunkSize: 256) else { return }
         let (plan, src, canvas) = Self.bigPlan
         let cpu = try CPUCompositor().render(plan, region: canvas, source: src)
         m.precision = .half
         let half = try m.renderBuffer(plan, region: canvas, source: src)
-        m.precision = .float
         let d = TS.diff(cpu, half)
         // rgba16Float carries 11 significant bits; 8-bit documents quantise adjustment results.
         #expect(d.levels <= 1, "half accumulators: \(d.max)")
