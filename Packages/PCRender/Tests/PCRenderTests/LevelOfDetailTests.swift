@@ -590,3 +590,112 @@ struct LevelDiff: CustomStringConvertible {
         #expect(a.levels[0] === first)
     }
 }
+
+/// The first frame's cold paths made faster (AB-T-0289) give what they gave.
+@Suite(.serialized) struct LevelOfDetailColdPathTests {
+    /// A render fills the level pages its cells bind in one pass before they run: the composite, the blocks it
+    /// reduces and what it reports are those of binding them cell by cell.
+    @Test(arguments: [false, true])
+    func prefilledLevelPagesAreWhatTheCellsBind(_ sampled: Bool) throws {
+        guard MTLCreateSystemDefaultDevice() != nil else { return }
+        let d = BenchmarkDocuments.realistic20(size: 1024)
+        func draw(prefill: Bool) throws -> (RGBABuffer, Int, CompositorFootprint) {
+            let metal = try MetalCompositor(chunkSize: 256)
+            metal.prefillsLevelPages = prefill
+            let canvas = try CanvasRenderer(context: metal.context)
+            let gpu = DocumentCompositor(rasterizer: DT.rasterizer, backend: .metal, metal: metal)
+            let p = gpu.plan(d, region: d.bounds)
+            let r = try metal.render(p.plan, region: d.bounds, level: 2, sampled: sampled, source: p.source, outputStorage: .shared, view: canvas.renderView)
+            return (RGBABuffer(metal.context.readImage(r.texture, rect: r.rect, channels: 4)), metal.residency.blocksReduced, metal.footprint)
+        }
+        let (a, aBlocks, aFoot) = try draw(prefill: true)
+        let (b, bBlocks, bFoot) = try draw(prefill: false)
+        #expect(a.px == b.px, "\(LevelDiff(a, b))")
+        #expect(aBlocks == bBlocks)
+        #expect(aFoot.levelPages == bFoot.levelPages && aFoot.pages == bFoot.pages && aFoot.visiblePages == bFoot.visiblePages
+                && aFoot.gatherPages == bFoot.gatherPages, "\(aFoot) vs \(bFoot)")
+    }
+
+    /// `ContentBounds` (row compares, cached by tile generation) against PCFoundation's `Surface.contentBounds`:
+    /// pixels at tile edges and corners, tiles materialised but left at the default, a default pixel that isn't zero.
+    @Test(arguments: [PixelFormat.rgba8, .rgba16, .rgba32f, .gray8, .graya8, .gray16, .cmyka8])
+    func contentBoundsAreTheSurfacesOwn(_ format: PixelFormat) {
+        var rng = Rng(11)
+        let ts = Int32(tileSize)
+        for trial in 0..<8 {
+            let base = [Float](repeating: trial % 2 == 0 ? 0 : 0.5, count: format.channels)
+            var s = Surface(format: format, defaultPixel: base)
+            // Materialised tiles holding only the default pixel.
+            for _ in 0..<3 { s.withTileBytes(TileCoord(tx: Int32(rng.next() % 6), ty: Int32(rng.next() % 6))) { _ in } }
+            var expected = PixelRect.empty
+            for _ in 0..<(trial % 4) {
+                let tx = Int32(rng.next() % 6), ty = Int32(rng.next() % 6)
+                // Somewhere in a tile, often on its first or last row or column.
+                func pick() -> Int32 { let r = rng.next() % 4; return r == 0 ? 0 : (r == 1 ? ts - 1 : Int32(rng.next() % UInt64(ts))) }
+                let (x, y) = (tx * ts + pick(), ty * ts + pick())
+                var px = base
+                px[Int(rng.next() % UInt64(format.channels))] = trial % 2 == 0 ? 1 : 0
+                s.setPixel(x: x, y: y, px)
+                expected = expected.union(PixelRect(x: Int(x), y: Int(y), width: 1, height: 1))
+            }
+            #expect(ContentBounds.of(s) == s.contentBounds, "\(format) trial \(trial)")
+            #expect(ContentBounds.of(s) == expected, "\(format) trial \(trial)")
+        }
+    }
+
+    /// The chamfer's interior fast path gives the original loop's distances to the bit.
+    @Test func theChamferIsTheOriginalLoops() {
+        func original(_ start: [Float], _ w: Int, _ h: Int) -> [Float] {
+            let s2: Float = 1.41421356237309504880168872420969808
+            let s5: Float = 2.236_068
+            let fwd: [(Int, Int, Float)] = [(-1, 0, 1), (-1, -1, s2), (0, -1, 1), (1, -1, s2), (-1, -2, s5), (1, -2, s5), (-2, -1, s5), (2, -1, s5)]
+            var d = start
+            func relax(_ x: Int, _ y: Int, _ sign: Int) {
+                let i = y * w + x
+                var best = d[i]
+                for (ox, oy, wt) in fwd {
+                    let nx = x + ox * sign, ny = y + oy * sign
+                    if nx < 0 || ny < 0 || nx >= w || ny >= h { continue }
+                    let c = d[ny * w + nx] + wt
+                    if c < best { best = c }
+                }
+                d[i] = best
+            }
+            for y in 0..<h { for x in 0..<w { relax(x, y, 1) } }
+            for y in stride(from: h - 1, through: 0, by: -1) { for x in stride(from: w - 1, through: 0, by: -1) { relax(x, y, -1) } }
+            return d
+        }
+        var rng = Rng(5)
+        for (w, h) in [(1, 1), (2, 3), (4, 4), (5, 5), (6, 2), (7, 9), (64, 33)] {
+            let start = (0..<(w * h)).map { _ in rng.float() < 0.15 ? rng.float() : DistanceFields.chamferInf }
+            #expect(DistanceFields.chamferFrom(start, w, h).map(\.bitPattern) == original(start, w, h).map(\.bitPattern), "\(w)×\(h)")
+        }
+    }
+
+    /// Modern Brightness/Contrast's LUT, its curve's parameters worked out once, against the curve worked out
+    /// per value as it was.
+    @Test func theModernToneLUTIsTheCurvePerValue() {
+        func perValue(_ v0: Float, _ brightness: Float) -> Float {
+            let v = Double(min(max(v0, 0), 1))
+            if brightness == 0 || !brightness.isFinite { return Float(v) }
+            let f = AdjustMath.modernBrightnessFit
+            let b = Double(min(abs(brightness), 150))
+            let (p, base) = (Double(f.x) + Double(f.y) * exp(-b / Double(f.z)), Double(f.w))
+            let slope = pow(base, b / 50)
+            func sm(_ x: Double) -> Double { x <= 0 ? 0 : pow(pow(x, -p) + 1, -1 / p) }
+            var (lo, hi) = (1.0, slope)
+            for _ in 0..<60 { let m = (lo + hi) / 2; if m / sm(m) < slope { lo = m } else { hi = m } }
+            let s = (lo + hi) / 2, top = sm(s)
+            func fwd(_ x: Double) -> Double { min(sm(s * x) / top, 1) }
+            if brightness > 0 { return Float(fwd(v)) }
+            var (lo2, hi2) = (0.0, 1.0)
+            for _ in 0..<50 { let m = (lo2 + hi2) / 2; if fwd(m) < v { lo2 = m } else { hi2 = m } }
+            return Float((lo2 + hi2) / 2)
+        }
+        for (b, c) in [(Float(0), Float(20)), (25, 35), (50, 0), (150, -50), (-50, 10), (-150, 100)] {
+            let n = AdjustMath.lutSize
+            let want = (0..<n).map { k in min(max(AdjustMath.modernContrast(perValue(Float(k) / Float(n - 1), b), c), 0), 1) }
+            #expect(AdjustMath.modernToneLUT(b, c).map(\.bitPattern) == want.map(\.bitPattern), "b \(b) c \(c)")
+        }
+    }
+}

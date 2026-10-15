@@ -33,6 +33,8 @@ public enum MetalCompositorError: Error, CustomStringConvertible, Equatable {
 /// Where the CPU time of the last render went (seconds).
 public struct MetalRenderStats: Sendable {
     public var output = 0.0, prepare = 0.0, encode = 0.0, wait = 0.0
+    /// Of the time before `prepare`: level pages brought up to their source tiles (`ResidencyCache.prefill`).
+    public var fill = 0.0
 }
 
 public struct MetalRenderResult: @unchecked Sendable {
@@ -253,6 +255,14 @@ public final class MetalCompositor: @unchecked Sendable {
                       lap: (WritableKeyPath<MetalRenderStats, Double>) -> Void) throws -> MetalRenderResult {
         let accFormat = alphaOnly ? .rgba32Float : format ?? precision.format(for: plan)
         var gpuTime = 0.0
+        // The level pages the cells will bind, filled in one parallel pass (AB-T-0289). Not while a
+        // shrink has the render work in smaller cells to hold less at once, nor for an effect shape's
+        // nested render (what it binds first counts as gather, `ResidencyCache.mark`).
+        if prefillsLevelPages && renderCell == chunkSize && residency.building == 0 {
+            let uses = Self.boundLeaves(plan).compactMap { u in source.leaf(u.id).map { (id: u.id, leaf: $0, values: u.values) } }
+            residency.prefill(uses, cells: cellRects(region, side: chunkSize).map(cellOf))
+        }
+        lap(\.fill)
         // Effect maps and feathered masks first (their own command buffers, committed by `prepare`;
         // the cells read them). Command buffers are committed back to back and waited for once: the
         // queue runs them in order, and textures recycled between cells are hazard-tracked. Backdrop
@@ -312,6 +322,38 @@ public final class MetalCompositor: @unchecked Sendable {
             y += s
         }
         return out.filter { !$0.isEmpty }
+    }
+
+    /// Whether renders fill their level pages before their cells run (tests compare it with binding them cell by cell).
+    var prefillsLevelPages = true
+
+    /// The leaves a plan's cells bind: drawn pixels, and values of the masks that aren't feathered
+    /// (a feathered one is prepared whole). Level pages of these are what `ResidencyCache.prefill` fills.
+    static func boundLeaves(_ plan: RenderPlan) -> [(id: LeafID, values: Bool)] {
+        struct Use: Hashable { let id: LeafID; let values: Bool }
+        var out: [(id: LeafID, values: Bool)] = []
+        var seen = Set<Use>()
+        func add(_ id: LeafID, _ values: Bool) { if seen.insert(Use(id: id, values: values)).inserted { out.append((id, values)) } }
+        func mask(_ m: MaskSpec?) {
+            guard let m, !m.hasFeather else { return }
+            if let p = m.pixel { add(p, true) }
+            if let v = m.vector { add(v, true) }
+        }
+        for op in plan.ops {
+            switch op {
+            case .drawTiles(let d):
+                if let id = d.leaf { add(id, false) }
+                mask(d.mask)
+            case .fill(let f): mask(f.mask)
+            case .pushMaskShape(let m): mask(m)
+            case .mask(let m): mask(m)
+            case .popGroup(.isolated(let m)): mask(m)
+            case .popGroup(.passThrough(_, let m)): mask(m)
+            case .adjustMix(let a): mask(a.mask)
+            default: break
+            }
+        }
+        return out
     }
 
     /// The page cell containing `r`.

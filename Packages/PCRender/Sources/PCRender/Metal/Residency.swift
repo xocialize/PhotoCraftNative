@@ -95,6 +95,9 @@ final class ResidencyCache: @unchecked Sendable {
         /// Bound last by a feathered mask's build or an effect shape's render, not by a cell (a warm
         /// frame doesn't read it).
         var gather = false
+        /// The frame `prefill` brought a level page up to its source tiles in (a bind in that frame
+        /// doesn't check them again).
+        var filled: UInt64 = 0
         init(texture: any MTLTexture, buffer: (any MTLBuffer)? = nil, rect: PixelRect, format: PixelFormat?, defaultBits: [UInt32], version: UInt64, bytes: Int) {
             self.texture = texture; self.buffer = buffer; self.rect = rect; self.format = format; self.defaultBits = defaultBits
             self.generations = [:]; self.version = version; self.bytes = bytes; self.used = 0
@@ -280,12 +283,89 @@ final class ResidencyCache: @unchecked Sendable {
     /// block per source tile, rewritten when the tile's generation changed.
     private func bindReduced(_ id: LeafID, _ s: Surface, level: Int, sampled: Bool, values: Bool, cell: PixelRect, gather: Bool) -> LeafBinding {
         let outside = ResidencyCache.surfaceOutside(s, values: values)
-        let none = LeafBinding(texture: nil, origin: .zero, size: .zero, outside: outside)
+        guard var page = reducedPage(id, s, level: level, sampled: sampled, values: values, cell: cell) else {
+            return LeafBinding(texture: nil, origin: .zero, size: .zero, outside: outside)
+        }
+        let e = page.entry
+        if e.filled != frame {
+            page.check()
+            fill([page])
+        }
+        mark(e, gather: gather, made: page.made)
+        evict()
+        return LeafBinding(texture: e.texture, origin: SIMD2(page.area.x0, page.area.y0), size: SIMD2(Int32(page.area.width), Int32(page.area.height)),
+                           outside: outside)
+    }
+
+    /// Brings the level pages of `uses` (each leaf at a level, as a cell binds it) over the page
+    /// `cells` up to their source tiles in one parallel pass (AB-T-0289): a render's first frame
+    /// otherwise checks and fills them a leaf at a time as its cells bind them. The pages count as
+    /// used by this frame (no eviction takes them before the cells bind them), not as shown.
+    func prefill(_ uses: [(id: LeafID, leaf: RenderLeaf, values: Bool)], cells: [PixelRect]) {
+        var pages: [ReducedPage] = []
+        var seen = Set<ObjectIdentifier>()
+        for u in uses {
+            guard case let .reduced(s, level, sampled) = u.leaf else { continue }
+            for cell in cells {
+                if let p = reducedPage(u.id, s, level: level, sampled: sampled, values: u.values, cell: cell), p.entry.filled != frame,
+                   seen.insert(ObjectIdentifier(p.entry)).inserted {
+                    pages.append(p)
+                }
+            }
+        }
+        if pages.isEmpty { return }
+        pages.withUnsafeMutableBufferPointer { pp in
+            let P = UnsafeSendable(pp)
+            DispatchQueue.concurrentPerform(iterations: P.value.count) { P.value[$0].check() }
+        }
+        fill(pages)
+        for p in pages {
+            p.entry.used = frame
+            p.entry.filled = frame
+        }
+    }
+
+    /// A `.reduced` leaf's page for `cell`: its entry (made if missing) and what fills it.
+    struct ReducedPage {
+        let entry: Entry
+        let made: Bool
+        let surface: Surface
+        let level: Int, sampled: Bool, values: Bool
+        /// The page in level pixels, and the source tiles it covers in document pixels.
+        let area: PixelRect, areaDoc: PixelRect
+        let fmt: MTLPixelFormat, direct: Bool
+        /// Source tiles whose blocks the page lacks: (tile, its pixels or nil for the default, grid index).
+        var work: [(TileCoord, Tile?, Int)] = []
+
+        /// Finds the source tiles whose generation the page doesn't hold.
+        mutating func check() {
+            let ts = tileSize
+            let tx0 = areaDoc.x0 / ts, ty0 = areaDoc.y0 / ts, cols = Int(areaDoc.width / Int(ts)), rows = Int(areaDoc.height / Int(ts))
+            if entry.grid.count != cols * rows { entry.grid = [UInt64](repeating: .max, count: cols * rows) }
+            var out: [(TileCoord, Tile?, Int)] = []
+            let s = surface
+            entry.grid.withUnsafeBufferPointer { g in
+                for j in 0..<rows {
+                    for i in 0..<cols {
+                        let c = TileCoord(tx: tx0 + Int32(i), ty: ty0 + Int32(j)), k = j * cols + i
+                        if let t = s.tile(c) {
+                            if g[k] != t.generation { out.append((c, t, k)) }
+                        } else if g[k] != 0 {
+                            out.append((c, nil, k))
+                        }
+                    }
+                }
+            }
+            work = out
+        }
+    }
+
+    private func reducedPage(_ id: LeafID, _ s: Surface, level: Int, sampled: Bool, values: Bool, cell: PixelRect) -> ReducedPage? {
         let tiles = LevelOfDetail.documentRect(cell, level: level).tiles
-        guard let first = tiles.first, let last = tiles.last else { return none }
+        guard let first = tiles.first, let last = tiles.last else { return nil }
         let alignedDoc = first.rect.union(last.rect)
         let areaDoc = s.tileBounds.intersect(alignedDoc)
-        if areaDoc.isEmpty { return none }
+        if areaDoc.isEmpty { return nil }
         let area = LevelOfDetail.region(areaDoc, level: level), aligned = LevelOfDetail.region(alignedDoc, level: level)
         let key = Key(leaf: id, cell: SIMD2(aligned.x0, aligned.y0), values: values, level: level, sampled: sampled)
         let direct = ResidencyCache.directFormat(s.format, values: values)
@@ -305,74 +385,94 @@ final class ResidencyCache: @unchecked Sendable {
             d.usage = [.shaderRead]
             d.storageMode = .shared
             guard let buf = device.makeBuffer(length: max(rowBytes * area.height, 16), options: .storageModeShared),
-                  let tex = buf.makeTexture(descriptor: d, offset: 0, bytesPerRow: rowBytes) else { return none }
+                  let tex = buf.makeTexture(descriptor: d, offset: 0, bytesPerRow: rowBytes) else { return nil }
             let e = Entry(texture: tex, buffer: buf, rect: area, format: s.format, defaultBits: defaultBits, version: 0, bytes: area.area * bpp)
             e.rowBytes = rowBytes
             entries[key] = e
             entry = e
         }
-        guard let e = entry, let buffer = e.buffer else { return none }
-        mark(e, gather: gather, made: made)
-        // The source tiles under the area, row-major.
-        let ts = tileSize
-        let tx0 = areaDoc.x0 / ts, ty0 = areaDoc.y0 / ts, cols = Int(areaDoc.width / Int(ts)), rows = Int(areaDoc.height / Int(ts))
-        if e.grid.count != cols * rows { e.grid = [UInt64](repeating: .max, count: cols * rows) }
-        var work: [(TileCoord, Tile?, Int)] = []
-        e.grid.withUnsafeBufferPointer { g in
-            for j in 0..<rows {
-                for i in 0..<cols {
-                    let c = TileCoord(tx: tx0 + Int32(i), ty: ty0 + Int32(j)), k = j * cols + i
-                    if let t = s.tile(c) {
-                        if g[k] != t.generation { work.append((c, t, k)) }
-                    } else if g[k] != 0 {
-                        work.append((c, nil, k))
-                    }
-                }
-            }
+        guard let e = entry, e.buffer != nil else { return nil }
+        return ReducedPage(entry: e, made: made, surface: s, level: level, sampled: sampled, values: values, area: area, areaDoc: areaDoc,
+                           fmt: fmt, direct: direct != nil)
+    }
+
+    /// Writes the blocks `pages` lack, all pages' in one parallel pass, and records their tiles' generations.
+    private func fill(_ pages: [ReducedPage]) {
+        /// What a block's write needs of its page, without references (the pass shares nothing it
+        /// would retain and release from every thread).
+        struct Target {
+            let base: UnsafeMutableRawPointer
+            let rowBytes, bpp, side, x0, y0, level: Int
+            let format: PixelFormat
+            let sampled, values, direct: Bool
+            let fallback: UnsafeRawPointer
         }
-        if !work.isEmpty {
-            let side = TileReduction.blockSide(level), rowBytes = e.rowBytes
-            let base = UnsafeSendable(buffer.contents())
-            let blockRow = side * bpp
-            let fallback = ReducedBlock.defaultBlock(s, side: side, fmt: fmt, values: values, direct: direct != nil)
-            let job = work
-            let (format, x0, y0) = (s.format, Int(area.x0), Int(area.y0))
+        // Each page's block of the default pixel, for tiles the surface doesn't have.
+        let fallbacks = pages.map { p -> UnsafeMutableRawPointer in
+            let b = ReducedBlock.defaultBlock(p.surface, side: TileReduction.blockSide(p.level), fmt: p.fmt, values: p.values, direct: p.direct)
+            let m = UnsafeMutableRawPointer.allocate(byteCount: max(b.count, 1), alignment: 16)
+            b.withUnsafeBytes { if let a = $0.baseAddress { m.copyMemory(from: a, byteCount: b.count) } }
+            return m
+        }
+        defer { for m in fallbacks { m.deallocate() } }
+        // One item per block: its page, its tile (nil: the default pixel) and where it goes.
+        var items: [(page: Int, c: TileCoord, tile: Tile?)] = []
+        items.reserveCapacity(pages.reduce(0) { $0 + $1.work.count })
+        for (pi, p) in pages.enumerated() { for (c, t, _) in p.work { items.append((pi, c, t)) } }
+        if items.isEmpty { return }
+        do {
+            let targets = pages.enumerated().map { pi, p -> Target in
+                Target(base: p.entry.buffer!.contents(), rowBytes: p.entry.rowBytes, bpp: ResidencyCache.bytesPerPixel(p.fmt),
+                       side: TileReduction.blockSide(p.level), x0: Int(p.area.x0), y0: Int(p.area.y0), level: p.level, format: p.surface.format,
+                       sampled: p.sampled, values: p.values, direct: p.direct, fallback: UnsafeRawPointer(fallbacks[pi]))
+            }
+            let level = pages.map(\.level).min() ?? 0
             // Blocks in runs (a coarse level's are a few bytes: one task each would cost more than the work).
-            let run = max(1, min(job.count / (ProcessInfo.processInfo.activeProcessorCount * 4), 4096 >> (2 * max(0, 6 - level))))
-            DispatchQueue.concurrentPerform(iterations: (job.count + run - 1) / run) { part in
-                for i in (part * run)..<min(job.count, (part + 1) * run) {
-                    let (c, t, _) = job[i]
-                    let dst = base.value + (Int(c.ty) * side - y0) * rowBytes + (Int(c.tx) * side - x0) * bpp
-                    func copy(_ packed: UnsafeRawPointer) {
-                        for r in 0..<side { (dst + r * rowBytes).copyMemory(from: packed + r * blockRow, byteCount: blockRow) }
-                    }
-                    guard let t else { fallback.withUnsafeBytes { copy($0.baseAddress!) }; continue }
-                    if direct != nil {
-                        // A sampled block costs less to make than a look-up.
-                        if !sampled, let hit = ReducedTiles.shared.cached(t, format: format, level: level) {
-                            hit.withUnsafeBytes { copy($0.baseAddress!) }
-                        } else {
-                            t.bytes.withUnsafeBytes { TileReduction.block($0.baseAddress!, format: format, level: level, sampled: sampled, into: dst, rowBytes: rowBytes) }
-                        }
-                    } else {
-                        let block = ReducedTiles.shared.cached(t, format: format, level: level, sampled: sampled)
-                            ?? [UInt8](unsafeUninitializedCapacity: side * side * format.bytesPerPixel) { buf, made in
-                                t.bytes.withUnsafeBytes {
-                                    TileReduction.block($0.baseAddress!, format: format, level: level, sampled: sampled, into: UnsafeMutableRawPointer(buf.baseAddress!),
-                                                        rowBytes: side * format.bytesPerPixel)
-                                }
-                                made = side * side * format.bytesPerPixel
+            let run = max(1, min(items.count / (ProcessInfo.processInfo.activeProcessorCount * 4), 4096 >> (2 * max(0, 6 - level))))
+            items.withUnsafeBufferPointer { ib in
+                targets.withUnsafeBufferPointer { tb in
+                    let (I, T) = (UnsafeSendable(ib), UnsafeSendable(tb))
+                    DispatchQueue.concurrentPerform(iterations: (I.value.count + run - 1) / run) { part in
+                        for n in (part * run)..<min(I.value.count, (part + 1) * run) {
+                            let item = I.value[n]
+                            let g = T.value[item.page]
+                            let side = g.side, blockRow = side * g.bpp
+                            let dst = g.base + (Int(item.c.ty) * side - g.y0) * g.rowBytes + (Int(item.c.tx) * side - g.x0) * g.bpp
+                            func copy(_ packed: UnsafeRawPointer) {
+                                for r in 0..<side { (dst + r * g.rowBytes).copyMemory(from: packed + r * blockRow, byteCount: blockRow) }
                             }
-                        ReducedBlock.converted(block, format: format, side: side, values: values).withUnsafeBytes { copy($0.baseAddress!) }
+                            guard let t = item.tile else { copy(g.fallback); continue }
+                            if g.direct {
+                                // A sampled block costs less to make than a look-up.
+                                if !g.sampled, let hit = ReducedTiles.shared.cached(t, format: g.format, level: g.level) {
+                                    hit.withUnsafeBytes { copy($0.baseAddress!) }
+                                } else {
+                                    t.bytes.withUnsafeBytes {
+                                        TileReduction.block($0.baseAddress!, format: g.format, level: g.level, sampled: g.sampled, into: dst, rowBytes: g.rowBytes)
+                                    }
+                                }
+                            } else {
+                                let n = side * side * g.format.bytesPerPixel
+                                let block = ReducedTiles.shared.cached(t, format: g.format, level: g.level, sampled: g.sampled)
+                                    ?? [UInt8](unsafeUninitializedCapacity: n) { buf, made in
+                                        t.bytes.withUnsafeBytes {
+                                            TileReduction.block($0.baseAddress!, format: g.format, level: g.level, sampled: g.sampled,
+                                                                into: UnsafeMutableRawPointer(buf.baseAddress!), rowBytes: side * g.format.bytesPerPixel)
+                                        }
+                                        made = n
+                                    }
+                                ReducedBlock.converted(block, format: g.format, side: side, values: g.values).withUnsafeBytes { copy($0.baseAddress!) }
+                            }
+                        }
                     }
                 }
             }
-            for (_, t, k) in work { e.grid[k] = t?.generation ?? 0 }
-            tilesUploaded += work.count
-            blocksReduced += work.reduce(0) { $0 + ($1.1 == nil ? 0 : 1) }
         }
-        evict()
-        return LeafBinding(texture: e.texture, origin: SIMD2(area.x0, area.y0), size: SIMD2(Int32(area.width), Int32(area.height)), outside: outside)
+        for p in pages {
+            for (_, t, k) in p.work { p.entry.grid[k] = t?.generation ?? 0 }
+            tilesUploaded += p.work.count
+            blocksReduced += p.work.reduce(0) { $0 + ($1.1 == nil ? 0 : 1) }
+        }
     }
 
     private func upload(converted s: Surface, _ tr: PixelRect, values: Bool, into tex: any MTLTexture, region: MTLRegion) {

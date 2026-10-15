@@ -215,8 +215,38 @@ public enum DistanceFields {
                 }
                 dp[i] = best
             }
-            for y in 0..<h { for x in 0..<w { relax(x, y, 1) } }
-            for y in stride(from: h - 1, through: 0, by: -1) { for x in stride(from: w - 1, through: 0, by: -1) { relax(x, y, -1) } }
+            // A pixel two or more from every edge has all its neighbours inside: the same candidates in
+            // the same order, without the bounds tests (the passes stay in raster order, so the result
+            // is the same to the bit).
+            let p = dp.baseAddress!
+            @inline(__always) func interior(_ i: Int, _ sign: Int) {
+                var best = p[i]
+                @inline(__always) func take(_ o: Int, _ wt: Float) { let c = p[i + o * sign] + wt; if c < best { best = c } }
+                take(-1, 1); take(-1 - w, s2); take(-w, 1); take(1 - w, s2)
+                take(-1 - 2 * w, s5); take(1 - 2 * w, s5); take(-2 - w, s5); take(2 - w, s5)
+                p[i] = best
+            }
+            let fast = w >= 5
+            for y in 0..<h {
+                if fast && y >= 2 {
+                    relax(0, y, 1); relax(1, y, 1)
+                    var i = y * w + 2
+                    for _ in 2..<(w - 2) { interior(i, 1); i += 1 }
+                    relax(w - 2, y, 1); relax(w - 1, y, 1)
+                } else {
+                    for x in 0..<w { relax(x, y, 1) }
+                }
+            }
+            for y in stride(from: h - 1, through: 0, by: -1) {
+                if fast && y <= h - 3 {
+                    relax(w - 1, y, -1); relax(w - 2, y, -1)
+                    var i = y * w + w - 3
+                    for _ in 2..<(w - 2) { interior(i, -1); i -= 1 }
+                    relax(1, y, -1); relax(0, y, -1)
+                } else {
+                    for x in stride(from: w - 1, through: 0, by: -1) { relax(x, y, -1) }
+                }
+            }
         }
         return d
     }

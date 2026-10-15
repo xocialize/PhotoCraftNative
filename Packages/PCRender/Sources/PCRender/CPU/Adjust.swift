@@ -158,8 +158,13 @@ public enum AdjustMath {
     /// 0.50, 0.67 levels rms; −50 / −150, held out, 0.58 / 0.70. photocraft's s x + (1 − s) xᵖ
     /// (`modernBrightness`) was up to 45 levels off.
     public static func modernBrightnessPS(_ v0: Float, _ brightness: Float) -> Float {
-        let v = Double(min(max(v0, 0), 1))
-        if brightness == 0 || !brightness.isFinite { return Float(v) }
+        modernBrightnessCurve(brightness)(v0)
+    }
+
+    /// `modernBrightnessPS` at `brightness` as a function of the value: the curve's parameters (its
+    /// soft minimum's exponent and scale, found by bisection) are worked out once, not per value.
+    static func modernBrightnessCurve(_ brightness: Float) -> (Float) -> Float {
+        if brightness == 0 || !brightness.isFinite { return { v0 in Float(Double(min(max(v0, 0), 1))) } }
         let f = modernBrightnessFit
         let b = Double(min(abs(brightness), 150))
         let (p, base) = (Double(f.x) + Double(f.y) * exp(-b / Double(f.z)), Double(f.w))
@@ -169,10 +174,14 @@ public enum AdjustMath {
         for _ in 0..<60 { let m = (lo + hi) / 2; if m / sm(m) < slope { lo = m } else { hi = m } }
         let s = (lo + hi) / 2, top = sm(s)
         func fwd(_ x: Double) -> Double { min(sm(s * x) / top, 1) }
-        if brightness > 0 { return Float(fwd(v)) }
-        var (lo2, hi2) = (0.0, 1.0)
-        for _ in 0..<50 { let m = (lo2 + hi2) / 2; if fwd(m) < v { lo2 = m } else { hi2 = m } }
-        return Float((lo2 + hi2) / 2)
+        let positive = brightness > 0
+        return { v0 in
+            let v = Double(min(max(v0, 0), 1))
+            if positive { return Float(fwd(v)) }
+            var (lo2, hi2) = (0.0, 1.0)
+            for _ in 0..<50 { let m = (lo2 + hi2) / 2; if fwd(m) < v { lo2 = m } else { hi2 = m } }
+            return Float((lo2 + hi2) / 2)
+        }
     }
 
     /// Modern Brightness/Contrast's per-channel curve, `lutSize` entries: Contrast after Brightness
@@ -180,8 +189,9 @@ public enum AdjustMath {
     /// of `modernBrightnessPS`). Every channel takes the same curve (M2: the 64³ lattice is exactly
     /// per channel); the curve does not depend on the image (M2's nine pivot inputs agree exactly).
     public static func modernToneLUT(_ brightness: Float, _ contrast: Float) -> [Float] {
-        (0..<lutSize).map { k in
-            min(max(modernContrast(modernBrightnessPS(Float(k) / Float(lutSize - 1), brightness), contrast), 0), 1)
+        let curve = modernBrightnessCurve(brightness)
+        return (0..<lutSize).map { k in
+            min(max(modernContrast(curve(Float(k) / Float(lutSize - 1)), contrast), 0), 1)
         }
     }
 

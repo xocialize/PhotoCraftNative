@@ -280,9 +280,22 @@ extension MetalCompositor {
         var din: (any MTLTexture)?, dout: (any MTLTexture)?, vdout: (any MTLTexture)?
         if hasStroke && !region.isEmpty {
             let s = shape()
-            din = try me.upload(DistanceFields.distInside(s, .chamfer))
-            dout = try me.upload(DistanceFields.distOutside(s, .chamfer))
-            if spec.vectorShape && !spec.outline { vdout = try me.upload(DistanceFields.distOutside(DistanceFields.localCoverage(s), .chamfer)) }
+            // The stroke's distance fields at once (each chamfer is one sequential raster scan).
+            let vector = spec.vectorShape && !spec.outline
+            var fields = [[Float]](repeating: [], count: vector ? 3 : 2)
+            fields.withUnsafeMutableBufferPointer { fp in
+                let F = UnsafeSendable(fp)
+                DispatchQueue.concurrentPerform(iterations: F.value.count) { k in
+                    switch k {
+                    case 0: F.value[0] = DistanceFields.distInside(s, .chamfer)
+                    case 1: F.value[1] = DistanceFields.distOutside(s, .chamfer)
+                    default: F.value[2] = DistanceFields.distOutside(DistanceFields.localCoverage(s), .chamfer)
+                    }
+                }
+            }
+            din = try me.upload(fields[0])
+            dout = try me.upload(fields[1])
+            if vector { vdout = try me.upload(fields[2]) }
         }
         var frames: [(UInt32, PixelRect)] = []
         for e in items {

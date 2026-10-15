@@ -80,7 +80,7 @@ func levelBench(size: Int, drawable: (Int, Int), parity: Bool) throws {
         return f
     }
     func show(_ name: String, _ f: Frame) {
-        print("\(name.padding(toLength: 34, withPad: " ", startingAt: 0)) \(ms(f.total))  [plan \(ms(f.plan)), render \(ms(f.render)) (prepare \(ms(f.stats?.prepare ?? 0)), encode \(ms(f.stats?.encode ?? 0)), wait \(ms(f.stats?.wait ?? 0))), chain \(ms(f.chain)), display \(ms(f.display))] \(f.rect.width)×\(f.rect.height), \(f.blocks) blocks reduced")
+        print("\(name.padding(toLength: 34, withPad: " ", startingAt: 0)) \(ms(f.total))  [plan \(ms(f.plan)), render \(ms(f.render)) (fill \(ms(f.stats?.fill ?? 0)), prepare \(ms(f.stats?.prepare ?? 0)), encode \(ms(f.stats?.encode ?? 0)), wait \(ms(f.stats?.wait ?? 0))), chain \(ms(f.chain)), display \(ms(f.display))] \(f.rect.width)×\(f.rect.height), \(f.blocks) blocks reduced")
     }
 
     let centre = SIMD2(Double(size) / 2, Double(size) / 2)
@@ -112,7 +112,7 @@ func levelBench(size: Int, drawable: (Int, Int), parity: Bool) throws {
         }
         let t3 = now()
         let st = metal.lastStats
-        print("first frame at fit: a sampled preview at level \(previewLevel) \(ms(t3 - t0))  [plan \(ms(t1 - t0)), render \(ms(t2 - t1)) (prepare \(ms(st.prepare)), encode \(ms(st.encode)), wait \(ms(st.wait))), chain + display \(ms(t3 - t2))] \(r.rect.width)×\(r.rect.height), \(metal.blocksReduced - b0) blocks sampled")
+        print("first frame at fit: a sampled preview at level \(previewLevel) \(ms(t3 - t0))  [plan \(ms(t1 - t0)), render \(ms(t2 - t1)) (fill \(ms(st.fill)), prepare \(ms(st.prepare)), encode \(ms(st.encode)), wait \(ms(st.wait))), chain + display \(ms(t3 - t2))] \(r.rect.width)×\(r.rect.height), \(metal.blocksReduced - b0) blocks sampled")
     }
     let first = try frame(fitView)
     show("the fit level after it (cold)", first)

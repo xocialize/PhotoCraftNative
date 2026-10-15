@@ -9,11 +9,15 @@ import Foundation
 import PCDocument
 import PCFoundation
 
-/// `Surface.contentBounds` with each tile's scan cached by (tile generation, default pixel)
+/// `Surface.contentBounds` with each tile's scan cached by (default pixel, tile generation)
 /// (photocraft `bounds::content_bounds`), plus a cheap order-independent surface fingerprint.
 public enum ContentBounds {
-    private struct Key: Hashable { let generation: UInt64; let defaultPixel: [UInt8] }
-    nonisolated(unsafe) private static var cache: [Key: PixelRect] = [:]
+    /// Per default pixel, each tile generation's tile-local bounds. Generations are process-wide
+    /// and change with the bytes, so one names a tile's pixels.
+    nonisolated(unsafe) private static var cache: [[UInt8]: [UInt64: PixelRect]] = [:]
+    nonisolated(unsafe) private static var cached = 0
+    /// Entries kept before the cache starts over (a 30000² 20-layer document has 93,497 tiles).
+    private static let capacity = 1 << 18
     private static let lock = NSLock()
 
     /// Tight bounds of the pixels that differ from the surface's default pixel.
@@ -23,58 +27,71 @@ public enum ContentBounds {
         var out = PixelRect.empty
         var todo: [(TileCoord, Tile)] = []
         lock.lock()
-        if cache.count > 1 << 16 { cache.removeAll() }
-        s.forEachTile { c, t in
-            if let b = cache[Key(generation: t.generation, defaultPixel: dp)] {
-                if !b.isEmpty { out = out.union(b.offsetBy(dx: c.rect.x0, dy: c.rect.y0)) }
-            } else {
-                todo.append((c, t))
+        if let known = cache[dp] {
+            s.forEachTile { c, t in
+                if let b = known[t.generation] {
+                    if !b.isEmpty { out = out.union(b.offsetBy(dx: c.rect.x0, dy: c.rect.y0)) }
+                } else {
+                    todo.append((c, t))
+                }
             }
+        } else {
+            s.forEachTile { c, t in todo.append((c, t)) }
         }
         lock.unlock()
         if todo.isEmpty { return out }
         let bpp = s.format.bytesPerPixel
+        // One tile row of the default pixel: a row (or any run of it) that equals it holds nothing.
+        var defaultRow = [UInt8](repeating: 0, count: Int(tileSize) * bpp)
+        for i in defaultRow.indices { defaultRow[i] = dp[i % bpp] }
         var found = [PixelRect](repeating: .empty, count: todo.count)
         found.withUnsafeMutableBufferPointer { fp in
-            let F = UnsafeSendable(fp)
-            let T = todo
-            DispatchQueue.concurrentPerform(iterations: T.count) { i in
-                F.value[i] = scan(T[i].1, dp, bpp)
+            defaultRow.withUnsafeBytes { d in
+                let (F, D) = (UnsafeSendable(fp), UnsafeSendable(d.baseAddress!))
+                let T = todo
+                DispatchQueue.concurrentPerform(iterations: T.count) { i in
+                    F.value[i] = scan(T[i].1, D.value, bpp)
+                }
             }
         }
         lock.lock()
+        if cached + todo.count > capacity { cache.removeAll(); cached = 0 }
+        var known = cache.removeValue(forKey: dp) ?? [:]
         for (i, (c, t)) in todo.enumerated() {
-            cache[Key(generation: t.generation, defaultPixel: dp)] = found[i]
+            if known.updateValue(found[i], forKey: t.generation) == nil { cached += 1 }
             if !found[i].isEmpty { out = out.union(found[i].offsetBy(dx: c.rect.x0, dy: c.rect.y0)) }
         }
+        cache[dp] = known
         lock.unlock()
         return out
     }
 
-    /// Tile-local bounds of the pixels of `t` that differ from `dp`.
-    private static func scan(_ t: Tile, _ dp: [UInt8], _ bpp: Int) -> PixelRect {
-        let ts = Int(tileSize)
-        var x0 = Int.max, y0 = Int.max, x1 = 0, y1 = 0
-        t.bytes.withUnsafeBytes { p in
-            dp.withUnsafeBytes { d in
-                func differs(_ o: Int) -> Bool {
-                    for k in 0..<bpp where p[o + k] != d[k] { return true }
-                    return false
+    /// Tile-local bounds of the pixels of `t` that differ from the default pixel (`row`: a tile row
+    /// of it). Rows that equal it are skipped by `memcmp`; within a row that differs, only the
+    /// pixels left of the bounds found so far or right of them are compared again.
+    private static func scan(_ t: Tile, _ row: UnsafeRawPointer, _ bpp: Int) -> PixelRect {
+        let ts = Int(tileSize), rowBytes = ts * bpp
+        return t.bytes.withUnsafeBytes { p -> PixelRect in
+            guard let base = p.baseAddress else { return .empty }
+            let rows = min(p.count / rowBytes, ts)
+            var minX = ts, maxX = -1, minY = -1, maxY = -1
+            for y in 0..<rows {
+                let r = base + y * rowBytes
+                if memcmp(r, row, rowBytes) == 0 { continue }
+                if minY < 0 { minY = y }
+                maxY = y
+                if minX > 0, memcmp(r, row, minX * bpp) != 0 {
+                    var x = 0
+                    while x < minX { if memcmp(r + x * bpp, row, bpp) != 0 { minX = x; break }; x += 1 }
                 }
-                for y in 0..<ts {
-                    let row = y * ts * bpp
-                    var first = -1
-                    for x in 0..<ts where differs(row + x * bpp) { first = x; break }
-                    if first < 0 { continue }
-                    var last = first
+                let from = maxX + 1
+                if from < ts, memcmp(r + from * bpp, row, (ts - from) * bpp) != 0 {
                     var x = ts - 1
-                    while x > first { if differs(row + x * bpp) { last = x; break }; x -= 1 }
-                    x0 = min(x0, first); x1 = max(x1, last + 1)
-                    y0 = min(y0, y); y1 = y + 1
+                    while x > maxX { if memcmp(r + x * bpp, row, bpp) != 0 { maxX = x; break }; x -= 1 }
                 }
             }
+            return minY < 0 ? .empty : PixelRect(x0: Int32(minX), y0: Int32(minY), x1: Int32(maxX + 1), y1: Int32(maxY + 1))
         }
-        return x0 == Int.max ? .empty : PixelRect(x0: Int32(x0), y0: Int32(y0), x1: Int32(x1), y1: Int32(y1))
     }
 
     /// Whether `s` has a materialised tile meeting `r` (photocraft `Surface::has_tiles_in`).
