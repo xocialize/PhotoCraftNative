@@ -70,12 +70,15 @@ PCDocument ──DocumentPlanner──▶ RenderPlan (DrawOp stack program) + Do
 | `Metal/MetalFilters.swift`, `Shaders/PCR8Filters.metal` | (new) | filter adjustment layers on the GPU: Grain / Add Noise kernels, a blur's backdrop program rendered and blurred before the cells |
 | `Metal/MetalKernels.swift` | gpu lib.rs pipelines | `PCROp` (288 B), pipelines, `AccumulatorPrecision`, `TexturePool` |
 | `Metal/CanvasMemory.swift` | (new) | GPU footprint (`CompositorFootprint`, `DisplayFootprint`), `memoryBudget` caps, views (`RenderView`), the `relieve` ladder (`ReliefLevel`, `ReliefReason`, `Relief`) |
+| `Level/LevelOfDetail.swift` | (new; photocraft `proxy.rs` is the idea) | levels of detail: `RenderPlan.atLevel`, `LevelSource`, level rects and versions |
+| `Level/TileReduction.swift` | (new) | tile blocks (box means and sampled previews, SIMD for RGBA8 / Gray8), `ReducedTiles` cache |
 | `Shaders/PCR0–6*.metal` | compose.wgsl | `pcr_` kernels: compose, adjust, fill, maps, effects, masks |
 | `Display/CanvasRenderer.swift`, `Shaders/PCR7Display.metal` | gpu display sink; Compositor v1.5 level selection | zoom / pan, checkerboard, nearest ≥ 100 %, premultiplied halving chain below 50 %, 33³ LUT pass, MTKView / CAMetalLayer |
 | `Bench/BenchmarkDocuments.swift` | (new) | procedural `effects4` / `realistic20` scenes |
 | `Tests/PCRenderTests/PhotoshopM1Tests.swift` | (new) | Photoshop 27.11 function-oracle fits (batches M1, M2), PCIO's phase-4 requests, B/C modes |
 | `Sources/PCRenderBench/main.swift` | (new) | `swift run -c release PCRenderBench` |
 | `Sources/PCRenderBench/MemoryBench.swift` | (new) | `PCRenderBench --memory`: accessors against the device's count, `relieve` timing, the 16 GB tier, an admission against closed documents' pages |
+| `Sources/PCRenderBench/LevelBench.swift` | (new) | `PCRenderBench --level` (a canvas's frames at levels of detail) and `--reduce` (reduction throughput) |
 
 ## Phase 2: planner and leaves
 
@@ -699,6 +702,120 @@ their blend mode, with the depth quantisation after them. New; no photocraft cou
   averages 1/scale² document pixels). When `RenderPlan.atLevel` lands, `DrawOp.atLevel` maps
   `.filter(f)` to `f.atLevel(level)`, and `.backdropFilter(b)` to its spec `atLevel` with its
   program's ops mapped too.
+
+## Levels of detail: compositing large documents from reduced sources (AB-T-0256)
+
+A canvas showing a document smaller than its pixels needs the composite at the screen's density,
+not at the document's. `DocumentCompositor.renderReduced` gives that exactly but composites every
+pixel first, and photocraft's proxy documents (nearest-neighbour, refused for effects and vector
+masks) were never ported. `MetalCompositor.render(plan, region:, level:)` composites the plan of a
+document region at 2^-level from reduced sources, in level pixels
+(`LevelOfDetail.region(region, level:)`), with `into:` / `at:` for a texture a canvas keeps.
+
+* **The plan at the level.** `RenderPlan.atLevel` rescales what the plan says in document pixels:
+  the canvas, effect sizes, distances, regions, bounds and reference points, mask feathers, fill
+  frames, pattern scale and phase, artboard rects. Layout rects round to the nearest level pixel,
+  coverage rects outward. Blend modes, opacities, Blend If, adjustments and the stack stay, except
+  text gamma, which is turned off: a level pixel's glyph coverage is a mean of whole-pixel coverages,
+  which mix linearly. Noise amplitudes of shadows and glows scale with the level (a level pixel
+  averages 4^level independent samples).
+* **Reduced sources.** `LevelSource` serves the leaves at the level. A surface becomes
+  `RenderLeaf.reduced(surface, level:)`: each source tile reduces to a block of (256 >> level)²
+  pixels of its own format, the block mean with colour weighted by alpha (as `renderReduced` averages
+  a composite), integer samples rounded half up. Blocks are made where a render reads them, never for
+  the whole document unless it is all in view. Derived leaves are built at the level when the planner
+  gave a level recipe (vector-mask coverage of the scaled path, exact area coverage; effect shapes
+  from the level's nested program), else reduced from the full-resolution leaf. Levels go to
+  `LevelOfDetail.maxLevel` (8: one level pixel per source tile).
+* **On the GPU.** Level pages are residency entries keyed by (leaf, level cell, level); a page
+  rewrites the block of a source tile only when that tile's generation changed, so an edit costs its
+  tiles' blocks (a 256² change at fit: 4 blocks). Pages are linear textures over shared buffers, and
+  blocks are reduced in parallel straight into the page's memory. `ReducedTiles.shared` (256 MiB,
+  trimmed by `MemoryPressureRelay`) keeps blocks the CPU reads (CPU renders at a level, rebuilt pages).
+* **Effect shapes on the GPU, at every level.** An effect shape that is the alpha of a program (a
+  layer's content, a Transparency Shapes Layer mask) is rendered by a nested plan on the GPU
+  (`pcr_copy_alpha` into r32Float); the CPU builds the rest (filled-shape outlines) and gets the GPU's
+  shape back only where an effect needs it (spread and choke, precise glows, chisel bevels, strokes'
+  distance fields and gradient frames). The CPU reference keeps its own nested CPU plans. On
+  realistic20 at 8192², a cold full-resolution frame of the whole document went from 2,646 ms
+  (2,263 ms of it building effect maps, mostly the nested CPU shape renders) to 601 ms.
+* **Effect maps and feathered masks over what a render can see** (every level, full resolution
+  too). A render's effect maps cover the effect region within the render grown by the effects' reach
+  (`EffectMath.margin`), and its feathered masks their area within the render grown by the feather's
+  reach. No effect reads the shape further, so the render's pixels are those of whole-layer maps
+  (`effectMapsOfARegionAreTheWholeLayersThere`: ≤ 0.51 levels at levels 0 and 2), and a view's maps
+  stay bounded by the view. A map or mask that fits keeps its whole-region key and is shared;
+  gradient strokes, laid out in the shape's bounds, keep the whole region. Before this, a canvas
+  drawing a 30000² document's 12800 × 8320 view at full resolution tile by tile built 1.4 GB maps of a
+  whole layer for every tile and evicted them again: 84 s to compose; 1.08 s after.
+* **Residency bookkeeping.** An entry records the frame a cell last bound it (`shown`: what a view
+  shows); an effect shape's nested render marks gather only the pages it made, and the end-of-frame
+  eviction may take what the finished render used but no view shows. A level page keeps its source
+  tiles' generations in a dense grid, and makes its blocks in runs.
+* **Sampled previews.** `render(…, level:, sampled: true)` reads one pixel per block (its centre)
+  instead of averaging: a cold preview of a 20 GB document reads about 4^-level of it. It is a stand-in
+  until the averaged level lands, with no parity claim beyond being the composite's pixels at the
+  block centres (single layer: exact).
+* **The display.** `CanvasRenderer.setComposite(_:rect:chainInto:)` sets a composite without waiting
+  (the chain encoded into the caller's command buffer, or left out), and `updateChain(into:damage:)`
+  brings the chain up where a composite changed. `show(…, level:)` places nothing: the view's zoom is
+  zoom × 2^level.
+* **Accounting and shrink.** Level pages count in `CompositorFootprint.pages`, broken out as
+  `levelPages`, and in `visiblePages` when a view's render bound them; `relieve(.offscreen)` sheds the
+  ones no view uses (other levels' and full-resolution pages included), never the view's. Effect maps
+  and masks at a level are ordinary entries of their caches. A view at a level therefore has a floor
+  bounded by the viewport: its composite and chain, and the visible pages and effect maps at that level.
+
+**Parity with the exact reduction** (`renderReduced` of the full-resolution CPU composite, in
+premultiplied 8-bit levels; `LevelOfDetailTests`):
+
+| Document | Levels | max | mean | over 2 levels | over 8 levels |
+|---|---|---|---|---|---|
+| One layer (the reduction itself: rounding) | 1–5 | ≤ 1.0 | ≤ 0.2 | 0 | 0 |
+| realistic20 1024² without its effects (feathered and painted masks, eight adjustments, blend modes, Blend If, clipping, fills, type) | 1, 2, 3 | 9.5, 11.3, 20.0 | 0.33, 0.37, 0.41 | 2.0–5.4 % | 0.005–0.085 % |
+| realistic20 1024² (strokes, bevels, shadows of 1.5–8 px: under 2 level px from level 2) | 1, 2, 3 | 101, 143, 177 | 0.47, 0.74, 1.13 | 3.7–9.4 % | 0.8–4.0 % |
+| effects4 1024² | 1, 2, 3 | 70, 134, 164 | 0.22, 0.52, 1.10 | 1.9–5.8 % | 0.6–3.9 % |
+| realistic20 4096² (GPU reference) | 1, 2, 3 | 121, 135, 149 | 0.35, 0.40, 0.51 | 2.4–4.3 % | 0.17–0.89 % |
+| **realistic20 30000² at fit** (`PCRenderBench --level --parity`) | 3 | 162 | **0.37** | 1.96 % | **0.046 %** |
+
+**The bound this states:** a level composite of layers, masks, blend modes and adjustments is within a
+mean of 0.5 level of the exact reduction, with under 0.1 % of pixels past 8 levels (the outliers are
+partial-coverage edges under nonlinear modes and adjustments). Layer effects add error where they are
+thin at the level: a stroke, bevel or shadow offset under about 2 level pixels is computed at the
+level (as Photoshop's own zoomed-out previews of layer styles are), and its one-pixel ring can be off
+by up to ~180 levels. Pixels past 8 levels stay under 1 % where effects are at least 2 level pixels
+(4096² at levels 1–3, 30000² at fit) and reach 4 % at the 1024² scenes' level 3. The GPU against the
+CPU at the same level keeps the full-resolution bound (≤ 1 level measured). Not scaled: Dissolve
+(per level pixel), pattern fills (sampled at the level, not filtered), shadow offsets (whole level
+pixels).
+
+Filter adjustment layers (AB-T-0258) at a level (`filterLayersAtALevel`): the GPU within 1.5 levels
+of the CPU level render. Blurs, whose lengths shrink with the level, are within a mean of 6 levels of
+the exact reduction (Gaussian at most 1.65; motion blurs, resampled along their direction on the
+coarser grid, 5.44 at level 2). Grain and Add Noise draw fresh samples at the level with the spread
+an average of them has: no pixel matches, and the mean holds (bias at most 2 levels, up to 17.2 on a
+channel where the noise clips).
+
+**Timings** (`PCRenderBench --level --size 30000 --parity`: realistic20 at 30000², 20 layers, 93,497
+tiles, 19.5 GiB of pixels; 5K drawable; Release, M5 Max, GPU idle). Each is one render of the view's
+whole region plus a margin, waited for. A canvas makes these off its main thread, in tiles
+(PixelAgencyEditor's `CanvasJob`):
+
+| Frame | Region at the level | ms | of which |
+|---|---|---|---|
+| First frame at fit: a sampled preview, level 5 | 938² | 185 | plan 32 (cold), prepare 53, encode 57, chain and display 33 |
+| Fit, level 3, cold | 3750² | 569 | prepare 127, encode 425 (89,337 blocks reduced) |
+| Fit again, warm (min of 5) | 3750² | 41 | |
+| Zoom 0.154, level 2 | 7500 × 6564 | 919 | prepare 372, encode 530 |
+| Zoom 0.307, level 1 | 10417 × 6771 | 1,271 | prepare 535, encode 717 |
+| Zoom 0.5, level 0 (cropped effect maps) | 12800 × 8320 | 1,132 | wait 557 |
+| Zoom 1, level 0 | 6400 × 4160 | 295 | wait 259 |
+| Pan at level 1, past the margin | 9375–10417 × 6771 | 690–761 | |
+| A 256² change at fit | 4 blocks | 16.6 | |
+
+At fit the view holds 542.6 MiB (visible level pages 306.9, visible effect maps 89.0, display 146.7:
+composite 109.3 and chain 37.4), with a 203.9 MiB transient. Before this, the same frame at full
+resolution averaged down would have read all 19.5 GiB.
 
 ## For the next phase
 
