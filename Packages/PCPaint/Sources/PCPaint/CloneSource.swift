@@ -253,6 +253,9 @@ public struct LiveRetouch {
     public enum Paint {
         case clone(source: Surface, map: CloneMapping)
         case history(Surface)
+        /// The paint image over a rectangle from the caller (an engine's own sampler, e.g. of the composite); nil
+        /// leaves the rectangle as it was.
+        case sampled((PixelRect) -> Region?)
     }
 
     public private(set) var surface: Surface
@@ -312,6 +315,9 @@ public struct LiveRetouch {
             guard let s = Retouch.cloneSample(source, rect: r, map: map) else { return .empty }
             img = s
         case .history(let h): img = Region.read(h, r)
+        case .sampled(let f):
+            guard let s = f(r) else { return .empty }
+            img = s
         }
         var region: [Float] = []
         pre.readRegionReusing(r, &region)

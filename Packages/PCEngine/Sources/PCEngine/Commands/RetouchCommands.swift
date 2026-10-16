@@ -134,6 +134,19 @@ enum RetouchCommands: CommandModule {
         return dmg
     }
 
+    /// The live stroke offered for exactly this command, params and points (`LiveRetouchStroke.offer`), committed as
+    /// one step: its pixels instead of running the stroke again. Nil when nothing matching was offered (an offer is
+    /// withdrawn either way).
+    static func runOffered(_ s: Session, _ cmd: String, _ label: String, _ id: LayerId?, _ p: JSONValue, _ stroke: Stroke) throws -> PixelRect? {
+        guard let live = LiveRetouchStroke.take(s, cmd, p, stroke.points) else { return nil }
+        let dmg = try s.edit(label) { doc, _ in
+            try Channels.withTargetSurface(&doc, layer: id, p) { surf, _ in surf = live.surface }
+            return live.bounds
+        }
+        s.noteDamage(dmg)
+        return dmg
+    }
+
     // MARK: Sampling sources
 
     /// Which pixels Clone Stamp / Healing Brush sample.
@@ -266,6 +279,7 @@ enum RetouchCommands: CommandModule {
         let aligned = flag(p, "aligned", true)
         let map = try CloneSourceCommands.mapping(s, p, first: firstPoint(stroke), cmd)
         let off = map.offset
+        if let dmg = try runOffered(s, cmd, "Clone Stamp", id, p, stroke) { return cloneResult(dmg, off, aligned, p, stroke).setting("fromLive", true) }
         let renderer = s.services.renderer
         let dmg = try runStroke(s, "Clone Stamp", id, p) { pre, surf, sel, lock in
             let (bounds, cov) = Retouch.strokeCoverage(stroke)
@@ -498,10 +512,22 @@ enum RetouchCommands: CommandModule {
             return Float(min(max(r, 0.1), 100))
         }
 
-        /// How far around each dab the effect reads (Blur and Sharpen read a neighbourhood).
+        /// How far around each dab the effect reads: Blur and Sharpen read a neighbourhood, and Smudge picks up
+        /// as far as its carried colour reaches (its radius), so what it picks up never depends on where the
+        /// working copy ends, and a live stroke's growing copy gives the same pixels (AB-T-0299).
         var halo: Int32 {
-            if case .focus(_, _, _, let sigma) = self { return Int32((sigma * 3).rounded(.up)) + 1 }
-            return 0
+            switch self {
+            case .focus(_, _, _, let sigma): Int32((sigma * 3).rounded(.up)) + 1
+            case .smudge(_, _, let maxSize): Int32((maxSize / 2).rounded(.up)) + 2
+            default: 0
+            }
+        }
+
+        /// Smudge's state at the start of a stroke in `fmt` (nil for the other tools).
+        func smudgeState(_ fmt: PixelFormat) -> Smudge? {
+            guard case let .smudge(strength, finger, maxSize) = self else { return nil }
+            // Premultiplied mixing: transparent pixels carry no colour, so no dark fringes.
+            return Smudge(strength: strength, finger: finger.map { fromRGBA(fmt, $0) }, maxBrushSize: maxSize).withAlpha(alphaIndex(fmt))
         }
 
         var samplesAllLayers: Bool {
@@ -539,10 +565,8 @@ enum RetouchCommands: CommandModule {
                         }
                     }
                 }
-            case let .smudge(strength, finger, maxSize):
-                let fingerPx = finger.map { fromRGBA(fmt, $0) }
-                // Premultiplied mixing: transparent pixels carry no colour, so no dark fringes.
-                var sm = Smudge(strength: strength, finger: fingerPx, maxBrushSize: maxSize).withAlpha(alphaIndex(fmt))
+            case .smudge:
+                var sm = smudgeState(fmt)!
                 return { work, fp in sm.dab(&work, fp) }
             }
         }
@@ -591,6 +615,7 @@ enum RetouchCommands: CommandModule {
     static func dabCommand(_ s: Session, _ p: JSONValue, _ cmd: String) throws -> JSONValue {
         let (stroke, id) = try parseBrush(s, p, cmd)
         let (tool, label) = try DabTool.parse(s, cmd, p, stroke)
+        if let dmg = try runOffered(s, cmd, label, id, p, stroke) { return ["damage": .rect(dmg), "fromLive": true] }
         let all = tool.samplesAllLayers && sampleAllLayers(p)
         let renderer = s.services.renderer
         let dmg = try runStroke(s, label, id, p) { pre, surf, sel, lock in
