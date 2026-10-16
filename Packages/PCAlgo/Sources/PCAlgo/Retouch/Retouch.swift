@@ -122,13 +122,14 @@ public enum Retouch {
         return out
     }
 
-    /// Unsharp-mask sharpen of a window: `v + amount·(v − blur(v))` (σ 1); with `protectDetail`
-    /// each result is clamped to its 3×3 neighbourhood's range. Alpha is left unchanged.
+    /// Unsharp-mask sharpen of a window: `v + amount·(v − blur(v))`, the blur's σ `sigma` (1 by
+    /// default); with `protectDetail` each result is clamped to its 3×3 neighbourhood's range.
+    /// Alpha is left unchanged.
     public static func localSharpen(_ data: [Float], width w: Int, height h: Int, channels ch: Int, alpha: Int?,
-                                    window win: (Int, Int, Int, Int), amount: Float, protectDetail: Bool) -> [Float] {
+                                    window win: (Int, Int, Int, Int), amount: Float, protectDetail: Bool, sigma: Float = 1) -> [Float] {
         let (x0, y0, x1, y1) = win
         let ow = x1 - x0
-        let blur = localBlur(data, width: w, height: h, channels: ch, alpha: alpha, window: win, sigma: 1)
+        let blur = localBlur(data, width: w, height: h, channels: ch, alpha: alpha, window: win, sigma: sigma)
         var out = [Float](repeating: 0, count: blur.count)
         for y in y0..<y1 {
             for x in x0..<x1 {

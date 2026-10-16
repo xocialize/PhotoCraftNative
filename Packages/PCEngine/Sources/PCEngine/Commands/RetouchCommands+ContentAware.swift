@@ -58,13 +58,14 @@ extension RetouchCommands {
                                             sigma: sigma)
         }
 
-        /// Unsharp-mask sharpen of a window (as `localBlur`); with `protectDetail` each result is
-        /// clamped to its 3×3 neighbourhood's range. Alpha is left unchanged.
+        /// Unsharp-mask sharpen of a window (as `localBlur`), its blur's σ `sigma`; with
+        /// `protectDetail` each result is clamped to its 3×3 neighbourhood's range. Alpha is left
+        /// unchanged.
         static func localSharpen(_ data: [Float], _ w: Int, _ h: Int, _ ch: Int, _ alpha: Int?, _ win: (Int, Int, Int, Int), _ amount: Float,
-                                 _ protectDetail: Bool) -> [Float] {
+                                 _ protectDetail: Bool, sigma: Float = 1) -> [Float] {
             guard validWindow(data, w, h, ch, win) else { return [] }
             return PCAlgo.Retouch.localSharpen(data, width: w, height: h, channels: ch, alpha: alpha.flatMap { $0 < ch ? $0 : nil }, window: win,
-                                               amount: amount, protectDetail: protectDetail)
+                                               amount: amount, protectDetail: protectDetail, sigma: sigma)
         }
 
         /// Solve `Δv = 0` on `unknown` pixels with Dirichlet values from the known pixels of `v`

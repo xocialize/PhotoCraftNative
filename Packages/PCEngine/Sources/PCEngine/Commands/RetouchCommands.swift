@@ -477,8 +477,10 @@ enum RetouchCommands: CommandModule {
                 return (.sponge(saturate: saturate, vibrance: flag(p, "vibrance", true)), "Sponge Tool")
             case "paint.blur", "paint.sharpen":
                 let sharpen = cmd == "paint.sharpen"
+                // Radius: the Gaussian's σ. Without one, Blur's follows the brush and Sharpen's unsharp mask is 1 px.
+                let sigma = try focusRadius(p, cmd) ?? (sharpen ? 1 : clampR(stroke.brush.size * 0.03, 1, 4))
                 let tool = DabTool.focus(sharpen: sharpen, strength: clampR(num(p, "strength", 50), 1, 100) / 100, protect: flag(p, "protectDetail", true),
-                                         sigma: clampR(stroke.brush.size * 0.03, 1, 4))
+                                         sigma: sigma)
                 return (tool, sharpen ? "Sharpen Tool" : "Blur Tool")
             case "paint.smudge":
                 let finger = flag(p, "fingerPainting", false) ? s.tools.foreground : nil
@@ -486,6 +488,14 @@ enum RetouchCommands: CommandModule {
             default:
                 throw bad(cmd, "not a sequential-dab tool")
             }
+        }
+
+        /// Blur's and Sharpen's optional `"radius"`, in pixels (the Gaussian's σ), 0.1…100; nil when
+        /// it's absent.
+        static func focusRadius(_ p: JSONValue, _ cmd: String) throws -> Float? {
+            guard let v = p["radius"], v != .null else { return nil }
+            guard let r = v.doubleValue, r.isFinite, r > 0 else { throw bad(cmd, "`radius` must be a number of pixels above 0 (0.1..100)") }
+            return Float(min(max(r, 0.1), 100))
         }
 
         /// How far around each dab the effect reads (Blur and Sharpen read a neighbourhood).
@@ -517,7 +527,8 @@ enum RetouchCommands: CommandModule {
                     if r.isEmpty { return }
                     let (w, h, n) = (work.width, work.height, work.ch)
                     let win = (Int(r.x0 - work.rect.x0), Int(r.y0 - work.rect.y0), Int(r.x1 - work.rect.x0), Int(r.y1 - work.rect.y0))
-                    let out = sharpen ? Kernels.localSharpen(work.data, w, h, n, a, win, 1, protect) : Kernels.localBlur(work.data, w, h, n, a, win, sigma)
+                    let out = sharpen ? Kernels.localSharpen(work.data, w, h, n, a, win, 1, protect, sigma: sigma)
+                                      : Kernels.localBlur(work.data, w, h, n, a, win, sigma)
                     let rw = r.width
                     for y in r.y0..<r.y1 {
                         for x in r.x0..<r.x1 {
@@ -629,8 +640,8 @@ enum RetouchCommands: CommandModule {
             dab("paint.dodge", "Dodge", #","range":"shadows|midtones|highlights"="midtones","exposure":1..100=50,"protectTones":bool=true"#),
             dab("paint.burn", "Burn", #","range":"shadows|midtones|highlights"="midtones","exposure":1..100=50,"protectTones":bool=true"#),
             dab("paint.sponge", "Sponge", #","mode":"desaturate|saturate"="desaturate","vibrance":bool=true (flow = sponge strength)"#),
-            dab("paint.blur", "Blur", #","strength":1..100=50,"sampleAllLayers":bool=false"#),
-            dab("paint.sharpen", "Sharpen", #","strength":1..100=50,"protectDetail":bool=true,"sampleAllLayers":bool=false"#),
+            dab("paint.blur", "Blur", #","strength":1..100=50,"radius":0.1..100 px (the Gaussian's sigma)=3 % of size (1..4),"sampleAllLayers":bool=false"#),
+            dab("paint.sharpen", "Sharpen", #","strength":1..100=50,"radius":0.1..100 px (the unsharp mask's sigma)=1,"protectDetail":bool=true,"sampleAllLayers":bool=false"#),
             dab("paint.smudge", "Smudge", #","strength":1..100=50,"fingerPainting":bool=false (starts with the foreground colour),"sampleAllLayers":bool=false"#),
             CommandSpec("paint.historyBrush", "History Brush",
                         params: brushParams(#","state":index (into history.entries; default 0 = the oldest held state, normally the Open snapshot)"#),
