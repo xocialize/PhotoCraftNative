@@ -142,12 +142,31 @@ extension RetouchCommands {
         // that mismatch is what the membrane corrects.
         let domain = InpaintKit.dilate(width: w, height: h, mask: hole, radius: 2)
         let healMask = InpaintKit.dilate(width: w, height: h, mask: hole, radius: 1)
+        /// `paint` laid over the stroke's footprint by its coverage and the brush's opacity.
+        func paintSpot(_ surf: inout Surface, _ paint: Region) -> PixelRect {
+            let dmg = bounds.intersect(regionRect)
+            var dmgCov: [Float] = []
+            dmgCov.reserveCapacity(dmg.area)
+            if !dmg.isEmpty {
+                for y in dmg.y0..<dmg.y1 { for x in dmg.x0..<dmg.x1 { dmgCov.append(strokeCov[img.index(x, y)]) } }
+            }
+            return PCPaint.Retouch.applyCoverage(&surf, rect: dmg, cov: dmgCov, opacity: stroke.brush.opacity, selection: sel,
+                                                 lockTransparency: lock, paint: paint, blend: .normal)
+        }
         func contentAware(_ data: [Float]) -> [Float] {
             InpaintKit.complete(width: w, height: h, channels: ch, image: data, hole: domain) ?? Kernels.membraneFill(w, h, ch, data, domain)
         }
         let filled: [Float]
         switch kind {
         case .contentAware:
+            // Compositor's multi-scale PatchMatch rebuilds the spot itself, its tone already fitted to the edge, so
+            // an edge running through it carries on (AB-T-0299): laid in by coverage, with no Poisson blend.
+            if var rebuilt = InpaintKit.patchFill(width: w, height: h, channels: ch, image: img.data, hole: hole, alpha: alphaIndex(fmt),
+                                                  seed: 0x5eed) {
+                PCPaint.Retouch.clampSamples(fmt, &rebuilt)
+                return paintSpot(&surf, Region(rect: regionRect, ch: ch, data: rebuilt))
+            }
+            // Nothing to copy from: the completion's own fallback, healed in.
             filled = contentAware(img.data)
         case .createTexture:
             filled = InpaintKit.synthesize(width: w, height: h, channels: ch, image: img.data, hole: domain, block: Int(clampR(size / 4, 6, 32)),
@@ -161,15 +180,7 @@ extension RetouchCommands {
             }
         }
         let src = Region(rect: regionRect, ch: ch, data: filled)
-        let healed = healRegion(fmt, src, img, healMask)
-        let dmg = bounds.intersect(regionRect)
-        var dmgCov: [Float] = []
-        dmgCov.reserveCapacity(dmg.area)
-        if !dmg.isEmpty {
-            for y in dmg.y0..<dmg.y1 { for x in dmg.x0..<dmg.x1 { dmgCov.append(strokeCov[img.index(x, y)]) } }
-        }
-        return PCPaint.Retouch.applyCoverage(&surf, rect: dmg, cov: dmgCov, opacity: stroke.brush.opacity, selection: sel, lockTransparency: lock,
-                                             paint: healed, blend: .normal)
+        return paintSpot(&surf, healRegion(fmt, src, img, healMask))
     }
 
     static func spotHealing(_ s: Session, _ p: JSONValue) throws -> JSONValue {
