@@ -33,8 +33,10 @@ enum IntelligenceBridge: CommandModule {
     static func register(into r: inout CommandRegistry) {
         for d in IntelligenceCommands.all {
             let run = runner(d.id)
+            let fill = d.id == "edit.contentAwareFill"
             var spec = CommandSpec(d.id, d.label, menu: d.menu, shortcut: d.shortcut, params: d.params, module: module(of: d),
-                                   journal: d.journal, enabled: { s, _ in disabledReason(s, d) }, run: run)
+                                   journal: d.journal, enabled: { s, p in disabledReason(s, d) ?? (fill ? fillSourceRefusal(s, p) : nil) },
+                                   run: run)
             if d.id == "select.objectFinder" { spec.kind = .instant }
             if d.id == "edit.contentAwareFill" {
                 spec.params = ##"{"sampling":"auto|rectangular|custom","margin":px?,"area":[x,y,w,h]?,"channel":index|name?,"colorAdaptation":"default|none|high|veryHigh","rotationAdaptation":"none|low|medium|high|full","scale":bool=false,"mirror":bool=false,"output":"current|new|duplicate","seed":u64=1,"quality":"fast|best"="best"} → {layer,filled,window:[x,y,w,h],tier,engine} (quality picks an injected model's tier; PatchMatch, PCIntelligence's classical tier, takes the rest)"##
@@ -280,6 +282,66 @@ enum IntelligenceBridge: CommandModule {
         })
     }
 
+    /// The alpha channel `"channel"` names (an index or a name), for custom sampling.
+    static func fillChannel(_ doc: Document, _ p: JSONValue) -> Surface? {
+        p["channel"].flatMap { v in
+            if let i = v.uint64Value, Int(i) < doc.channels.count { return doc.channels[Int(i)].surface }
+            if let n = v.stringValue { return doc.channels.first { $0.name == n }?.surface }
+            return nil
+        }
+    }
+
+    /// Why Content-Aware Fill can't run: its selection leaves no 7 × 7 patch of unselected pixels in the area the
+    /// fill samples from, so there's nothing to make the fill from (it came back black; Photoshop and Compositor
+    /// refuse). Params the runner rejects pass here, for it to explain.
+    static func fillSourceRefusal(_ s: Session, _ p: JSONValue) -> String? {
+        guard let doc = s.active?.doc, let sel = doc.selection else { return nil }
+        let canvas = doc.bounds
+        let hole = sel.contentBounds.intersect(canvas)
+        if hole.isEmpty { return nil }
+        let sampling: ContentAwareFillOptions.Sampling
+        switch p["sampling"]?.stringValue ?? "auto" {
+        case "auto": sampling = .auto
+        case "rectangular": sampling = .rectangular(margin: p["margin"]?.intValue)
+        case "custom":
+            if let r = Params.rect(p["area"]) { sampling = .custom(r) }
+            else if let m = fillChannel(doc, p) { sampling = .custom(m.contentBounds) }
+            else { return nil }
+        default: return nil
+        }
+        if unselectedPatch(sel, hole, sampling.window(hole: hole, canvas: canvas)) { return nil }
+        return "Not enough unselected pixels to make the fill from: select less, leaving some of the image around the selection"
+    }
+
+    /// Whether `window` holds a `side × side` square of pixels `sel` doesn't select at all (`content`: the
+    /// selection's bounds). Read a band of rows at a time, and only when the selection leaves no such strip along
+    /// the window's edges.
+    static func unselectedPatch(_ sel: Surface, _ content: PixelRect, _ window: PixelRect, side: Int32 = 7) -> Bool {
+        if window.width < Int(side) || window.height < Int(side) { return false }
+        let c = content.intersect(window)
+        if c.isEmpty || c.x0 - window.x0 >= side || window.x1 - c.x1 >= side || c.y0 - window.y0 >= side || window.y1 - c.y1 >= side {
+            return true
+        }
+        // Per column, how many rows running down to this one are unselected.
+        let w = window.width
+        var run = [Int32](repeating: 0, count: w)
+        var y = window.y0
+        while y < window.y1 {
+            let band = PixelRect(x0: window.x0, y0: y, x1: window.x1, y1: min(window.y1, y + 64))
+            let cov = sel.coverage(band)
+            for row in 0..<band.height {
+                var across: Int32 = 0
+                for x in 0..<w {
+                    run[x] = cov[row * w + x] > 0 ? 0 : run[x] + 1
+                    across = run[x] >= side ? across + 1 : 0
+                    if across >= side { return true }
+                }
+            }
+            y = band.y1
+        }
+        return false
+    }
+
     /// Edit › Content-Aware Fill (photocraft `content_aware_fill_as`) through PCIntelligence's
     /// inpaint slot: PCAlgo's PatchMatch (`.classical`, with photocraft's sampling and adaptation
     /// options) unless the host registered a model.
@@ -289,11 +351,7 @@ enum IntelligenceBridge: CommandModule {
         let id = try s.layerParam(p)
         var opts = ContentAwareFillOptions()
         var patch = InpaintOptions()
-        let customMask: Surface? = p["channel"].flatMap { v in
-            if let i = v.uint64Value, Int(i) < doc.channels.count { return doc.channels[Int(i)].surface }
-            if let n = v.stringValue { return doc.channels.first { $0.name == n }?.surface }
-            return nil
-        }
+        let customMask = fillChannel(doc, p)
         switch p["sampling"]?.stringValue ?? "auto" {
         case "auto":
             opts.sampling = .auto

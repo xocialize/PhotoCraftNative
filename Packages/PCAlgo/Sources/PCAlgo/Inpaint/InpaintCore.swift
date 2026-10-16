@@ -375,13 +375,16 @@ public enum InpaintKit {
     }
 
     /// Gain and bias of one channel for target moments `(Σt, Σt²)` and source moments `(Σs, Σs²)`
-    /// over `n` samples, within the limits (photocraft `fit`).
+    /// over `n` samples, within the limits (photocraft `fit`). A source flat to within float
+    /// rounding of its moments (variance at most 1e-5 of its mean²) keeps gain 1: its variance is
+    /// noise, and the gain it gave hit a limit, shifting a plain fill (AB-T-0299). The test is
+    /// products only, so the GPU's `pca_inp_fit` can't fuse it differently.
     @inline(__always)
     static func fit(_ a: Adapt, _ n: Float, _ st: Float, _ stt: Float, _ ss: Float, _ sss: Float) -> (Float, Float) {
         let mt = st / n, ms = ss / n
         let vt = Float.maximum(stt / n - mt * mt, 0)
         let vs = Float.maximum(sss / n - ms * ms, 0)
-        let g0: Float = vs > 1e-10 ? (vt / vs).squareRoot() : 1
+        let g0: Float = vs > Float.maximum(1e-5 * (ms * ms), 1e-10) ? (vt / vs).squareRoot() : 1
         let g = clampf(g0, a.gain.x, a.gain.y)
         let b = clampf(mt - g * ms, -a.bias, a.bias)
         return (g, b)

@@ -41,6 +41,17 @@ public struct ContentAwareFillOptions: Sendable, Equatable {
     }
 }
 
+extension ContentAwareFillOptions.Sampling {
+    /// The area a fill of a selection whose bounds are `hole` samples from on `canvas`.
+    public func window(hole: PixelRect, canvas: PixelRect) -> PixelRect {
+        switch self {
+        case .auto, .rectangular(nil): PCIntelligence.samplingWindow(hole: hole, canvas: canvas)
+        case .rectangular(let m?): hole.outset(by: Int32(clamping: min(max(m, 0), 100_000))).intersect(canvas)
+        case .custom(let r): r.union(hole).outset(by: 4).intersect(canvas)
+        }
+    }
+}
+
 /// Remove tool options.
 public struct RemoveOptions: Sendable, Equatable {
     /// The fill goes to a new layer above the target, which stays as it was.
@@ -89,12 +100,7 @@ extension PCIntelligence {
         let canvas = doc.bounds
         let hb = sel.contentBounds.intersect(canvas)
         guard !hb.isEmpty else { throw IntelligenceError.emptyMask("make a selection around what to remove") }
-        let window: PixelRect
-        switch options.sampling {
-        case .auto, .rectangular(nil): window = PCIntelligence.samplingWindow(hole: hb, canvas: canvas)
-        case .rectangular(let m?): window = hb.outset(by: Int32(clamping: min(max(m, 0), 100_000))).intersect(canvas)
-        case .custom(let r): window = r.union(hb).outset(by: 4).intersect(canvas)
-        }
+        let window = options.sampling.window(hole: hb, canvas: canvas)
         try stage.report(0.05, "Content-Aware Fill")
         let coverage = CoverageMask(surface: sel, rect: window)
         let (filled, receipt) = try await inpaintWindow(doc, source: surface, window: window, hole: coverage.binarized(),

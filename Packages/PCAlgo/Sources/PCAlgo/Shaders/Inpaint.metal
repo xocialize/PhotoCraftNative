@@ -100,7 +100,8 @@ inline float2 pca_inp_fit(constant pca_inp_solver_params& p, float n, float st, 
     float mt = st / n, ms = ss / n;
     float vt = fmax(stt / n - mt * mt, 0.0f);
     float vs = fmax(sss / n - ms * ms, 0.0f);
-    float g = vs > 1e-10f ? pca_inp_sqrt(vt / vs) : 1.0f;
+    // A flat source (variance within rounding of its moments) keeps gain 1, as the CPU's `fit` (AB-T-0299).
+    float g = vs > fmax(1e-5f * (ms * ms), 1e-10f) ? pca_inp_sqrt(vt / vs) : 1.0f;
     g = g < p.gain_lo ? p.gain_lo : (g > p.gain_hi ? p.gain_hi : g);
     float b = mt - g * ms;
     b = b < -p.bias ? -p.bias : (b > p.bias ? p.bias : b);
