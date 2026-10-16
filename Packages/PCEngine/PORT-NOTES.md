@@ -136,6 +136,29 @@ let i = try EngineIO.importFile(name: "x.psd", bytes: bytes, services: session.s
     (`SaveSlot.opened`), read at its first save, unless the file has changed since it was opened
     (`FileStamp`) or the document has a profile of its own (its previews are converted to sRGB).
 
+* **Live strokes.** `BrushCommands.LiveStroke` (Brush, Pencil) and `LiveRetouchStroke` (Smudge,
+  Blur, Sharpen, Sponge, Clone Stamp; AB-T-0299) draw a stroke onto a copy of the active document
+  as its points come: `begin(session, cmd, params)`, `push(points)`, then show `doc`. Each push
+  costs what its new points cost. `BrushCommands.offerLiveStroke` / `LiveRetouchStroke.offer` hand
+  the finished stroke to the command that commits it. That command takes its pixels
+  (`"fromLive": true`) when the params, points and document revision match, so the preview is the
+  commit. Unoffered, the command gives the same pixels (`LiveRetouchTests`, at 8, 16 and 32 bits).
+  The live Smudge, Blur, Sharpen and Sponge run only the new dabs, on a working copy that grows
+  with the stroke. What finishing would add (a click's dab, Smoothing's catch-up) is drawn from a
+  copy of the part it reaches. Clone Stamp is PCPaint's `LiveRetouch`, with the command's own
+  sampler for the composite. Not live yet: the Healing Brush (its Poisson solve covers the whole
+  stroke), Dodge and Burn (they remember each pixel's first colour), Liquify.
+
+  Timings (`LiveRetouchTimingTests`, opt-in; release, no other build running, 2026-10-16): a
+  2000 × 1500 layer, a 60 px brush at hardness 50, a 600 px stroke at a point a pixel. Each cell is
+  a rerun of the whole stroke against one live push of the next 10 px:
+
+  | Tool | 150 px | 300 px | 450 px | 600 px | Pen-up: rerun / offer + commit taking it |
+  |---|---|---|---|---|---|
+  | Smudge (spacing 1.7 %) | 19.9 / 1.3 ms | 38.7 / 1.3 | 57.9 / 1.3 | 76.7–78.6 / 1.2 | 78–80 / 1.0 + 0.4 ms |
+  | Blur (radius 4) | 29.4–30.1 / 2.2 | 56.5–56.7 / 2.3 | 84–86 / 2.1–3.0 | 112–113 / 2.2 | 112–114 / 2.5 + 0.3 |
+  | Clone Stamp | 0.7–0.8 / 0.4 | 1.2–1.4 / 0.3 | 1.7–1.9 / 0.3 | 2.4–2.5 / 0.9 | 2.3–2.4 / 0.0 + 0.3 |
+
 ## Glue
 
 * **Rasterizer.** PCRender's compositor renders type, shapes, vector masks and smart-object caches
@@ -313,6 +336,22 @@ against PCRender's changed Satin (see the change requests). No compiler warnings
   flattened by a private CPU compositor per decode (rendering from inside the shared renderer could
   deadlock on its lock); decoded sources and smart-filter stages are cached (SHA-256 keys instead of
   blake3); linked files are watched by size + content hash (the file service has no stat).
+* **Retouching gaps PixelAgencyEditor worked around (AB-T-0299).**
+  - Spot Healing's Content-Aware rebuilds the spot with PCAlgo's `InpaintKit.patchFill` (Compositor's
+    PatchPixels.c, ported) and lays it in by coverage, without the Poisson blend. photocraft's
+    completion is now only its fallback, used when there's nothing to copy from. On the editor's ridge
+    fixture (`SpotHealingCurveTests`: a red disc on a curved skyline, 56 px brush), Content-Aware is off
+    by 10.8 levels (seeds 1…424242: 9.6–11.3). With the completion it was off by 26.3, and Proximity
+    Match is off by 43.3.
+  - Content-Aware Fill's precondition refuses a selection that leaves no 7 × 7 patch of unselected
+    pixels in the window the fill samples from (it filled the layer black). Its colour adaptation keeps
+    gain 1 for a flat source (PCAlgo's `fit`), so a plain fill stays exact at Default: it gave
+    (51,153,214) for (51,153,204).
+  - `paint.blur` and `paint.sharpen` take `"radius"` (the Gaussian's σ, 0.1…100 px). Without one, Blur's
+    σ follows the brush (3 % of its size, 1…4) and Sharpen's is 1.
+  - Smudge reads a halo the width of its carried colour's radius (photocraft's halo is 0). Its first
+    pick-up used to be clamped to the stroke's bounding box, so pixels near that box's edge change. The
+    change lets a live stroke, which can't know the box, give the command's pixels.
 * **Deep nesting.** Debug builds recurse through `Equatable` on 100 nested groups (photocraft's cap);
   the tests that build them run on an 8 MB thread. Release frames are far smaller.
 

@@ -170,7 +170,8 @@ Lower-level entry points:
 - **One-shot.** `renderStroke`, `renderStrokeMetal`, `dabs(Stroke)`.
 - **Tools.** `MixerBrush.apply`, `ColorReplacement.apply`, `BackgroundEraser.apply`,
   `Retouch.cloneStamp` / `healingBrush(solver:)` / `historyBrush` / `applyDabStroke` /
-  `applyCoverage`, `Smudge`, `LiveRetouch`.
+  `applyCoverage`, `Smudge`, `LiveRetouch` (its `Paint.sampled` takes the paint image from the
+  caller, as PCEngine's live Clone Stamp does for the composite, AB-T-0299).
 - **Cursor and geometry.** `BrushOutline.tipOutline` / `tipOutlinePath`, `gridSquare` (Pencil
   cursor), `PresetSymmetry` (reflected passes, axis segments), `BrushPresets.builtin()`.
 

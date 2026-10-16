@@ -83,6 +83,18 @@ order of operations and edge semantics) and a **Metal compute path that must mat
   depend on scheduling, and they are bit-identical whatever the tiling (photocraft's contract,
   tested at tile sizes 7 and 256). The GPU is tile-independent to float rounding (≤ 2e-6).
 
+* **Compositor's PatchMatch fill (AB-T-0299).** `InpaintKit.patchFill` (`Inpaint/PatchFill.swift`) ports
+  PixelAgencyEditor's PatchPixels.c and HealPixels.c `heal_membrane` (Compositor, MIT, © 2026 Wonder
+  Assembly LLC; deleted from the editor in AB-T-0262, kept at its ee08430). It differs from `completeMasked`
+  in three ways: patches compare texture channels as well as colour (Newson et al. 2014), the last vote
+  favours the best matches, and the fill's tone is fitted to its edge with a membrane. Those carry a
+  curved edge through a spot. It's CPU-only, in row bands with per-band seeds, so it doesn't depend on
+  scheduling. PCEngine's Spot Healing uses it for Content-Aware.
+* **Colour adaptation of a flat source (AB-T-0299).** `fit` (and the GPU's `pca_inp_fit`) keeps gain 1
+  when the source patch's variance is at most 1e-5 of its mean². photocraft's test, `> 1e-10`, read float
+  rounding of a plain patch's moments as variance, so the gain went to its limit and a plain fill shifted
+  (0.8 → 0.84 at Default). The test is products only, so Metal can't fuse it differently.
+
 ## Filters
 
 Parity = worst max |GPU − CPU| of premultiplied samples over Gray, Gray+A, RGB, RGBA and CMYK+A
@@ -143,7 +155,7 @@ bit-identical. Release timings follow the table.
 | Selection | Magic Wand, Color/Hue/Tone Range, Expand/Contract/Border (EDT), Smooth, Feather, Lasso, Marquee | selection.rs, selection_blur.rs, selection/* | Selection/*.swift | pca_sel_* | 0 / 0 / 0 / 0 / 0 / 0.000103 | `.auto` = CPU for host-array APIs (transfers dominate) |
 | Selection | Content-Aware Scale (seam carving), Quick Selection | seam.rs, segment/quick.rs, segment/maxflow.rs | Selection/SeamCarving.swift, QuickSelection.swift, MaxFlow.swift | pca_sel_seam_energy | 0 | DP and max-flow on the CPU |
 | Segment | Select Subject/Sky, Focus Area, GrabCut, SLIC, Refine Edge (matting), Magnetic Lasso, Magic Eraser, Paint Bucket | segment/*, matting.rs (+ matting/*), magnetic.rs, erase.rs, paint.rs | Segment/*.swift | pca_seg_slic_assign, _box_*, _guided_*, _gmm_costs, _laplacian | 0 / 7.15e-07 / 6.56e-06 / 6.16e-05 / 5.96e-08 | `.auto` = CPU |
-| Inpaint | Content-Aware Fill, completion (EM + PatchMatch), Proximity Match, Remove tool (non-local), Create Texture | inpaint.rs, content_aware.rs, remove.rs, nonlocal.rs | Inpaint/*.swift | pca_inp_costs, _transforms, _vote, _source_moments, _proximity | 0 / 0 | PatchMatch/onion peel/non-local on the CPU |
+| Inpaint | Content-Aware Fill, completion (EM + PatchMatch), Proximity Match, Remove tool (non-local), Create Texture; `patchFill` (Compositor's PatchPixels.c, Spot Healing's Content-Aware) | inpaint.rs, content_aware.rs, remove.rs, nonlocal.rs | Inpaint/*.swift | pca_inp_costs, _transforms, _vote, _source_moments, _proximity | 0 / 0 | PatchMatch/onion peel/non-local on the CPU |
 | Retouch | Healing (Poisson seamless clone / membrane), Dodge/Burn/Sponge/Blur/Sharpen tool kernels | poisson.rs, retouch.rs | Retouch/Poisson.swift, Retouch.swift | — (CPU) | CPU only | sequential SOR; per-dab kernels |
 | Misc | Stack Mode statistics, Trap, Gradient tool, Red Eye | stack.rs, trap.rs, paint.rs (gradient), redeye.rs | Misc/*.swift | pca_misc_stack, _trap_*, _gradient | 2.98e-07 / 2.38e-07 / 0 (Trap, bit-exact) | Red Eye CPU (≤512² click window) |
 | Photo | Auto-Blend (Burt–Adelson pyramids, focus stacks), Harris corners | pyramid.rs, features.rs | Photo/Pyramid*.swift, Features*.swift | pca_pho_reduce_*, _expand_*, _sobel, _box_line, … | 0 (blend, fuse, stack weights, identical corners); halo fuse 4.8e-7 | descriptors/matching/RANSAC on the CPU |
