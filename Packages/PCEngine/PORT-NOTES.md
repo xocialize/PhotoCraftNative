@@ -192,6 +192,7 @@ let i = try EngineIO.importFile(name: "x.psd", bytes: bytes, services: session.s
   inpaint tier (`setBuiltIn(inpaint:)`, under the slot, on a host's PCIntelligence too), so a host that
   empties the `inpaint` slot leaves it in place rather than EraseKit's diffusion (AB-T-0304); Content-Aware Fill passes photocraft's sampling and adaptation options to it
   through PCIntelligence's `OptionsInpaintProvider` seam (`ContentAwareFillOptions.inpaint`).
+  Image Size's `"enlarger"` runs PCIntelligence's enlarger slot (AB-T-0292; see Decisions).
 * **Filters.** `FilterCommands` is the runner every Filter-menu module uses: `paramsFor` maps a
   command id and dialog-unit params to a PCAlgo filter (photocraft `params_for`, chained through
   filters_ext, color_to_alpha and gallery), `runFilter` runs it on the target (layer, mask, alpha
@@ -353,6 +354,38 @@ against PCRender's changed Satin (see the change requests). No compiler warnings
   - Smudge reads a halo the width of its carried colour's radius (photocraft's halo is 0). Its first
     pick-up used to be clamped to the stroke's bounding box, so pixels near that box's edge change. The
     change lets a live stroke, which can't know the box, give the command's pixels.
+* **Image Size's enlarger (AB-T-0292, AB-D-0119's chain).** `image.imageSize` takes `"enlarger": true`
+  (default false). It applies only when the slot holds an available `ImageEnlarger` and the target is larger
+  than the image on both axes.
+  - Each pixel layer's pixels (its content bounds, groups included) run the provider's ×2 the fewest times that
+    reach the target on both axes. Then the chosen `resample` fits them to the exact size; there's no fit when
+    the passes land on it. Automatic fits with Bicubic Sharper.
+  - Masks, channels, the selection and Quick Mask resample bilinearly, as in any Image Size. Type, shape and
+    smart object layers resample and re-render as today, so the provider never sees a smart object's source.
+    Effects scale as below. It's all one step named "Image Size".
+  - The intermediate canvas is held to the target's budget (8 GiB at the document's depth). When it would pass
+    that, the chain takes fewer passes and the fit enlarges the rest ("fitsUp"); with no pass possible, it falls
+    back. Passes are capped at 8.
+  - The result gains `enlarger`: `{used: true, engine, passes, intermediate: [w, h], fit, fitsUp, layers,
+    chain}`, e.g. `chain: "Anime4K (VL) ×4 (2 passes of ×2) → 1000 x 800 (lanczos)"`. A fallback to the Resample
+    alone reports `{used: false, reason}` with the slot's own reason (empty, emptied by the host, unavailable),
+    "not larger on both axes", Resample off, or the budget. Without the flag the result is unchanged.
+  - It runs as an async job (`runAsyncJob`, document locked, cancellable between layers and passes, rebasing like
+    `editJob`). `start` / `executeAsync` run it in the background: `executeAsync` from the main actor completes
+    even with a provider that hops to the main actor (`executeAsyncRunsTheChainAsABackgroundJob`). A plain
+    `execute` blocks its thread until the job finishes, so a host must not call it on a thread the provider needs.
+    The Color Sampler map is set when the job applies, not when it starts.
+* **Image Size scales effects itself.** `resampleDocument` (Image Size, and Crop with a target size) scales
+  every layer's effects with the pixels: shown or hidden, active or not, inside groups, by k = (sx + sy) / 2, in
+  the same step. This is Photoshop's Image Size with Scale Styles on; there's no off switch. `"resample":"none"`
+  leaves them. A host must not scale them again. PixelAgencyEditor's AB-T-0271 dropped its own pass
+  (`EngineEffects.scaled`), which used the geometric mean √(sx·sy): the two agree for a proportional resize.
+* **Style commands' target layer (AB-T-0300).** `layer.layerStyle.scaleEffects` takes `{"layer":id?}` (photocraft's
+  params have only `scale`; the catalogue test lists the extension). Its enabled check reads that layer, else the
+  active one, and accepts a layer whose effects are all hidden, as Photoshop's Scale Effects does.
+  `layer.layerStyle.createLayer`'s check reads `"layer"` too and wants an effect showing, with the layer's
+  effects on (what its body needs). `Session.disabledReason` / `isEnabled(id, params)` now check a command that
+  documents `"layer":id` on the layer it names, as `dispatch` already did, so asking and running agree.
 * **Deep nesting.** Debug builds recurse through `Equatable` on 100 nested groups (photocraft's cap);
   the tests that build them run on an 8 MB thread. Release frames are far smaller.
 

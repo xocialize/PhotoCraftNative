@@ -69,6 +69,7 @@ is what runs with nothing injected. "ForgeCore provider" is what a host register
 | Super Resolution / Image Size ▸ Preserve Details 2.0 | classical resamplers only (`preserveDetails` is not 2.0) | none: unavailable | `UpscaleClosure` → `EngineImageEnhancer.upscaleReporting` (NERVE fast, RealPLKSR best; Real-ESRGAN via an external registration) | `image.superResolution` (new). The engine routes `image.imageSize` `"resample":"preserveDetails2"` to `PCIntelligence.upscale`. |
 | Auto White Balance | `image.autoColor` (Photoshop's classical Auto Color) | **classical**: LightTier0 shades-of-grey p = 6 in linear light, Bradford to neutral; receipt carries kelvin and tint | none (LightTier2 is not built; `WhiteBalanceProvider` slot ready) | `image.autoWhiteBalance` (new) |
 | SDR → HDR | `image.mode.bits32` (depth change only) | **classical**: LightTier0 deband → BT.2408 direct mapping (diffuse white 80–10000 cd/m², default 203) → dither once → decoded to linear | none (`HDRExpansionProvider` slot ready) | `image.sdrToHdr` (new) |
+| Image Size ▸ enlarger method (PixelAgencyEditor's Line art) | missing (per-axis resamplers only) | none: unavailable, and Image Size runs its Resample alone | not ForgeCore: anime4k-metal's `Anime4KUpscaler` through `CGImageEnlarger` (AB-T-0293) | `image.imageSize` `"enlarger":true` (PCEngine; AB-T-0292) |
 
 Every operation returns a `TierReceipt` (capability, tier, engine name, notes, metrics) for each stage that ran.
 
@@ -136,6 +137,17 @@ How the slots behave:
   it adopts the protocol and calls other providers unchanged (`inpaintOptionsReachAnOptionsProvider`).
 - **Generative Fill** is available when a `GenerativeFillProvider` is registered. With only an inpaint model
   registered, that model stands in: the receipt says "prompt ignored". With neither, it is unavailable.
+- **Enlarger (AB-T-0292).** `register(enlarger:)` fills `.enlarge` with an `ImageEnlarger`: `name`, `availability`
+  (`.available` by default, `.unavailable(reason:)` when it can't run here) and `enlarge(_ surface:, rect:) async
+  throws -> Surface`, which returns `rect`'s pixels ×2 exactly, at `rect` doubled, in the input's format (model,
+  depth, alpha). `CGImageEnlarger(name, availability:) { cgImage in … }` adapts a CGImage ×2 (anime4k-metal's
+  `Anime4KUpscaler.upscale(_:)`) in one statement: pixels cross through `KitBridge` at the surface's depth in
+  sRGB (extended at 32 bits) both ways, straight alpha travels when the region has transparency, an opaque
+  region stays opaque. `ImageEnlargerClosure` takes a surface closure. There's no model-free tier. An empty slot,
+  one emptied by `unregister(.enlarge)` / `removeAll()`, or an unavailable provider reports `unavailable(reason)`
+  and `PCIntelligence.enlarger` is nil, so PCEngine's Image Size uses the chosen Resample alone and says why.
+  `enlarge(_:rect:passes:)` runs the chain's passes and checks each result: the input's format, nothing outside
+  the doubled rect.
 - **Thread safety.** The registry is a `Sendable` final class over `Mutex`. An operation resolves its provider when
   it starts.
 
