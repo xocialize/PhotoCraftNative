@@ -67,7 +67,7 @@ import Testing
             #expect(spec.label == c.label, "\(c.id)")
             #expect(spec.menu == c.menu, "\(c.id)")
             #expect(spec.shortcut == c.shortcut, "\(c.id)")
-            #expect(spec.params == c.params, "\(c.id)")
+            #expect(spec.params == PhotocraftExtensions.expected(c), "\(c.id)")
             #expect(spec.module == c.module, "\(c.id)")
         }
         let unavailable = mine.filter { !(r.spec($0.id)?.isAvailable ?? false) }.map(\.id)

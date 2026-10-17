@@ -582,12 +582,6 @@ import Testing
         }
     }
 
-    /// Params PhotoCraftNative extends past photocraft's (the catalogue keeps photocraft's): Scale Effects takes
-    /// `"layer"` so a host can scale any layer's effects (AB-T-0300).
-    static let extendedParams: [String: String] = [
-        "layer.layerStyle.scaleEffects": ##"{"layer":id?,"scale":1..1000=100} (every effect of the layer, shown or hidden)"##,
-    ]
-
     /// Every command of this agent's modules is registered with photocraft's id, label, menu
     /// path, shortcut and params, under its photocraft module.
     @Test func registrationsMatchPhotocraftsCatalogue() throws {
@@ -602,7 +596,7 @@ import Testing
             #expect(spec.label == c.label, "\(c.id)")
             #expect(spec.menu == c.menu, "\(c.id)")
             #expect(spec.shortcut == c.shortcut, "\(c.id)")
-            #expect(spec.params == (Self.extendedParams[c.id] ?? c.params), "\(c.id)")
+            #expect(spec.params == PhotocraftExtensions.expected(c), "\(c.id)")
         }
         for spec in r.specs where modules.contains(spec.module) {
             #expect(PhotocraftCatalog.byId[spec.id]?.module == spec.module, "\(spec.id) is not a photocraft command of its module")

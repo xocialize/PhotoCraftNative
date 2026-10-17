@@ -268,7 +268,7 @@ import Testing
             #expect(spec.label == c.label, "\(c.id)")
             #expect(spec.menu == c.menu, "\(c.id)")
             #expect(spec.shortcut == c.shortcut, "\(c.id)")
-            #expect(spec.params == c.params, "\(c.id)")
+            #expect(spec.params == PhotocraftExtensions.expected(c), "\(c.id)")
             #expect(spec.availability == .available, "\(c.id)")
         }
         for spec in r.specs where modules.contains(spec.module) {
