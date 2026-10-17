@@ -484,7 +484,7 @@ public enum ImageCommands: CommandModule {
     public static func register(into r: inout CommandRegistry) {
         r.add([
             CommandSpec("image.imageSize", "Image Size…", menu: ["Image"],
-                        params: #"{"width":px,"height":px,"resolution":ppi,"resample":"automatic|preserveDetails|bicubicSmoother|bicubicSharper|bicubicAutomatic|bicubic|nearest|bilinear|lanczos|none"="bicubic"} → {width,height} (the document's size after the command; "none" changes the resolution only)"#,
+                        params: #"{"width":px,"height":px,"resolution":ppi,"resample":"automatic|preserveDetails|bicubicSmoother|bicubicSharper|bicubicAutomatic|bicubic|nearest|bilinear|lanczos|none"="bicubic","enlarger":bool=false} → {width,height,enlarger?} (the document's size after the command; "none" changes the resolution only. enlarger: to a size larger on both axes, each pixel layer runs the host's ×2 enlarger (PCIntelligence's enlarge slot) until both axes reach the target, then resample fits it; enlarger reports {used,engine,passes,intermediate,fit,fitsUp,layers,chain}, or {used:false,reason} when it falls back to resample alone)"#,
                         module: m, enabled: Pre.hasDoc, run: imageSize),
             CommandSpec("image.canvasSize", "Canvas Size…", menu: ["Image"],
                         params: ##"{"width":px,"height":px,"relative":bool=false,"anchor":"topLeft|top|topRight|left|center|right|bottomLeft|bottom|bottomRight"="center","extensionColor":"background|foreground|white|black|transparent|#rrggbb"="background"}"##,

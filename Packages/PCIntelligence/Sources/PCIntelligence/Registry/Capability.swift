@@ -42,6 +42,10 @@ public enum Capability: String, Sendable, Codable, CaseIterable {
     case whiteBalance
     /// SDR → HDR inverse tone mapping.
     case hdrExpansion
+    /// Whole-image ×2 enlargement: Image Size's enlarger method (`image.imageSize` with `"enlarger"`;
+    /// Anime4K's Line art in PixelAgencyEditor). No model-free tier: an empty slot leaves Image Size
+    /// on the chosen Resample alone.
+    case enlarge
 
     /// A short human-readable name.
     public var label: String {
@@ -57,6 +61,7 @@ public enum Capability: String, Sendable, Codable, CaseIterable {
         case .upscale: "Super resolution"
         case .whiteBalance: "White balance"
         case .hdrExpansion: "SDR → HDR"
+        case .enlarge: "Enlarger"
         }
     }
 }

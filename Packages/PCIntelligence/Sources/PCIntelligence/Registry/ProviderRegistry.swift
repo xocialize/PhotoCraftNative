@@ -1,7 +1,7 @@
 // The injection seam: one slot per capability. An empty slot runs the Kit's model-free tier
 // (Vision, or a classical algorithm), or a built-in tier set under the slot (PCEngine's PatchMatch
 // under inpaint), which emptying the slot leaves in place; a capability with none (colorize, upscale, face restore,
-// scratch detection, generative fill) reports `unavailable(reason)` until the host registers a
+// scratch detection, generative fill, Image Size's enlarger) reports `unavailable(reason)` until the host registers a
 // provider. The host app, which links ForgeCore (MLX), registers the engine-backed providers here in
 // one statement each; this package never depends on ForgeCore (fleet rule: Category A never depends
 // on Category B). Replaces the planned photocraft `ml` crate's model registry (docs/architecture.md
@@ -92,6 +92,13 @@ public final class ProviderRegistry: Sendable {
         set(.hdrExpansion, provider, tier, provider.name)
     }
 
+    /// Image Size's enlarger method: a whole-image ×2 (`image.imageSize` with `"enlarger"`; e.g. anime4k-metal's
+    /// `Anime4KUpscaler` through `CGImageEnlarger`). A provider whose `availability` says it can't run (no Metal
+    /// device) reports unavailable; so does an empty slot, and Image Size then runs its Resample alone.
+    public func register(enlarger provider: any ImageEnlarger, tier: IntelligenceTier = .model) {
+        set(.enlarge, provider, tier, provider.name)
+    }
+
     // MARK: Built-in tiers
 
     /// The classical tier under the inpaint slot, in place of EraseKit's diffusion: what the Remove tool, Content-Aware
@@ -128,6 +135,9 @@ public final class ProviderRegistry: Sendable {
     /// Whether `capability` can run now, and on what.
     public func status(of capability: Capability) -> CapabilityStatus {
         let e = entry(capability)
+        if let e, capability == .enlarge, let p = e.provider as? any ImageEnlarger, case .unavailable(let why) = p.availability {
+            return .unavailable(reason: "\(e.name) can't run: \(why)")
+        }
         if let e { return .available(tier: e.tier, engine: e.name, injected: true) }
         if let b = builtIns.withLock({ $0[capability] }) { return .available(tier: b.tier, engine: b.name, injected: false) }
         switch capability {
@@ -156,6 +166,8 @@ public final class ProviderRegistry: Sendable {
             return .unavailable(reason: "scratch detection needs a model; register a DefectMaskProvider (BOPBTL through ForgeCore)")
         case .upscale:
             return .unavailable(reason: "super resolution needs a model; register an UpscaleProvider (NERVE, RealPLKSR or Real-ESRGAN through ForgeCore)")
+        case .enlarge:
+            return .unavailable(reason: "Image Size's enlarger method needs a ×2 enlarger; register an ImageEnlarger (Anime4K through anime4k-metal). Without one, Image Size uses the chosen Resample alone")
         }
     }
 

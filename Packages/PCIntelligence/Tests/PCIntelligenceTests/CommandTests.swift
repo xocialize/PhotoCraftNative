@@ -20,8 +20,8 @@ import Testing
             #expect(c.id.split(separator: ".").count >= 2 && !c.label.isEmpty && c.params.hasPrefix("{"))
         }
         #expect(CommandTests.photocraftIds.isSubset(of: Set(ids)))
-        // Every capability has a command.
-        #expect(Set(IntelligenceCommands.all.map(\.capability)).isSuperset(of: Set(Capability.allCases).subtracting([.scratchDetect])))
+        // Every capability has a command; the enlarger is PCEngine's `image.imageSize` with "enlarger".
+        #expect(Set(IntelligenceCommands.all.map(\.capability)).isSuperset(of: Set(Capability.allCases).subtracting([.scratchDetect, .enlarge])))
         #expect(IntelligenceCommands.command("select.subject")?.menu == ["Select"])
         #expect(IntelligenceCommands.command("select.objectFinder")?.journal == false, "the hover preview is a query")
     }
