@@ -238,7 +238,9 @@ public final class Session {
     public func disabledReason(_ id: String, _ params: JSONValue = .null) -> String? {
         guard let spec = registry.spec(id) else { return "unknown command `\(id)`" }
         if let r = spec.availability.reason { return r }
-        return precondition(spec, prepare(id, params)) ?? jobConflict(id, journal: spec.journal)
+        let p = prepare(id, params)
+        // As `dispatch` decides it: a command documenting `"layer":id` is checked on the layer it names.
+        return (explicitLayerEnabled(spec, params) ?? precondition(spec, p)) ?? jobConflict(id, journal: spec.journal)
     }
 
     /// The `command.list` row of a command.

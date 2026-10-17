@@ -83,10 +83,30 @@ enum LayerMenuCommands: CommandModule {
         }
     }
 
-    static let hasEffects: CommandEnabled = { s, _ in
-        switch activeLayer(s) {
+    /// The layer a command taking `{"layer":id?}` acts on: the one `"layer"` names (as `Session.layerParam`
+    /// resolves it), else the active layer.
+    static func targetLayer(_ s: Session, _ p: JSONValue) -> Active {
+        guard let d = s.active else { return .failure("no document open") }
+        guard let id = Params.layerId(p) else { return activeLayer(s) }
+        guard let l = d.doc.layer(id) else { return .failure("no layer \(id)") }
+        return .success(l)
+    }
+
+    /// Create Layer: the target layer shows an effect (its effects are on, and one of them is), which is what
+    /// it makes layers from (AB-T-0300: it read the active layer whatever `"layer"` named).
+    static let hasEffects: CommandEnabled = { s, p in
+        switch targetLayer(s, p) {
         case .failure(let why): return why
-        case .success(let l): return l.effects.items.contains(where: \.isEnabled) ? nil : "the layer has no layer effects"
+        case .success(let l): return l.effects.enabled && l.effects.items.contains(where: \.isEnabled) ? nil : "the layer has no layer effects"
+        }
+    }
+
+    /// Scale Effects: the target layer has effects, shown or hidden; Photoshop's Scale Effects scales hidden ones
+    /// too (AB-T-0300).
+    static let hasScalableEffects: CommandEnabled = { s, p in
+        switch targetLayer(s, p) {
+        case .failure(let why): return why
+        case .success(let l): return l.effects.items.isEmpty ? "the layer has no layer effects" : nil
         }
     }
 
@@ -820,7 +840,7 @@ enum LayerMenuCommands: CommandModule {
         r.add(spec("layer.layerStyle.globalLight", "Global Light…", ["Layer", "Layer Style"], ##"{"angle":-180..180=120,"altitude":0..90=30}"##,
                    Pre.hasDoc, globalLight))
         r.add(spec("layer.layerStyle.createLayer", "Create Layer", ["Layer", "Layer Style"], ##"{"layer":id?}"##, hasEffects, createLayer))
-        r.add(spec("layer.layerStyle.scaleEffects", "Scale Effects…", ["Layer", "Layer Style"], ##"{"scale":1..1000=100}"##, hasEffects, scaleEffectsCommand))
+        r.add(spec("layer.layerStyle.scaleEffects", "Scale Effects…", ["Layer", "Layer Style"], ##"{"layer":id?,"scale":1..1000=100} (every effect of the layer, shown or hidden)"##, hasScalableEffects, scaleEffectsCommand))
         r.add(spec("layer.layerStyle.transferEffects", "Move Layer Effects", [],
                    ##"{"from":id,"to":id,"effect":index? (default: all effects),"copy":bool=false}"##, Pre.hasDoc, transferEffects))
         r.add(CommandSpec("layer.layerContentOptions", "Layer Content Options…", menu: ["Layer"], params: "{}", module: m, journal: false,
