@@ -92,6 +92,39 @@ import Testing
         #expect(log.all == ["inpaint best"])
     }
 
+    /// A built-in tier under the inpaint slot (PCEngine's PatchMatch) runs while the slot is empty, gives way to a
+    /// registered model, and stays when a host empties the slot or every slot (AB-T-0304: PixelAgencyEditor's models
+    /// module empties the slot when LaMa isn't ready, and the fills became EraseKit's diffusion).
+    @Test func aBuiltInInpaintTierOutlivesTheSlot() async throws {
+        let log = CallLog()
+        let registry = ProviderRegistry()
+        let ai = PCIntelligence(registry: registry)
+        var d = FillTests.scene()
+        d.selection = Fixture.selection(FillTests.square)
+        let builtIn = OptionsRecordingInpaint()
+        registry.setBuiltIn(inpaint: builtIn)
+        let atBuiltIn = CapabilityStatus.available(tier: .classical, engine: "FakePatchMatch", injected: false)
+        #expect(registry.status(of: .inpaint) == atBuiltIn)
+        #expect(registry.builtInName(.inpaint) == "FakePatchMatch" && registry.injectedCapabilities.isEmpty)
+        #expect(registry.status(of: .generativeFill).isAvailable == false, "a classical built-in is no generative stand-in")
+        var out = try await ai.contentAwareFill(d, layer: d.layers[0].id)
+        #expect(out.receipt.tier == .classical && out.receipt.engine == "FakePatchMatch")
+
+        registry.register(inpaint: MagentaInpaint(log: log))
+        out = try await ai.contentAwareFill(d, layer: d.layers[0].id)
+        #expect(out.receipt.engine == "FakeLaMa" && log.all == ["inpaint best"], "a registered model overrides it")
+
+        registry.unregister(.inpaint)
+        #expect(registry.status(of: .inpaint) == atBuiltIn)
+        out = try await ai.contentAwareFill(d, layer: d.layers[0].id)
+        #expect(out.receipt.engine == "FakePatchMatch" && builtIn.seen.count == 2)
+
+        registry.removeAll()
+        #expect(registry.status(of: .inpaint) == atBuiltIn)
+        out = try await ai.contentAwareFill(d, layer: d.layers[0].id)
+        #expect(out.receipt.engine == "FakePatchMatch" && builtIn.seen.count == 3)
+    }
+
     @Test func generativeFillUsesItsProviderOrTheInpaintStandIn() async throws {
         let log = CallLog()
         let registry = ProviderRegistry()

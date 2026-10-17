@@ -188,8 +188,9 @@ let i = try EngineIO.importFile(name: "x.psd", bytes: bytes, services: session.s
   composite with float accumulation (`EngineRenderer.renderExact`): PCRender's display path
   composites a plain 8-bit stack in half floats by design.
 * **Intelligence.** `session.intelligence` is PCIntelligence's registry; its 14 descriptors are real
-  commands (jobs with receipts). PCAlgo's PatchMatch is registered in the `inpaint` slot as
-  `.classical`; Content-Aware Fill passes photocraft's sampling and adaptation options to it
+  commands (jobs with receipts). PCAlgo's PatchMatch is the registry's built-in classical
+  inpaint tier (`setBuiltIn(inpaint:)`, under the slot, on a host's PCIntelligence too), so a host that
+  empties the `inpaint` slot leaves it in place rather than EraseKit's diffusion (AB-T-0304); Content-Aware Fill passes photocraft's sampling and adaptation options to it
   through PCIntelligence's `OptionsInpaintProvider` seam (`ContentAwareFillOptions.inpaint`).
 * **Filters.** `FilterCommands` is the runner every Filter-menu module uses: `paramsFor` maps a
   command id and dialog-unit params to a PCAlgo filter (photocraft `params_for`, chained through

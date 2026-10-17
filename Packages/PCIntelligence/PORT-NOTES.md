@@ -117,9 +117,13 @@ func makeIntelligence(models: URL, compositor: @escaping Compositor) async -> PC
 How the slots behave:
 
 - **Tier per registration.** `register(…, tier:)` defaults to `.model`. A classical backer registers with
-  `tier: .classical`; for example PCAlgo's PatchMatch Content-Aware Fill goes into `inpaint` and then beats
-  EraseKit's diffusion on large holes. `unregister(_:)` returns a capability to its model-free tier, or makes it
-  unavailable.
+  `tier: .classical`. `unregister(_:)` returns a capability to its model-free tier, or makes it unavailable.
+- **Built-in tiers.** `setBuiltIn(inpaint:)` puts a classical backer *under* the inpaint slot: it runs while the
+  slot is empty, a registered provider overrides it, and `unregister(.inpaint)` / `removeAll()` leave it. PCEngine
+  puts PCAlgo's PatchMatch there, which beats EraseKit's diffusion on large holes. It used to be registered *in*
+  the slot, so PixelAgencyEditor's models module, emptying the slot while LaMa wasn't ready, turned every later
+  fill into EraseKit's smooth membrane, still reported as classical (AB-T-0304). `status` reports a built-in tier
+  with `injected: false`.
 - **Restore is per job.** `status(of: RestoreJob)` asks the provider's `engineName(for:)`. ForgeCore answers
   `"unavailable"` for a job whose backer failed registration, so that job stays unavailable (deblur) or classical
   (denoise). Deblur is never faked with sharpening.
@@ -168,7 +172,7 @@ How the slots behave:
 
 1. **Kit fills ignore PatchMatch knobs.** Content-Aware Fill's `colorAdaptation`, `rotationAdaptation`, `scale`,
    `mirror`, `seed` and the auto source mask steer PatchMatch, which PCAlgo owns; they travel as `InpaintOptions`
-   to an `OptionsInpaintProvider` (PCEngine registers PCAlgo's PatchMatch into the `inpaint` slot as `.classical`).
+   to an `OptionsInpaintProvider` (PCEngine sets PCAlgo's PatchMatch as the built-in classical tier under the `inpaint` slot).
    EraseKit and the model providers fill from the whole window.
 2. **Transparent layers.** The Kits fill colour only, so alpha inside the hole is filled by EraseKit's classical
    diffusion on the alpha plane (tested), and the receipt notes it.

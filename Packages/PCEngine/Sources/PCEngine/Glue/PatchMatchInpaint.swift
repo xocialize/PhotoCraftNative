@@ -1,9 +1,9 @@
 // Port of photocraft-engine (crates/engine/src/edit_menu_cmds.rs `content_aware_fill_as`: PatchMatch Content-Aware Fill through photocraft-algo content_aware.rs), MIT OR Apache-2.0, © ArtCraft Team and the PhotoCraft contributors.
 //
-// PCAlgo's PatchMatch completion as PCIntelligence's classical `inpaint` backer: registered at
-// session start with `tier: .classical`, it replaces EraseKit's diffusion for the Remove tool,
-// Content-Aware Fill and Generative Fill's stand-in until the host registers a model (LaMa /
-// MI-GAN). Content-Aware Fill's photocraft options — colour and rotation adaptation, scale, mirror,
+// PCAlgo's PatchMatch completion as PCIntelligence's classical `inpaint` backer: set as the
+// registry's built-in tier under the inpaint slot (`EngineServices`), it replaces EraseKit's
+// diffusion for the Remove tool and Content-Aware Fill while no model (LaMa / MI-GAN) is registered,
+// and a host emptying the slot leaves it there (AB-T-0304). Content-Aware Fill's photocraft options — colour and rotation adaptation, scale, mirror,
 // seed, and the sampling area (Auto's look-alike surroundings, a custom area or channel) — arrive
 // through PCIntelligence's `OptionsInpaintProvider` seam (`ContentAwareFillOptions.inpaint`); the
 // Remove tool passes the defaults (the whole window, photocraft's default adaptation).

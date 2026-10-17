@@ -1,5 +1,6 @@
 // The injection seam: one slot per capability. An empty slot runs the Kit's model-free tier
-// (Vision, or a classical algorithm); a capability with none (colorize, upscale, face restore,
+// (Vision, or a classical algorithm), or a built-in tier set under the slot (PCEngine's PatchMatch
+// under inpaint), which emptying the slot leaves in place; a capability with none (colorize, upscale, face restore,
 // scratch detection, generative fill) reports `unavailable(reason)` until the host registers a
 // provider. The host app, which links ForgeCore (MLX), registers the engine-backed providers here in
 // one statement each; this package never depends on ForgeCore (fleet rule: Category A never depends
@@ -23,6 +24,8 @@ public final class ProviderRegistry: Sendable {
     }
 
     private let slots = Mutex<[Capability: Entry]>([:])
+    /// The model-free tiers a host supplies under the slots (PCEngine's PatchMatch under `inpaint`).
+    private let builtIns = Mutex<[Capability: Entry]>([:])
 
     public init() {}
 
@@ -89,12 +92,26 @@ public final class ProviderRegistry: Sendable {
         set(.hdrExpansion, provider, tier, provider.name)
     }
 
-    /// Empties a slot: the capability falls back to its model-free tier, or becomes unavailable.
+    // MARK: Built-in tiers
+
+    /// The classical tier under the inpaint slot, in place of EraseKit's diffusion: what the Remove tool, Content-Aware
+    /// Fill and Scratch Reduction run while no provider is registered (PCEngine puts PCAlgo's PatchMatch here). It isn't
+    /// injected: `unregister(.inpaint)` and `removeAll()` leave it, so a host that empties the slot when its model isn't
+    /// ready falls back to it. Registering a provider in the slot still overrides it.
+    public func setBuiltIn(inpaint provider: any InpaintProvider) {
+        builtIns.withLock { $0[.inpaint] = Entry(provider: provider, tier: .classical, name: provider.name) }
+    }
+
+    /// The name of the built-in tier set under `capability`'s slot, if any.
+    public func builtInName(_ capability: Capability) -> String? { builtIns.withLock { $0[capability]?.name } }
+
+    /// Empties a slot: the capability falls back to its model-free tier (a built-in one when set), or becomes
+    /// unavailable.
     public func unregister(_ capability: Capability) {
         _ = slots.withLock { $0.removeValue(forKey: capability) }
     }
 
-    /// Empties every slot.
+    /// Empties every slot. Built-in tiers stay.
     public func removeAll() { slots.withLock { $0.removeAll() } }
 
     /// The capabilities with an injected provider.
@@ -112,6 +129,7 @@ public final class ProviderRegistry: Sendable {
     public func status(of capability: Capability) -> CapabilityStatus {
         let e = entry(capability)
         if let e { return .available(tier: e.tier, engine: e.name, injected: true) }
+        if let b = builtIns.withLock({ $0[capability] }) { return .available(tier: b.tier, engine: b.name, injected: false) }
         switch capability {
         case .subjectMatte:
             return .available(tier: .vision, engine: BuiltIn.visionMatte, injected: false)
@@ -158,8 +176,9 @@ public final class ProviderRegistry: Sendable {
 
     // MARK: Typed resolution
 
+    /// The injected provider, else the built-in tier.
     func provider<P>(_ c: Capability, as type: P.Type) -> (provider: P, tier: IntelligenceTier, name: String)? {
-        guard let e = entry(c), let p = e.provider as? P else { return nil }
+        guard let e = entry(c) ?? builtIns.withLock({ $0[c] }), let p = e.provider as? P else { return nil }
         return (p, e.tier, e.name)
     }
 }

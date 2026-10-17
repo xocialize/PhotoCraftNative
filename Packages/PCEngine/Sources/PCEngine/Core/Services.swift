@@ -91,8 +91,8 @@ public struct EngineServices: Sendable {
     public var notifier: (@Sendable (String) -> Void)?
     /// Composites documents (canvas, exports, thumbnails, AI sources).
     public var renderer: EngineRenderer
-    /// The AI tier: one provider slot per capability; the app registers ForgeCore's providers. A
-    /// default one has PCAlgo's PatchMatch in its `inpaint` slot (`.classical`).
+    /// The AI tier: one provider slot per capability; the app registers ForgeCore's providers.
+    /// PCAlgo's PatchMatch is its built-in classical inpaint tier, under the `inpaint` slot.
     public var intelligence: PCIntelligence
 
     public init(fileSystem: any FileSystemService = LocalFileSystem(), clipboard: (any ClipboardService)? = nil,
@@ -103,14 +103,12 @@ public struct EngineServices: Sendable {
         self.clock = clock
         self.notifier = notifier
         self.renderer = renderer
-        if let intelligence {
-            self.intelligence = intelligence
-        } else {
-            let ai = PCIntelligence(compositor: renderer.intelligenceCompositor)
-            // PCAlgo's PatchMatch is the classical inpaint tier (Remove, Content-Aware Fill) until
-            // the host registers a model.
-            ai.registry.register(inpaint: PatchMatchInpaintProvider(), tier: .classical)
-            self.intelligence = ai
-        }
+        let ai = intelligence ?? PCIntelligence(compositor: renderer.intelligenceCompositor)
+        // PCAlgo's PatchMatch is the classical inpaint tier (Remove, Content-Aware Fill) while no
+        // model is registered. It goes under the slot, not in it: a host that empties the slot when
+        // its model isn't ready (PixelAgencyEditor's built-in models module does) would otherwise
+        // leave EraseKit's diffusion, a smooth membrane, still reported as classical (AB-T-0304).
+        if ai.registry.builtInName(.inpaint) == nil { ai.registry.setBuiltIn(inpaint: PatchMatchInpaintProvider()) }
+        self.intelligence = ai
     }
 }
