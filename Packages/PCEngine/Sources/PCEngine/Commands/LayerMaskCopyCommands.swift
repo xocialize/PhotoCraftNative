@@ -40,7 +40,10 @@ enum LayerMaskCopyCommands: CommandModule {
         if p["move"] != nil && p["move"]?.boolValue == nil { throw bad("`move` must be a bool") }
         let move = Params.bool(p, "move", false)
         let replaced = s.active?.doc.layer(to)?.mask != nil
-        let label = replaced ? "Replace Layer Mask" : move ? "Move Layer Mask" : "Copy Layer Mask"
+        // Photoshop's mask copy (`make` a mask channel `using` another layer's mask, the Option-drag's event)
+        // names its step "Add Layer Mask" (measured, AB-T-0308). It refuses a target that has a mask, and no
+        // scripted event moves one, so "Replace Layer Mask" and "Move Layer Mask" stay unmeasured names.
+        let label = replaced ? "Replace Layer Mask" : move ? "Move Layer Mask" : "Add Layer Mask"
         try s.edit(label) { doc, active in
             guard let mask = doc.layer(from)?.mask else { throw bad("the `from` layer has no layer mask") }
             // A Background taking a mask becomes an ordinary layer, as Add Layer Mask makes it.

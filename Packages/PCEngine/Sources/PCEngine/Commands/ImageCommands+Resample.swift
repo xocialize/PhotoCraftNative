@@ -153,7 +153,7 @@ extension ImageCommands {
     /// Image Size through the enlarger slot (AB-T-0292, AB-D-0119's chain): each pixel layer's pixels run the
     /// provider's ×2 `plan.passes` times, then `method` fits them to `target` (Automatic: Bicubic Sharper for
     /// the reduction, Preserve Details when the budget left the fit enlarging). Everything else resamples as
-    /// any Image Size does: masks, channels and the selection bilinearly, type, shape and smart object layers
+    /// any Image Size does: masks and channels by `maskFilter`, the selection dropped, type, shape and smart object layers
     /// re-render (the provider never sees a smart object's source), effects scale, in one step. An async job
     /// (`Session.start` / `executeAsync` run it in the background); `execute` waits for it.
     static func enlargedImageSize(_ s: Session, _ plan: EnlargerPlan, _ provider: any ImageEnlarger, _ target: PixelSize,
@@ -234,7 +234,15 @@ extension ImageCommands {
         throw bad(cmd, "\(nw) x \(nh) px is \(mp) megapixels; resampling at this bit depth is limited to \(maxMp) megapixels. Choose a smaller size\(hint)")
     }
 
-    /// Resamples the whole document (pixels, masks, channels, selection, effects, vectors, guides)
+    /// The filter layer masks, alpha channels and the quick mask resample with when the pixels use `filter`:
+    /// the same method, except Preserve Details, whose masks go through Bicubic Automatic (Smoother
+    /// enlarging, Sharper reducing). Photoshop's, measured per method in AB-T-0308: Nearest Neighbor keeps
+    /// a mask hard; Automatic and Bicubic Automatic land on the same masks as Preserve Details.
+    static func maskFilter(_ filter: Resample) -> Resample {
+        filter == .preserveDetails ? .bicubicAutomatic : filter
+    }
+
+    /// Resamples the whole document (pixels, masks, channels, effects, vectors, guides; the selection goes)
     /// to `nw` x `nh` px with `filter`: the body of Image Size, shared by the Crop tool's W x H x
     /// Resolution mode. Callers check `checkResampleBudget` first (photocraft `resample_doc`).
     /// `enlarged` holds pixel layers' pixels already at the new size (the enlarger chain): they replace
@@ -253,22 +261,22 @@ extension ImageCommands {
             }
         }
         if !enlarged.isEmpty { swapEnlarged(false) }
+        let channelFilter = maskFilter(filter)
         forEachSurface(&doc.layers, masks: true) { surf, isMask in
-            surf = Resample.resizeSurfaceInCanvas(surf, sx: sx, sy: sy, filter: isMask ? .bilinear : filter, canvas: canvas)
+            surf = Resample.resizeSurfaceInCanvas(surf, sx: sx, sy: sy, filter: isMask ? channelFilter : filter, canvas: canvas)
         }
         if !enlarged.isEmpty { swapEnlarged(true) }
         let k = Float((sx + sy) / 2)
         forEachLayer(&doc.layers) { LayerMenuCommands.scaleEffects(&$0.effects, k) }
         for i in doc.channels.indices {
-            doc.channels[i].surface = Resample.resizeSurfaceInCanvas(doc.channels[i].surface, sx: sx, sy: sy, filter: .bilinear, canvas: canvas)
+            doc.channels[i].surface = Resample.resizeSurfaceInCanvas(doc.channels[i].surface, sx: sx, sy: sy, filter: channelFilter, canvas: canvas)
         }
         if var q = doc.quickMask {
-            q.surface = Resample.resizeSurfaceInCanvas(q.surface, sx: sx, sy: sy, filter: .bilinear, canvas: canvas)
+            q.surface = Resample.resizeSurfaceInCanvas(q.surface, sx: sx, sy: sy, filter: channelFilter, canvas: canvas)
             doc.quickMask = q
         }
-        if let sel = doc.selection {
-            doc.selection = Resample.resizeSurfaceInCanvas(sel, sx: sx, sy: sy, filter: .bilinear, canvas: canvas)
-        }
+        // Photoshop's Image Size deselects, in its own step (AB-T-0308).
+        doc.selection = nil
         // Vector geometry, guides and marks scale with the pixels; vectors re-render sharp.
         CanvasGeometry.transformGeometry(&doc, .scale(sx, sy))
         doc.size = PixelSize(width: nw, height: nh)

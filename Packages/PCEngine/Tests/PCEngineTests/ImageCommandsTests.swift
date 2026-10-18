@@ -139,7 +139,8 @@ import Testing
         #expect(doc(s).size == PixelSize(width: 128, height: 96))
     }
 
-    /// The canvas border stays opaque after Image Size, and a full selection stays full.
+    /// The canvas border stays opaque after Image Size, and a full alpha channel stays full (the selection
+    /// itself goes, as Photoshop's Image Size drops it: AB-T-0308).
     @Test func imageSizeKeepsCanvasEdgesOpaque() throws {
         for depth in [8, 16, 32] {
             for (w, resample) in [(60, "bicubic"), (41, "lanczos"), (15, "bilinear"), (77, "preserveDetails"), (21, "bicubicSharper"),
@@ -147,6 +148,7 @@ import Testing
                 let s = Session()
                 try s.execute("file.new", ["width": 30, "height": 20, "depth": .int(depth), "background": "#336699"])
                 try s.execute("select.all")
+                try s.execute("select.saveSelection")
                 try s.execute("image.imageSize", ["width": .int(w), "resample": .string(resample)])
                 let d = doc(s)
                 let px = try s.services.renderer.render(d, region: d.bounds).px
@@ -155,10 +157,11 @@ import Testing
                 #expect(abs(mid.w - 1) < 1e-3, "\(depth) \(resample): \(mid)")
                 let worst = px.map { maxDiff($0, mid) }.max() ?? 0
                 #expect(worst < 0.01, "\(depth) \(resample) \(w): \(worst)")
-                let sel = try #require(d.selection)
+                #expect(d.selection == nil, "\(depth) \(resample): Image Size deselects")
+                let channel = try #require(d.channels.last?.surface)
                 let (x1, y1) = (Int32(fw - 1), Int32(fh - 1))
                 for (x, y) in [(Int32(0), Int32(0)), (x1, 0), (0, y1), (x1, y1)] {
-                    #expect(sel.pixel(x: x, y: y)[0] > 0.99, "\(depth) \(resample): selection at (\(x),\(y))")
+                    #expect(channel.pixel(x: x, y: y)[0] > 0.99, "\(depth) \(resample): alpha channel at (\(x),\(y))")
                 }
             }
         }

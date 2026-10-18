@@ -224,9 +224,17 @@ public enum ImageCommands: CommandModule {
         func side(_ v: Double) -> Int { v.isNaN ? 1 : Int(min(max(v.rounded(), 1), 300_000)) }
         let (nw, nh) = (side(rw), side(rh))
         let (ax, ay) = try anchorFactors(cmd, p["anchor"]?.stringValue ?? "center")
-        let dx = Int32(((Double(nw) - ow) * ax).rounded())
-        let dy = Int32(((Double(nh) - oh) * ay).rounded())
+        // Photoshop truncates a centred offset toward zero: growing by an odd number of pixels puts
+        // the extra one right/bottom, shrinking by one takes it from the right/bottom (64 → 69: +2,
+        // 64 → 59: −2, 64 → 63: 0; measured, AB-T-0308).
+        let dx = Int32(((Double(nw) - ow) * ax).rounded(.towardZero))
+        let dy = Int32(((Double(nh) - oh) * ay).rounded(.towardZero))
         let ext = extensionColor(s, p)
+        // Photoshop offers no Transparent extension for a document with a Background: a scripted
+        // Canvas Size asking for one opens the dialog instead of running (AB-T-0308).
+        if ext.w == 0 && d.doc.background != nil {
+            throw bad(cmd, "a document with a Background can't take a transparent extension: name a color, or make the Background a layer first")
+        }
         SamplerMap.set(s, .translate(Double(dx), Double(dy)))
         try s.edit("Canvas Size") { doc, _ in
             try translateDocument(&doc, cmd, dx, dy)
@@ -234,12 +242,10 @@ public enum ImageCommands: CommandModule {
             CanvasGeometry.refresh(&doc, .shapes)
             let canvas = doc.bounds
             let old = PixelRect(x: Int(dx), y: Int(dy), width: Int(ow), height: Int(oh))
-            // A Background can't contain transparent pixels: a transparent extension that adds
-            // canvas area makes it a normal layer first; a shrink or no-op keeps it.
-            if ext.w == 0 && (nw > Int(ow) || nh > Int(oh)) {
-                doc.updateBackground { LayerOps.unlockBackground(&$0) }
-            }
-            // The locked Background is extended with the extension colour.
+            // Photoshop's Canvas Size deselects, in its own step (AB-T-0308).
+            doc.selection = nil
+            // Only the locked Background is extended with the extension colour; other layers get
+            // transparent canvas (Photoshop's, measured in AB-T-0308).
             if ext.w > 0 {
                 doc.updateBackground { bg in
                     bg.withRaster { surf in

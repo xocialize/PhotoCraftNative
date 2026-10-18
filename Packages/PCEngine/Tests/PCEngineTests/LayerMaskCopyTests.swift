@@ -44,7 +44,7 @@ import Testing
             #expect(copy.surface.pixel(x: 3, y: 4) == [1])
             #expect(doc.layer(masked)?.mask == mask, "a copy leaves the source's mask")
             #expect(s.active?.history.entries.count == steps + 1)
-            #expect(s.active?.history.undoLabel == "Copy Layer Mask")
+            #expect(s.active?.history.undoLabel == "Add Layer Mask", "Photoshop's name for its mask copy (AB-T-0308)")
             #expect(s.active?.activeLayer == plain && s.active?.selectedLayers == [plain], "the target becomes the active layer")
             try s.execute("edit.undo")
             #expect(s.active?.doc == before)

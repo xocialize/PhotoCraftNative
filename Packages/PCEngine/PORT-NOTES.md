@@ -362,7 +362,7 @@ against PCRender's changed Satin (see the change requests). No compiler warnings
   - Each pixel layer's pixels (its content bounds, groups included) run the provider's ×2 the fewest times that
     reach the target on both axes. Then the chosen `resample` fits them to the exact size; there's no fit when
     the passes land on it. Automatic fits with Bicubic Sharper.
-  - Masks, channels, the selection and Quick Mask resample bilinearly, as in any Image Size. Type, shape and
+  - Masks, channels and Quick Mask resample as in any Image Size (by `maskFilter`, below), and the selection goes. Type, shape and
     smart object layers resample and re-render as today, so the provider never sees a smart object's source.
     Effects scale as below. It's all one step named "Image Size".
   - The intermediate canvas is held to the target's budget (8 GiB at the document's depth). When it would pass
@@ -388,15 +388,42 @@ against PCRender's changed Satin (see the change requests). No compiler warnings
   `layer.layerStyle.createLayer`'s check reads `"layer"` too and wants an effect showing, with the layer's
   effects on (what its body needs). `Session.disabledReason` / `isEnabled(id, params)` now check a command that
   documents `"layer":id` on the layer it names, as `dispatch` already did, so asking and running agree.
+* **Canvas Size and Image Size against Photoshop (AB-T-0308).** Measured in Photoshop 27.11 through its scripting
+  interface (new documents only; the scripts and results are in `$PHOTOCRAFT_FIXTURES/ps-measure/AB-T-0308`).
+  - **A centred offset truncates toward zero** (photocraft rounds half away from zero). Growing 64 → 69 puts 2 px
+    left and 3 right, 64 → 165 offsets by 50; shrinking 64 → 59 offsets by −2, 64 → 63 and 65 → 64 by 0. The
+    Background's pixels move the same way. Edge anchors move by the whole difference, as before.
+  - **The extension colour is the Background's only.** Other layers get transparent canvas, with or without a
+    Background below them, and a document with no Background accepts a colour and ignores it. Photoshop agreed with
+    the engine here.
+  - **A Background can't take a transparent extension.** Photoshop's menu doesn't offer Transparent with a Background,
+    and a scripted Canvas Size asking for it opens the dialog instead of running. `image.canvasSize` refuses
+    `"extensionColor":"transparent"` on a document with a Background (photocraft made the Background a layer first
+    when the canvas grew).
+  - **Canvas Size and Image Size deselect**, inside their own step. photocraft moved or resampled the selection.
+  - **Masks and channels resample with Image Size's method** (photocraft: always bilinear). `maskFilter`: layer masks,
+    alpha channels and Quick Mask take the pixels' method, except Preserve Details, whose masks go through Bicubic
+    Automatic (Smoother enlarging, Sharper reducing). Measured per method, enlarging 64 → 96 and reducing 64 → 40:
+    a mask's and an alpha channel's histograms equal the pixels' exactly for Nearest Neighbor (2 levels, hard) and
+    Bilinear. Preserve Details, Automatic and Bicubic Automatic gave identical masks: Bicubic Smoother's enlarging,
+    Bicubic Sharper's reducing. The same filter serves the Crop tool's target size, which shares `resampleDocument`.
+  - **A side past 300,000 px is clamped, not refused**, by both commands, through the DOM and Action Manager alike
+    (400,000 → 300,000, no error, no dialog). The engine already clamped; unchanged.
+  - Not measured: Quick Mask itself (it takes the channel rule), and a Crop's own resample of masks.
 * **Copying and moving a layer mask (AB-T-0324).** `layer.layerMask.copy {"from":id? (default active),"to":id,
   "move":bool=false}` is Photoshop's drag (move) and ⌥-drag (copy) of a mask thumbnail onto another layer. photocraft
   has no counterpart, and Photoshop has no menu item, so the command has no menu path.
   - The target gets the source's `LayerMask` whole: its surface where it sits on the document (masks are
     document-space), the value outside its content (a Hide All mask's black), density, feather, enabled and linked.
     Any mask the target had is replaced; asking first is the host's job, as Photoshop's "Replace layer mask?" is.
-  - `move` deletes the source's mask in the same step. One history step: "Copy Layer Mask", "Move Layer Mask", or
-    "Replace Layer Mask" when the target had one (PixelAgencyEditor's and Compositor's names; Photoshop's own step
-    names were not checked, Photoshop not being up).
+  - `move` deletes the source's mask in the same step. One history step: "Add Layer Mask" for a copy, "Move Layer
+    Mask", or "Replace Layer Mask" when the target had one.
+    - "Add Layer Mask" is Photoshop's (AB-T-0308): its mask copy, `make` a mask channel `using` another layer's mask
+      (the ⌥-drag's event), names its step so. The engine said "Copy Layer Mask" before.
+    - That event refuses a target that has a mask ("Make is not currently available"), and no scripted event moves a
+      mask (`move` on a mask channel isn't available). So Photoshop's names for a replacing or moving drag couldn't be
+      measured without dragging in the Layers panel; "Move Layer Mask" and "Replace Layer Mask" stay
+      PixelAgencyEditor's and Compositor's names.
   - Folders take the mask, as in Photoshop; the Background becomes "Layer 0" first, as Add Layer Mask makes it.
     Refused: no mask on `from`, `from` = `to`, a missing layer. Vector masks are out of scope.
   - The target becomes the active, only selected layer; the Channels target is left alone. The result is
