@@ -58,6 +58,18 @@ import Testing
         var adj = d
         let aid = adj.insertAbove(nil, Layer(name: "Invert", content: .adjustment(.invert)))
         #expect(reason("paint.remove", CommandContext(document: adj, activeLayer: aid, registry: registry))?.contains("not a pixel layer") == true)
+        #expect(reason("layer.removeBackground", CommandContext(document: adj, activeLayer: aid, registry: registry))?
+            .contains("not a pixel layer or a smart object") == true)
+        // A smart object takes Remove Background's mask (AB-T-0309); the commands that change pixels still refuse it.
+        var smart = d
+        let sid = smart.insertAbove(nil, Layer(name: "Placed", content: .smart(SmartObject(source: .linked(path: "placed.png"), transform: .identity, cache: nil))))
+        let smartCtx = CommandContext(document: smart, activeLayer: sid, registry: registry)
+        #expect(reason("layer.removeBackground", smartCtx) == nil)
+        for id in ["paint.remove", "filter.neuralFilters.colorize", "image.autoWhiteBalance"] {
+            #expect(reason(id, smartCtx)?.contains("not a pixel layer") == true, "\(id)")
+        }
+        smart.selection = Fixture.selection(FillTests.square)
+        #expect(reason("edit.contentAwareFill", CommandContext(document: smart, activeLayer: sid, registry: registry))?.contains("not a pixel layer") == true)
         var locked = d
         locked.updateLayer(bg) { $0.locks.pixels = true }
         #expect(reason("layer.removeBackground", CommandContext(document: locked, activeLayer: bg, registry: registry))?.contains("is locked") == true)

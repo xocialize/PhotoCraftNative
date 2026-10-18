@@ -161,7 +161,14 @@ How the slots behave:
   default 0.
 - **Remove Background.** Adds a layer mask without touching pixels and drops the selection. The Background becomes
   "Layer 0", unlocked. "No subject found" is an error and nothing changes (`cutout_cmds.rs`). The transaction is
-  `replaceLayer` + `setSelection(nil)` and undoes exactly; this is tested.
+  `replaceLayer` + `setSelection(nil)` and undoes exactly; this is tested. A smart object stays a smart object, as
+  Photoshop's Quick Action leaves it (AB-T-0309): its rendered placement (`SmartObject.cache`, via `.layer(id)`) or the
+  composite is sampled, and only its mask is written; source, transform and cache are untouched. Its precondition is
+  `maskableLayer` (a pixel layer or a smart object, pixels unlocked) rather than `editablePixelLayer`. Remove,
+  Content-Aware Fill and the filters change pixels, so they still refuse a smart object; Select Subject and Object
+  Selection take no layer precondition and read a smart object's placement when `sampleAllLayers` is false. The
+  model-free Vision tier runs it, so a host emptying the `subjectMatte` slot doesn't disable it (tested in PCEngine's
+  `RemoveBackgroundSmartTests`).
 - **Content-Aware Fill.** The hole is selection coverage > 0, and the sampling window is Photoshop's
   (`content_aware::sampling_window`, mirrored and tested). The fill is blended in by coverage, so only selected
   pixels change, at the layer's own depth and colour model. A 16-bit or CMYK layer keeps every unselected sample
@@ -174,7 +181,7 @@ How the slots behave:
   selection coverage, preserve alpha, and leave off-canvas layer pixels untouched (tested). Output can be the
   current layer, a new layer, or a new layer masked by the selection.
 - **Locks and refusals.** Not-a-pixel-layer and locked pixels are refused with Photoshop's messages (photocraft
-  `check_pixels_unlocked`).
+  `check_pixels_unlocked`); Remove Background's message also names a smart object as allowed.
 - **Jobs.** Operations read a snapshot and return data plus an `EditTransaction`. They run async, report progress
   (monotonic, ending at 1), and are cancellable: task cancellation is checked between stages and propagated out of
   providers as `CancellationError`, never as a provider failure (tested). Transactions address layers by id, so they

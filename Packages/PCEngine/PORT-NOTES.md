@@ -401,6 +401,11 @@ against PCRender's changed Satin (see the change requests). No compiler warnings
     Refused: no mask on `from`, `from` = `to`, a missing layer. Vector masks are out of scope.
   - The target becomes the active, only selected layer; the Channels target is left alone. The result is
     `{layer, replaced, moved}`. The enabled check reads `from`/`to`, so `isEnabled(id, params)` answers a drop.
+* **Remove Background on a smart object (AB-T-0309).** `layer.removeBackground` takes a smart object and leaves it
+  one, as Photoshop's Quick Action does: PCIntelligence samples its rendered placement (or the composite with
+  `sampleAllLayers`) and the step only adds its mask ("Remove Background", one step). `paint.remove`,
+  `edit.contentAwareFill` and the pixel filters still refuse it. It runs on the Vision tier with every slot emptied
+  (`RemoveBackgroundSmartTests`, a PNG placed with `file.placeEmbedded`).
 * **Deep nesting.** Debug builds recurse through `Equatable` on 100 nested groups (photocraft's cap);
   the tests that build them run on an 8 MB thread. Release frames are far smaller.
 

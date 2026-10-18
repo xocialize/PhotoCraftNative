@@ -19,6 +19,9 @@ public enum CommandPrecondition: Hashable, Sendable, Codable {
     case layer
     /// The target layer is a pixel layer whose pixels are not locked.
     case editablePixelLayer
+    /// The target layer is a pixel layer or a smart object, its pixels not locked: a command that only
+    /// writes a layer mask, reading the layer's rendered pixels (Remove Background keeps a smart object one).
+    case maskableLayer
     /// A selection with pixels on the canvas.
     case selection
     /// The document is in a colour mode (not Grayscale, Bitmap or Duotone).
@@ -84,8 +87,8 @@ public enum IntelligenceCommands {
             enabled: [.document], capability: .promptMask, journal: false, job: false, photocraftSource: nil),
         CommandDescriptor(
             id: "layer.removeBackground", label: "Remove Background", menu: [], shortcut: nil,
-            params: #"{"layer":id?,"sampleAllLayers":bool=false,"refine":bool=true} → {layer,bounds,tier,engine} (adds a layer mask from the subject; the Background becomes a normal layer; refine is PCAlgo's matting refine, applied by the engine when present)"#,
-            enabled: [.document, .layer, .editablePixelLayer, .capability(.subjectMatte)], capability: .subjectMatte, journal: true, job: true,
+            params: #"{"layer":id?,"sampleAllLayers":bool=false,"refine":bool=true} → {layer,bounds,tier,engine} (adds a layer mask from the subject; the Background becomes a normal layer; a smart object stays one, masked from its rendered placement; refine is PCAlgo's matting refine, applied by the engine when present)"#,
+            enabled: [.document, .layer, .maskableLayer, .capability(.subjectMatte)], capability: .subjectMatte, journal: true, job: true,
             photocraftSource: "crates/engine/src/cutout_cmds.rs"),
         CommandDescriptor(
             id: "paint.remove", label: "Remove", menu: [], shortcut: nil,
@@ -167,6 +170,15 @@ public enum IntelligenceCommands {
         case .editablePixelLayer:
             guard let d = c.document, let id = c.activeLayer, let l = d.layer(id) else { return "no active layer" }
             guard case .raster = l.content else { return "the layer is \(l.content.article) \(l.content.kindName) layer, not a pixel layer" }
+            let locks = d.effectiveLocks(id)
+            if locks.pixels || locks.all { return "Could not complete your request because the layer \"\(l.name)\" is locked" }
+            return nil
+        case .maskableLayer:
+            guard let d = c.document, let id = c.activeLayer, let l = d.layer(id) else { return "no active layer" }
+            switch l.content {
+            case .raster, .smart: break
+            default: return "the layer is \(l.content.article) \(l.content.kindName) layer, not a pixel layer or a smart object"
+            }
             let locks = d.effectiveLocks(id)
             if locks.pixels || locks.all { return "Could not complete your request because the layer \"\(l.name)\" is locked" }
             return nil

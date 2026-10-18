@@ -101,6 +101,21 @@ public final class PCIntelligence: Sendable {
         return (l, s)
     }
 
+    /// The layer `id` for a command that only writes its mask: a pixel layer or a smart object (which stays one;
+    /// its rendered placement is what's read), refused with Photoshop's message when its pixels are locked.
+    func maskableLayer(_ doc: Document, _ id: LayerId) throws -> Layer {
+        guard let l = doc.layer(id) else { throw IntelligenceError.noLayer(id.rawValue) }
+        switch l.content {
+        case .raster, .smart: break
+        default: throw IntelligenceError.refused("the layer \"\(l.name)\" is \(l.content.article) \(l.content.kindName) layer, not a pixel layer or a smart object")
+        }
+        let locks = doc.effectiveLocks(id)
+        if locks.pixels || locks.all {
+            throw IntelligenceError.refused("Could not complete your request because the layer \"\(l.name)\" is locked")
+        }
+        return l
+    }
+
     /// The selection's coverage over `rect`, or nil without a selection.
     func selectionCoverage(_ doc: Document, _ rect: PixelRect) -> CoverageMask? {
         doc.selection.map { CoverageMask(surface: $0, rect: rect) }

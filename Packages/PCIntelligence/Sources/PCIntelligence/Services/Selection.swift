@@ -220,11 +220,12 @@ extension PCIntelligence {
     /// Remove Background (Properties ▸ Quick Actions): the subject of `layer` (or of `source`) becomes
     /// the layer's mask, non-destructively; the Background turns into "Layer 0" first and the
     /// selection is dropped. No subject is an error and nothing changes (photocraft
-    /// `layer.removeBackground`).
+    /// `layer.removeBackground`). A smart object stays a smart object, as in Photoshop: its rendered
+    /// placement (`SmartObject.cache`) is sampled, and only its mask changes.
     public func removeBackground(_ doc: Document, layer id: LayerId, source: PixelSource? = nil,
                                  options: SubjectOptions = .init(), progress: ProgressHandler? = nil) async throws -> LayerMaskOutcome {
         let stage = Stage(handler: progress)
-        var (layer, _) = try editablePixelLayer(doc, id)
+        var layer = try maskableLayer(doc, id)
         try stage.report(0.1, "Finding subject")
         let (found, receipt) = try await subjectMatte(doc, source: source ?? .layer(id), quality: options.quality)
         guard let found, let surface = found.surface(sample: options.maskSample) else {

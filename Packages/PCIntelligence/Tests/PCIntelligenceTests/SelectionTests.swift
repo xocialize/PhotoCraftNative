@@ -138,6 +138,27 @@ struct SelectionTests {
         #expect(d2 == d)
     }
 
+    /// A smart object stays one (AB-T-0309): its rendered placement is sampled and only its mask is written.
+    @Test func removeBackgroundMasksASmartObjectWithoutRasterizingIt() async throws {
+        let disc = Fixture.disc()
+        let rendered = try #require(disc.layers[0].rasterSurface)
+        var d = Fixture.document(width: 512, height: 384) { _, _ in SIMD4(1, 1, 1, 1) }
+        let so = SmartObject(source: .embedded(fileName: "disc.png", bytes: [1, 2, 3]), transform: .identity, cache: rendered)
+        let id = d.insertAbove(nil, Layer(name: "disc", content: .smart(so)))
+        let out = try await ai.removeBackground(d, layer: id)
+        let after = try Fixture.applied(out.transaction, to: d)
+        let l = try #require(after.layer(id))
+        guard case .smart(let kept) = l.content else { Issue.record("still a smart object"); return }
+        #expect(kept == so)
+        let mask = try #require(l.mask)
+        #expect(mask.value(x: 256, y: 192) > 0.9 && mask.value(x: 2, y: 2) < 0.1)
+        #expect(after.layers[0] == d.layers[0], "the Background below is untouched")
+        // Type, shapes, fills and adjustments are still refused.
+        var adj = d
+        let aid = adj.insertAbove(nil, Layer(name: "Invert", content: .adjustment(.invert)))
+        await #expect(throws: IntelligenceError.self) { try await ai.removeBackground(adj, layer: aid) }
+    }
+
     @Test func removeBackgroundRefusesWhatPhotocraftRefuses() async throws {
         let flat = Fixture.document(width: 64, height: 64) { _, _ in SIMD4(0.5, 0.5, 0.5, 1) }
         await #expect(throws: IntelligenceError.nothingFound("no subject found")) {
