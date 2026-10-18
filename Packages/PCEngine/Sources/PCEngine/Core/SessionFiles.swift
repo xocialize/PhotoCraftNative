@@ -48,6 +48,11 @@ extension Session {
     /// `open_path` + `Session::open_document`). Returns the index and the warnings.
     @discardableResult
     public func openFile(_ path: String) throws -> (index: Int, warnings: [String], color: JSONValue) {
+        try openFileImport(path).opened
+    }
+
+    /// `openFile`, with the import's result (`file.open` reports a `.comp`'s manifest ids from it).
+    func openFileImport(_ path: String) throws -> (opened: (index: Int, warnings: [String], color: JSONValue), result: ImportResult) {
         // A local `.pcraft`'s own previews can stand for its first save's (`SaveSlot.opened`).
         let pcraft = EngineIO.fileExtension(path) == PcraftFormat.fileExtension ? services.fileSystem.localURL(path) : nil
         let stamp = pcraft.flatMap(FileStamp.init)
@@ -56,7 +61,7 @@ extension Session {
         if let pcraft, let stamp, opened.index < documents.count {
             saveSlot(documents[opened.index].id).withLock { $0.opened = (r.document, pcraft, stamp) }
         }
-        return opened
+        return (opened, r)
     }
 
     /// Adds an imported document: a read-only source (Paint.NET, Affinity, Krita) keeps no path to

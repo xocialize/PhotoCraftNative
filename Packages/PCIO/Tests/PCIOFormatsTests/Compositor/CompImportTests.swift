@@ -141,6 +141,9 @@ enum CompKit {
         #expect(d.resolutionDpi == 300)
         #expect(d.guides.horizontal == [1.5] && d.guides.vertical == [3])
         #expect(d.layers.map(\.name) == ["Base", "Top"])
+        // The manifest's ids, by the layer each became (AB-T-0323).
+        #expect(r.sourceLayerIds == [d.layers[0].id: K.id(1), d.layers[1].id: K.id(2)])
+        #expect(r.sourceDocumentId != nil)
         #expect(d.layers[1].blend == .linearDodge && d.layers[1].opacity == 0.5)
         // Exact pixels, the top layer at its whole-pixel offset.
         let b = d.layers[0].surface!.readRGBA(d.bounds)

@@ -20,6 +20,7 @@ import PCFormat
 import PCFoundation
 import PCIO
 import PCIOCore
+import PCIOFormats
 import PCPlatform
 import PCRender
 
@@ -162,9 +163,10 @@ public enum EngineIO {
         return MeshWarp.placeSource(src, srcRect: bounds, transform: a, warp: w, on: .cpu)
     }
 
-    /// Extensions PCIO reads as layered documents (everything else is a flat image).
+    /// Extensions PCIO reads as layered documents (everything else is a flat image). A `.comp` is a Compositor package
+    /// (a folder), opened read-only.
     public static let layeredExtensions: Set<String> = ["psd", "psb", "pcraft", "ora", "kra", "pdn", "tif", "tiff", "exr", "svg", "svgz",
-                                                        "af", "afdesign", "afphoto", "afpub"]
+                                                        "af", "afdesign", "afphoto", "afpub", "comp"]
 
     /// Extensions PCIO itself writes (the rest go through `ImageCodecs`).
     static let pcioWrites: Set<String> = ["psd", "psb", "pcraft", "ora", "png", "jpg", "jpeg", "tif", "tiff"]
@@ -203,7 +205,8 @@ public enum EngineIO {
     }
 
     /// Reads and imports the file at `path` through the session's file service. A `.pcraft`
-    /// package (a folder) is read object by object, a local single-file `.pcraft` entry by entry.
+    /// package (a folder) is read object by object, a local single-file `.pcraft` entry by entry, and a
+    /// Compositor `.comp` package (a folder) by PCIO's `DocumentIO.importFile(contentsOf:)`.
     public static func importPath(_ path: String, services: EngineServices, interrupt: Interrupt = .none) throws -> ImportResult {
         let fs = services.fileSystem
         if fileExtension(path) == PcraftFormat.fileExtension, fs.isDirectory(path) {
@@ -214,6 +217,18 @@ public enum EngineIO {
                 return ImportResult(document: doc)
             } catch {
                 throw EngineError.other("open `\(DocState.fileName(path))`: pcraft: \(error)")
+            }
+        }
+        // A Compositor `.comp` package (a folder; import-only, AB-D-0131) goes to PCIO's reader of packages on disk,
+        // read-only, with the manifest's guides and layer ids (`ImportResult.sourceLayerIds`) (AB-T-0323).
+        if fileExtension(path) == CompImport.fileExtension, fs.isDirectory(path) {
+            guard let url = fs.localURL(path) else { throw EngineError.other("read `\(path)`: .comp packages can't be opened here") }
+            do {
+                var r = try DocumentIO.importFile(contentsOf: url, options: options(services, interrupt: interrupt))
+                r.document.name = DocState.fileName(path)
+                return r
+            } catch {
+                throw wrap(error, "open `\(DocState.fileName(path))`")
             }
         }
         // A single-file `.pcraft` on a local disk is read entry by entry, never whole (AB-T-0249).

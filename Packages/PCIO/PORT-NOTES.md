@@ -121,7 +121,10 @@ document opened from one saves as `.pcraft` or PSD (`ImportResult.sourceReadOnly
 `DocumentIO.importFile(contentsOf:)` takes it when the URL is a directory named `.comp` or holding a
 `com.compositor.project` manifest; `CompImport.importDocument(_:codec:interrupt:)` takes a
 `CompImport.Package` (a directory, or files in memory). Refusals are
-`PCIOError.format("Compositor", …)` naming the rule.
+`PCIOError.format("Compositor", …)` naming the rule. The result carries the manifest's ids
+(AB-T-0323): `ImportResult.sourceLayerIds` maps each layer the import built to its manifest UUID
+(a left-out adjustment has none), and `sourceDocumentId` is the manifest's `documentID`, so a host
+can keep its own ids for the layers across a reload without matching them by name.
 
 **Checks, as `ProjectStore`:** the header first (format, then version, so a newer file reports its
 number), then every gate of `validate`: opacity/blend modes v3, layer masks v4, clipping v5, folder
@@ -793,9 +796,11 @@ tests (PCPlatform), `abr_map` cancellation.
   PCRender `LayerRasterizer` (PCPlatform); without them those layers stay empty with a warning.
 - **Bitmap/Indexed/Duotone PSD export** writes Grayscale/RGB (photocraft's behaviour, warned).
 - **Flattened PSDs** (no layer records) are re-saved with their Background as a layer record.
-- **`.comp` in the engine:** `EngineIO.importPath` reads a file's bytes, so opening a `.comp`
+- ~~**`.comp` in the engine:** `EngineIO.importPath` reads a file's bytes, so opening a `.comp`
   package (a directory) from PCEngine needs a directory branch calling
-  `DocumentIO.importFile(contentsOf:)`, and `comp` in its openable lists.
+  `DocumentIO.importFile(contentsOf:)`, and `comp` in its openable lists.~~ Done (AB-T-0323): `importPath`
+  sends a `.comp` folder there, `file.open` takes it read-only, and `comp` is in `EngineIO.layeredExtensions`
+  (not in the batch commands' list: their readers take bytes).
 - **`.comp` adjustments without a Photoshop form** (Grain, Add Noise, Gaussian/Motion Blur) are left
   out; baking them would need PCAlgo's filters over the composite below.
 - **Vivid Light's 0/0 ends** want one Photoshop measurement (base 0 under 255, base 255 under 0).

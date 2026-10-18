@@ -234,7 +234,8 @@ public enum CompImport {
         b.embeddedFile = package.embeddedFile
         let doc = try b.build(name: package.name)
         interrupt.progress(1)
-        return ImportResult(document: doc, warnings: b.warnings.list, sourceReadOnly: true)
+        return ImportResult(document: doc, warnings: b.warnings.list, sourceReadOnly: true,
+                            sourceLayerIds: b.sourceIDs.mapValues(\.uuidString), sourceDocumentId: m.documentID.uuidString)
     }
 
     /// Ordered, de-duplicated warnings.
@@ -275,6 +276,8 @@ public enum CompImport {
         var baked = Set<UUID>()
         /// Clipped adjustment layers Compositor never draws (no clipping stack to apply them in).
         var inert = Set<UUID>()
+        /// The manifest's id of each layer built (`ImportResult.sourceLayerIds`).
+        var sourceIDs: [LayerId: UUID] = [:]
 
         init(m: CompManifest, images: [UUID: Image], masks: [UUID: Mask], interrupt: Interrupt, transformedLayers: TransformedLayers = .smartObjects) {
             self.m = m; self.images = images; self.masks = masks; self.interrupt = interrupt; self.transformedLayers = transformedLayers
@@ -526,6 +529,7 @@ public enum CompImport {
             }
             l.clipped = clipped.contains(r.id)
             l.mask = layerMask(r)
+            sourceIDs[l.id] = r.id
             return l
         }
 

@@ -406,6 +406,14 @@ against PCRender's changed Satin (see the change requests). No compiler warnings
   `sampleAllLayers`) and the step only adds its mask ("Remove Background", one step). `paint.remove`,
   `edit.contentAwareFill` and the pixel filters still refuse it. It runs on the Vision tier with every slot emptied
   (`RemoveBackgroundSmartTests`, a PNG placed with `file.placeEmbedded`).
+* **Opening a Compositor `.comp` (AB-T-0323).** `EngineIO.importPath` sends a `.comp` folder to PCIO's
+  `DocumentIO.importFile(contentsOf:)` with the engine's IO options, as it does a `.pcraft` package, so `file.open`,
+  the journal and scripts open one: PCIO's warnings, the manifest's guides, and the document named after the
+  package (`Poster.comp`). It opens read-only (`sourceReadOnly`, no path); Save asks for one. `file.open` returns
+  `readOnly` for every open and, for a `.comp`, `sourceIds` (`{"<layer id>": "<manifest UUID>"}`, from PCIO's
+  `ImportResult.sourceLayerIds`) and `sourceDocumentId`, so a host keeps its ids for the layers across a reload.
+  `Session.openFile` is unchanged; `openFileImport` gives the import's result too. `comp` joins
+  `EngineIO.layeredExtensions`; the batch commands still skip it (they read bytes). `CompOpenTests`.
 * **Deep nesting.** Debug builds recurse through `Equatable` on 100 nested groups (photocraft's cap);
   the tests that build them run on an 8 MB thread. Release frames are far smaller.
 

@@ -8,6 +8,7 @@
 import Foundation
 import PCDocument
 import PCFormat
+import PCIOCore
 
 enum FileMenuCommands: CommandModule {
     static let name = "ui_file"
@@ -15,11 +16,18 @@ enum FileMenuCommands: CommandModule {
     static let hasDoc: CommandEnabled = { s, _ in s.active == nil ? "no document open" : nil }
 
     static func register(into r: inout CommandRegistry) {
-        r.add(CommandSpec("file.open", "Open…", menu: ["File"], shortcut: "Cmd+O", params: #"{"path":str} → {document,name,warnings,color}"#,
+        r.add(CommandSpec("file.open", "Open…", menu: ["File"], shortcut: "Cmd+O",
+                          params: #"{"path":str} → {document,name,warnings,color,readOnly,sourceIds?,sourceDocumentId?} (a Compositor .comp package opens read-only, with no path to save back to; sourceIds maps each layer id to its manifest id)"#,
                           module: name, journal: false) { s, p in
             let path = try FileCommands.strParam(p, "path", "file.open")
-            let (i, warnings, color) = try s.openFile(path)
-            return ["document": .int(i), "name": .string(s.documents[i].doc.name), "warnings": .strings(warnings), "color": color]
+            let ((i, warnings, color), r) = try s.openFileImport(path)
+            var out: [String: JSONValue] = ["document": .int(i), "name": .string(s.documents[i].doc.name), "warnings": .strings(warnings),
+                                            "color": color, "readOnly": .bool(r.sourceReadOnly)]
+            if !r.sourceLayerIds.isEmpty {
+                out["sourceIds"] = .object(Dictionary(uniqueKeysWithValues: r.sourceLayerIds.map { (String($0.key.rawValue), JSONValue.string($0.value)) }))
+            }
+            if let d = r.sourceDocumentId { out["sourceDocumentId"] = .string(d) }
+            return .object(out)
         })
         r.add(CommandSpec("file.save", "Save", menu: ["File"], shortcut: "Cmd+S",
                           params: #"{"path":str? (none: the document's own PSD, PSB or .pcraft file),"form":"package"|"singleFile"? (.pcraft; default: the file's own form, else a package),"quality":0..12?,"tiffLayers":bool?,"tgaBits":24|32?} → {path,warnings,copy,assets?,tiles?}"#,

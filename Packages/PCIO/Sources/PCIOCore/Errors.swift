@@ -62,12 +62,20 @@ public struct ImportResult: Sendable {
     /// Only a stand-in picture of the file: Open shows it with its warning; Place and other
     /// auxiliary imports refuse it.
     public var previewOnly: Bool
+    /// The ids the source file gives its layers, by the layer each became (a Compositor manifest's layer UUIDs, as
+    /// strings); empty for a format without its own layer ids. A layer the import left out has no entry.
+    public var sourceLayerIds: [LayerId: String]
+    /// The id the source file gives the document (a Compositor manifest's `documentID`), when it has one.
+    public var sourceDocumentId: String?
 
-    public init(document: Document, warnings: [String] = [], sourceReadOnly: Bool = false, previewOnly: Bool = false) {
+    public init(document: Document, warnings: [String] = [], sourceReadOnly: Bool = false, previewOnly: Bool = false,
+                sourceLayerIds: [LayerId: String] = [:], sourceDocumentId: String? = nil) {
         self.document = document
         self.warnings = warnings
         self.sourceReadOnly = sourceReadOnly
         self.previewOnly = previewOnly
+        self.sourceLayerIds = sourceLayerIds
+        self.sourceDocumentId = sourceDocumentId
     }
 }
 
