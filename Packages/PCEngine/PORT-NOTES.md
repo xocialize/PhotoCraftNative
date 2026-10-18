@@ -10,10 +10,10 @@ and error messages are kept verbatim, and photocraft's tests are ported one for 
 
 All 892 command ids of photocraft's catalogue are registered with photocraft's label, menu path,
 shortcut and params notation: **887 implemented, 5 stubbed** (`plugin.*`, the WebAssembly plug-in
-host), **0 not registered**. 20 more ids are registered that photocraft's engine doesn't have: the
+host), **0 not registered**. 21 more ids are registered that photocraft's engine doesn't have: the
 seven File-menu ids its app shell owns (`file.open`, `file.save`, `file.saveAs`,
 `file.export.exportAs`, `file.export.quickExportAsPng`, `file.clearRecent`, `file.removeRecent`),
-nine PCIntelligence commands, and the four filter adjustment layers (AB-T-0258:
+nine PCIntelligence commands, `layer.layerMask.copy` (AB-T-0324, the Layers panel's mask drag), and the four filter adjustment layers (AB-T-0258:
 `layer.newAdjustmentLayer.grain`, `.addNoise`, `.gaussianBlur`, `.motionBlur`, created with
 Compositor's settings and edited by `layer.setAdjustment`; Grain's and Add Noise's `seed` defaults
 to one derived from the new layer's id, and a reset keeps it; a PSD/PSB save bakes them into pixel
@@ -66,7 +66,9 @@ option types PCIntelligence's operations take); the official MCP `swift-sdk` 0.1
   (only `plugin.*` is left); `IntelligenceBridge.swift` registers PCIntelligence's descriptors as
   commands; `FileMenuCommands.swift` registers the File-menu ids photocraft's app shell owns
   (`file.open`, `file.save`, `file.saveAs`, `file.export.exportAs`, `file.export.quickExportAsPng`,
-  `file.clearRecent`, `file.removeRecent`), so every frontend opens and saves the same way.
+  `file.clearRecent`, `file.removeRecent`), so every frontend opens and saves the same way;
+  `LayerMaskCopyCommands.swift` (`layer_mask_copy_cmds`, PhotoCraftNative's own) is the Layers panel's drag of a
+  mask thumbnail (AB-T-0324).
 * **`Data/`** — `PhotocraftCatalog.swift` (generated: all 892 photocraft commands with label, menu,
   shortcut, params and module — the coverage reference) and `MenuCatalog.swift` (photocraft's menus).
 * **`ViewModels/`** — Layers / History / Channels / Paths / Properties models and the thumbnail cache.
@@ -386,6 +388,19 @@ against PCRender's changed Satin (see the change requests). No compiler warnings
   `layer.layerStyle.createLayer`'s check reads `"layer"` too and wants an effect showing, with the layer's
   effects on (what its body needs). `Session.disabledReason` / `isEnabled(id, params)` now check a command that
   documents `"layer":id` on the layer it names, as `dispatch` already did, so asking and running agree.
+* **Copying and moving a layer mask (AB-T-0324).** `layer.layerMask.copy {"from":id? (default active),"to":id,
+  "move":bool=false}` is Photoshop's drag (move) and ⌥-drag (copy) of a mask thumbnail onto another layer. photocraft
+  has no counterpart, and Photoshop has no menu item, so the command has no menu path.
+  - The target gets the source's `LayerMask` whole: its surface where it sits on the document (masks are
+    document-space), the value outside its content (a Hide All mask's black), density, feather, enabled and linked.
+    Any mask the target had is replaced; asking first is the host's job, as Photoshop's "Replace layer mask?" is.
+  - `move` deletes the source's mask in the same step. One history step: "Copy Layer Mask", "Move Layer Mask", or
+    "Replace Layer Mask" when the target had one (PixelAgencyEditor's and Compositor's names; Photoshop's own step
+    names were not checked, Photoshop not being up).
+  - Folders take the mask, as in Photoshop; the Background becomes "Layer 0" first, as Add Layer Mask makes it.
+    Refused: no mask on `from`, `from` = `to`, a missing layer. Vector masks are out of scope.
+  - The target becomes the active, only selected layer; the Channels target is left alone. The result is
+    `{layer, replaced, moved}`. The enabled check reads `from`/`to`, so `isEnabled(id, params)` answers a drop.
 * **Deep nesting.** Debug builds recurse through `Equatable` on 100 nested groups (photocraft's cap);
   the tests that build them run on an 8 MB thread. Release frames are far smaller.
 

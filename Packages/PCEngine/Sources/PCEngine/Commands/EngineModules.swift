@@ -104,6 +104,7 @@ enum EngineModules {
         FxVisibilityCommands.self,
         MaskViewCommands.self,
         LayerMaskPropsCommands.self,
+        LayerMaskCopyCommands.self,
         ActionsCommands.self,
         IntelligenceBridge.self,
         // Last: every photocraft id nothing above implemented, as `unavailable(reason)`.
