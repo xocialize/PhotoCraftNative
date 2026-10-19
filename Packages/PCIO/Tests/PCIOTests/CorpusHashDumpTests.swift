@@ -35,11 +35,11 @@ import Testing
             let doc = try DocumentIO.importFile(contentsOf: url, options: options).document
             let bytes = try DocumentIO.export(doc, as: "x.pcraft", options: options).bytes
             let w = PcraftWriter()
-            let p = try w.prepare(doc, SaveOptions())
+            let (model0, p) = try w.prepareWithModel(doc, SaveOptions())
             try Self.record("\(name).export", p.manifest, bytes)
             w.forceZip64 = true
             let (forced, _) = try w.saveZip(doc)
-            var model = p.model
+            var model = model0
             model.formatVersion = max(model.formatVersion, pcraftZip64FormatVersion)
             try Self.record("\(name).zip64", try ManifestJSON.encode(model), forced)
             n += 1

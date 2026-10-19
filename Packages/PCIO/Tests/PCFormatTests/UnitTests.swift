@@ -160,7 +160,7 @@ import Testing
         var adj = Layer(name: "adj", content: .adjustment(.exposure(.init(exposure: 0, offset: 0, gamma: 1))))
         adj.opacity = .nan
         doc.layers = [Layer.group("g", [Layer.raster("r", format: doc.pixelFormat), adj])]
-        let m = Manifest(formatVersion: 1, generator: "t", document: Convert.docM(doc, Collect(cache: [:])))
+        let m = Manifest(formatVersion: 1, generator: "t", document: Convert.docM(doc, Collect(PcraftWriter())))
         do throws(Finite.Problem) {
             try Finite.checkManifest(m)
             Issue.record("non-finite opacity passed")

@@ -34,7 +34,7 @@ import Testing
         return out
     }
 
-    static func manifest(_ doc: Document) throws -> Manifest { try PcraftWriter().prepare(doc, SaveOptions()).model }
+    static func manifest(_ doc: Document) throws -> Manifest { try PcraftWriter().prepareWithModel(doc, SaveOptions()).model }
 
     @Test(arguments: allModes, allDepths) func manifestsAreTheBytesTheEncoderWrote(_ mode: ColorMode, _ depth: SampleType) throws {
         let m = try Self.manifest(richDoc(mode, depth))

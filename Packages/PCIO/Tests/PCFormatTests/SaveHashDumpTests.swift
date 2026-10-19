@@ -35,7 +35,7 @@ enum SaveHashDump {
     /// streamed single file, and the package's manifest.
     static func dump(_ name: String, _ doc: Document) throws {
         let w = PcraftWriter()
-        let p = try w.prepare(doc, SaveOptions())
+        let (model0, p) = try w.prepareWithModel(doc, SaveOptions())
         let (zip, _) = try w.saveZip(doc)
         try SaveHashDump.record("\(name).zip", manifest: p.manifest, file: zip)
         let (again, _) = try w.saveZip(doc)
@@ -45,7 +45,7 @@ enum SaveHashDump {
         let z64 = PcraftWriter()
         z64.forceZip64 = true
         let (forced, _) = try z64.saveZip(doc)
-        var model = p.model
+        var model = model0
         model.formatVersion = max(model.formatVersion, pcraftZip64FormatVersion)
         try SaveHashDump.record("\(name).zip64", manifest: try ManifestJSON.encode(model), file: forced)
         let dir = tempDir("hash-dump")

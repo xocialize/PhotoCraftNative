@@ -172,6 +172,31 @@ enum ManifestJSON {
         return lists.expand(out)
     }
 
+    /// Where the number of `text`'s `format_version` member is, `text` being a manifest as `encode` writes it: the
+    /// document's own member, a line of its own at the first level of indent (two spaces), which no nested key and
+    /// nothing inside a string can be. Nil if it isn't there.
+    static func formatVersionRange(_ text: [UInt8]) -> Range<Int>? {
+        let key = Array("\n  \"format_version\": ".utf8)
+        guard text.count >= key.count else { return nil }
+        var at = text.count - key.count
+        while at >= 0, !text[at ..< at + key.count].elementsEqual(key) { at -= 1 }
+        guard at >= 0 else { return nil }
+        let start = at + key.count
+        var end = start
+        while end < text.count, text[end] >= 0x30, text[end] <= 0x39 { end += 1 }
+        return end > start ? start ..< end : nil
+    }
+
+    /// `text` (as for `formatVersionRange`) saying format `version`: what `encode` writes for the same manifest with
+    /// that version. Nil when the number's length would change.
+    static func withFormatVersion(_ text: [UInt8], _ version: UInt32) -> [UInt8]? {
+        let digits = Array(String(version).utf8)
+        guard let range = formatVersionRange(text), range.count == digits.count else { return nil }
+        var out = text
+        out.replaceSubrange(range, with: digits)
+        return out
+    }
+
     static func layerTree(_ l: LayerM, _ e: JSONEncoder) throws(FormatError) -> JSONTree {
         // Children first, from this small frame.
         var kids: [JSONTree] = []

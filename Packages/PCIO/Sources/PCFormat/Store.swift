@@ -18,6 +18,8 @@ enum Store {
 
     static func tilePath(_ h: String) -> String { "tiles/\(h).zst" }
     static func blobPath(_ h: String) -> String { "blobs/\(h).zst" }
+    static func tilePath(_ d: ContentDigest) -> String { tilePath(d.hex) }
+    static func blobPath(_ d: ContentDigest) -> String { blobPath(d.hex) }
 
     /// A preview as PNG (straight alpha, sRGB).
     static func png(_ img: RGBA8Image) throws(FormatError) -> [UInt8] {
@@ -334,34 +336,37 @@ public struct SaveStats: Equatable, Sendable {
     public init() {}
 }
 
-/// Collects a save's objects, hashing tiles through the writer's cache.
+/// Collects a save's objects, hashing tiles through the writer's cache. Each distinct object keeps the hash string
+/// the manifest names it by, made once however many times it is referenced.
 final class Collect: FormatSink {
-    var tiles: [Hash: (Tile, SampleType)] = [:]
-    var blobs: [Hash: [UInt8]] = [:]
-    /// Tile generation → hash: the tiles of earlier saves (photocraft keys by `Arc` identity; a
-    /// tile's generation changes on every write and is copied with the tile).
-    var cache: [UInt64: Hash]
-    var seen: [UInt64: Hash] = [:]
+    var tiles: [ContentDigest: (tile: Tile, sample: SampleType, hex: Hash)] = [:]
+    var blobs: [ContentDigest: (data: [UInt8], hex: Hash)] = [:]
+    /// Its hash cache, tile generation → hash (photocraft keys by `Arc` identity; a tile's generation changes on every
+    /// write and is copied with the tile): used and filled where it is, never copied.
+    let writer: PcraftWriter
 
-    init(cache: [UInt64: Hash]) { self.cache = cache }
+    init(_ writer: PcraftWriter) { self.writer = writer }
 
     func tile(_ format: PixelFormat, _ tile: Tile) -> Hash {
-        let h: Hash
-        if let c = cache[tile.generation] {
+        let h: ContentDigest
+        if let c = writer.hashCache[tile.generation] {
             h = c
         } else {
-            h = PcraftCodec.hash(Collect.tileLE(tile, format.sample))
-            cache[tile.generation] = h
+            h = PcraftCodec.digest(Collect.tileLE(tile, format.sample))
+            writer.hashCache[tile.generation] = h
         }
-        seen[tile.generation] = h
-        if tiles[h] == nil { tiles[h] = (tile, format.sample) }
-        return h
+        if let t = tiles[h] { return t.hex }
+        let hex = h.hex
+        tiles[h] = (tile, format.sample, hex)
+        return hex
     }
 
     func blob(_ data: [UInt8]) -> Hash {
-        let h = PcraftCodec.hash(data)
-        if blobs[h] == nil { blobs[h] = data }
-        return h
+        let h = PcraftCodec.digest(data)
+        if let b = blobs[h] { return b.hex }
+        let hex = h.hex
+        blobs[h] = (data, hex)
+        return hex
     }
 
     static func tileLE(_ t: Tile, _ sample: SampleType) -> [UInt8] {
@@ -434,12 +439,27 @@ struct FileSignature: Equatable, Sendable {
     }
 }
 
+/// A stored object's name: a tile or a blob, and its hash. Its path is made when it is written, not held for the
+/// whole save (AB-T-0328); names order as their paths do.
+struct ObjectName: Hashable, Comparable, Sendable {
+    var isTile: Bool
+    var digest: ContentDigest
+
+    var path: String { isTile ? Store.tilePath(digest) : Store.blobPath(digest) }
+
+    /// `path`'s length: `tiles/` or `blobs/`, 64 hex digits, `.zst`.
+    static let pathLength = 74
+
+    static func < (a: ObjectName, b: ObjectName) -> Bool { a.isTile != b.isTile ? !a.isTile : a.digest < b.digest }
+}
+
 struct Prepared {
-    /// The manifest, as written (version 1) and as JSON.
-    var model: Manifest
+    /// The manifest as JSON, and the format it says. The model it was written from isn't kept: through it, the
+    /// streamed archive would hold every tile's hash string (AB-T-0328).
     var manifest: [UInt8]
-    /// Bundle path → object, sorted by path.
-    var objects: [(path: String, object: StoreObject)]
+    var formatVersion: UInt32
+    /// The objects, sorted by path.
+    var objects: [(name: ObjectName, object: StoreObject)]
     var previews: [(name: String, data: [UInt8])]
     var stats: SaveStats
 }
@@ -465,9 +485,9 @@ public let defaultZipCacheBudget = 64 << 20
 /// `setReverifyBudget`). Over enough saves every object is read again, and a damaged one is
 /// rewritten.
 public final class PcraftWriter {
-    var hashCache: [UInt64: Hash] = [:]
-    /// Compressed objects by bundle path (ZIP mode), costing at most `zipCacheBudget`.
-    var compressedObjects: [String: StoredObject] = [:]
+    var hashCache: [UInt64: ContentDigest] = [:]
+    /// Compressed objects by name (ZIP mode), costing at most `zipCacheBudget`.
+    var compressedObjects: [ObjectName: StoredObject] = [:]
     var zipCacheBudget = defaultZipCacheBudget
     /// Writes every ZIP64 field (and a format 2 manifest) even when classic ZIP fits: tests of
     /// format 2 without multi-gigabyte documents.
@@ -503,7 +523,7 @@ public final class PcraftWriter {
         }
     }
 
-    /// What a cached object costs beyond its bytes: its path and its dictionary entry.
+    /// What a cached object costs beyond its bytes: its name and its dictionary entry.
     static let zipCacheEntryCost = 256
 
     /// The PNG bytes of the last previews saved, by entry name.
@@ -520,22 +540,13 @@ public final class PcraftWriter {
     /// Generator string written into manifests.
     public static let generator = "photocraft-format 0.1.0 (PhotoCraftNative PCFormat)"
 
-    func prepare(_ doc: Document, _ opts: SaveOptions) throws(FormatError) -> Prepared {
+    func prepare(_ doc: Document, _ opts: SaveOptions) throws(FormatError) -> Prepared { try prepareWithModel(doc, opts).prepared }
+
+    /// `prepare`, and the manifest it wrote as a model.
+    func prepareWithModel(_ doc: Document, _ opts: SaveOptions) throws(FormatError) -> (model: Manifest, prepared: Prepared) {
         try Convert.checkNesting(doc.layers)
-        // Hash the tiles this writer hasn't seen, on all cores.
-        var pending: [UInt64: (Tile, SampleType)] = [:]
-        Convert.forEachSurface(doc) { s in
-            s.forEachTile { _, t in if hashCache[t.generation] == nil { pending[t.generation] = (t, s.format.sample) } }
-        }
-        if !pending.isEmpty {
-            let list = Array(pending)
-            let hashes = Parallel.map(list.count) { i in PcraftCodec.hash(Collect.tileLE(list[i].value.0, list[i].value.1)) }
-            for (i, h) in hashes.enumerated() { hashCache[list[i].key] = h }
-        }
-        let c = Collect(cache: hashCache)
-        let document = Convert.docM(doc, c)
-        // Keep the hashes of this save's tiles only.
-        hashCache = c.seen
+        updateHashCache(doc)
+        let (document, objects, counts) = collect(doc)
         var previews: [(String, [UInt8])] = []
         if let t = opts.thumbnail { previews.append((Store.thumb, try png(Store.thumb, t))) }
         if let t = opts.composite { previews.append((Store.composite, try png(Store.composite, t))) }
@@ -557,14 +568,47 @@ public final class PcraftWriter {
         let json = try ManifestJSON.encode(manifest)
         try Store.checkManifestDepth(json)
         var stats = SaveStats()
-        stats.tilesTotal = c.tiles.count
-        stats.blobsTotal = c.blobs.count
+        stats.tilesTotal = counts.tiles
+        stats.blobsTotal = counts.blobs
         stats.manifestBytes = json.count
-        var objects: [(String, StoreObject)] = []
-        for (h, (t, s)) in c.tiles { objects.append((Store.tilePath(h), .tile(t, s))) }
-        for (h, b) in c.blobs { objects.append((Store.blobPath(h), .blob(b))) }
-        objects.sort { $0.0 < $1.0 }
-        return Prepared(model: manifest, manifest: json, objects: objects.map { ($0.0, $0.1) }, previews: previews.map { ($0.0, $0.1) }, stats: stats)
+        return (manifest, Prepared(manifest: json, formatVersion: manifest.formatVersion, objects: objects, previews: previews.map { ($0.0, $0.1) },
+                                   stats: stats))
+    }
+
+    /// `doc` as a manifest model, and its objects sorted by path. The collector's tables, and the hash strings only
+    /// they hold, are gone when this returns: before the manifest is encoded.
+    func collect(_ doc: Document) -> (DocM, [(name: ObjectName, object: StoreObject)], counts: (tiles: Int, blobs: Int)) {
+        let c = Collect(self)
+        let document = Convert.docM(doc, c)
+        var objects: [(name: ObjectName, object: StoreObject)] = []
+        objects.reserveCapacity(c.tiles.count + c.blobs.count)
+        for (h, t) in c.tiles { objects.append((ObjectName(isTile: true, digest: h), .tile(t.tile, t.sample))) }
+        for (h, b) in c.blobs { objects.append((ObjectName(isTile: false, digest: h), .blob(b.data))) }
+        objects.sort { $0.name < $1.name }
+        return (document, objects, (c.tiles.count, c.blobs.count))
+    }
+
+    /// Brings the hash cache to `doc`'s tiles: those it doesn't have are hashed on all cores, and those of earlier
+    /// saves that `doc` no longer has are dropped. Changed in place, so a save never holds two of these tables.
+    func updateHashCache(_ doc: Document) {
+        var generations = Set<UInt64>()
+        var pending: [UInt64: (Tile, SampleType)] = [:]
+        Convert.forEachSurface(doc) { s in
+            s.forEachTile { _, t in
+                generations.insert(t.generation)
+                if hashCache[t.generation] == nil { pending[t.generation] = (t, s.format.sample) }
+            }
+        }
+        if hashCache.count > generations.count - pending.count {
+            for g in Array(hashCache.keys) where !generations.contains(g) { hashCache[g] = nil }
+        }
+        generations = []
+        if !pending.isEmpty {
+            let list = Array(pending)
+            pending = [:]
+            let hashes = Parallel.map(list.count) { i in PcraftCodec.digest(Collect.tileLE(list[i].value.0, list[i].value.1)) }
+            for (i, h) in hashes.enumerated() { hashCache[list[i].key] = h }
+        }
     }
 
     /// Saves as a ZIP bundle in memory: classic ZIP with a format 1 manifest when it fits (what
@@ -576,8 +620,8 @@ public final class PcraftWriter {
         // Room for the objects uncompressed: never regrown and copied, and pages that compression
         // saved are never touched.
         sink.bytes.reserveCapacity(p.manifest.count + p.previews.reduce(0) { $0 + $1.data.count }
-            + p.objects.reduce(0) { $0 + $1.object.contentSize + $1.object.contentSize / 64 + 128 + $1.path.utf8.count } + 4096)
-        let (out, stats) = try writeZip(p, into: sink)
+            + p.objects.reduce(0) { $0 + $1.object.contentSize + $1.object.contentSize / 64 + 128 + ObjectName.pathLength } + 4096)
+        let (out, stats) = try writeZip(consume p, into: sink)
         return (out.bytes, stats)
     }
 
@@ -589,18 +633,31 @@ public final class PcraftWriter {
     /// then the objects in path order, compressed a batch at a time. A format 1 manifest is
     /// rewritten in place as format 2 (the same length) if the archive turns out to need ZIP64; a
     /// format 3 one (a filter adjustment layer) already allows it. Holds the central directory and
-    /// at most two batches beyond the document.
-    func writeZip<Sink: ZipSink>(_ p: Prepared, into sink: Sink) throws(FormatError) -> (Sink, SaveStats) {
-        var model = p.model
-        var manifest = p.manifest
+    /// at most two batches beyond the document: not the manifest, once it is written, when `p` is
+    /// handed over (AB-T-0328).
+    func writeZip<Sink: ZipSink>(_ p: consuming Prepared, into sink: Sink) throws(FormatError) -> (Sink, SaveStats) {
+        var manifest = p.manifest, version = p.formatVersion
+        p.manifest = []
         var stats = p.stats
-        if forceZip64 && model.formatVersion < pcraftZip64FormatVersion {
-            model.formatVersion = pcraftZip64FormatVersion
-            manifest = try ManifestJSON.encode(model)
+        if forceZip64 && version < pcraftZip64FormatVersion {
+            manifest = try Self.manifest(manifest, saying: pcraftZip64FormatVersion)
+            version = pcraftZip64FormatVersion
+        }
+        // Format 2 differs from 1 only in the version's digits: where they are and the format 2 text's CRC are worked
+        // out now, so the text isn't kept while the objects stream.
+        var zip64Patch: (offset: Int, digits: [UInt8], crc: UInt32)?
+        let digits = Array(String(pcraftZip64FormatVersion).utf8)
+        if version < pcraftZip64FormatVersion, let range = ManifestJSON.formatVersionRange(manifest), range.count == digits.count {
+            // In place and back, not in a copy of the text.
+            let old = Array(manifest[range])
+            manifest.replaceSubrange(range, with: digits)
+            zip64Patch = (range.lowerBound, digits, CRC32.checksum(manifest))
+            manifest.replaceSubrange(range, with: old)
         }
         var z = ZipStreamWriter(sink, forceZip64: forceZip64)
         do {
             try z.add(Store.manifest, manifest)
+            manifest = []
             for (name, data) in p.previews { try z.add(name, data) }
         } catch {
             throw FormatError.wrap(error)
@@ -609,7 +666,7 @@ public final class PcraftWriter {
         let objects = p.objects, cached = compressedObjects
         var batches: [Range<Int>] = []
         var start = 0, bytes = 0
-        for (i, o) in objects.enumerated() where cached[o.path] == nil {
+        for (i, o) in objects.enumerated() where cached[o.name] == nil {
             bytes += o.object.contentSize
             if bytes >= PcraftWriter.zipBatchBytes {
                 batches.append(start ..< i + 1)
@@ -624,14 +681,14 @@ public final class PcraftWriter {
             DispatchQueue.global(qos: .userInitiated).async(group: group) {
                 out.objects = Parallel.map(range.count) { k -> StoredObject? in
                     let o = objects[range.lowerBound + k]
-                    if cached[o.path] != nil { return nil }
+                    if cached[o.name] != nil { return nil }
                     let data = o.object.compressed
                     return StoredObject(data: data, crc: CRC32.checksum(data))
                 }
             }
             return (group, out)
         }
-        var next: [String: StoredObject] = [:]
+        var next: [ObjectName: StoredObject] = [:]
         var kept = 0
         var pending = compress(batches[0])
         // No compression outlives the save, whichever way it ends.
@@ -641,30 +698,28 @@ public final class PcraftWriter {
             group.wait()
             if b + 1 < batches.count { pending = compress(batches[b + 1]) }
             for (k, i) in batches[b].enumerated() {
-                let (path, obj) = objects[i]
+                let (name, obj) = objects[i]
                 let o: StoredObject
-                if let d = cached[path] {
+                if let d = cached[name] {
                     if obj.isTile { stats.tilesReused += 1 }
                     o = d
                 } else {
                     if obj.isTile { stats.tilesWritten += 1 } else { stats.blobsWritten += 1 }
                     o = batch.objects[k] ?? StoredObject(data: obj.compressed)
                 }
-                do { try z.addStored(path, o.data, crc: o.crc) } catch { throw FormatError.wrap(error) }
+                do { try z.addStored(name.path, o.data, crc: o.crc) } catch { throw FormatError.wrap(error) }
                 let cost = o.data.count + PcraftWriter.zipCacheEntryCost
                 if kept + cost <= zipCacheBudget {
-                    next[path] = o
+                    next[name] = o
                     kept += cost
                 }
             }
             batch.objects = []
         }
         do {
-            if z.usesZip64 && model.formatVersion < pcraftZip64FormatVersion {
-                model.formatVersion = pcraftZip64FormatVersion
-                let v2 = try ManifestJSON.encode(model)
-                guard v2.count == manifest.count else { throw FormatError.unsupported("manifest: format 2 changes its length") }
-                try z.replaceStored(0, v2, crc: CRC32.checksum(v2))
+            if z.usesZip64 && version < pcraftZip64FormatVersion {
+                guard let patch = zip64Patch else { throw FormatError.unsupported("manifest: format \(pcraftZip64FormatVersion) changes its length") }
+                try z.patchStored(0, at: patch.offset, patch.digits, crc: patch.crc)
             }
             let out = try z.finish()
             compressedObjects = next
@@ -672,6 +727,15 @@ public final class PcraftWriter {
         } catch {
             throw FormatError.wrap(error)
         }
+    }
+
+    /// Manifest text `json` saying format `version`, the same length: its `format_version` rewritten in place
+    /// (`ManifestJSON.withFormatVersion`), as encoding its model again with that version would write it.
+    static func manifest(_ json: [UInt8], saying version: UInt32) throws(FormatError) -> [UInt8] {
+        guard let out = ManifestJSON.withFormatVersion(json, version) else {
+            throw FormatError.unsupported("manifest: format \(version) changes its length")
+        }
+        return out
     }
 
     /// Saves into a directory bundle: reuses only valid existing objects, rewrites missing or
@@ -696,13 +760,15 @@ public final class PcraftWriter {
         if verified?.directory != root { verified = DirectoryVerificationCache(directory: root) }
         verified?.generation += 1
         let generation = verified?.generation ?? 0
-        let recheck = rollingRecheck(Set(p.objects.map(\.path)))
+        // A package save names its objects by path throughout.
+        let objects = p.objects.map { (path: $0.name.path, object: $0.object) }
+        let recheck = rollingRecheck(Set(objects.map(\.path)))
         // Objects on disk whose signature this writer checked and which aren't due a recheck are
         // reused; the other existing ones are read back and checked, and what is missing or
         // damaged is written. Checks and writes run on all cores.
         var check: [(path: String, object: StoreObject)] = []
         var writes: [(path: String, object: StoreObject)] = []
-        for (path, obj) in p.objects {
+        for (path, obj) in objects {
             let objectPath = FS.join(root, path)
             // `root` and `listObjects` validated the fixed parent directories once. Check each
             // leaf here; `writeFile` rechecks its parent around every mutation.
@@ -769,7 +835,7 @@ public final class PcraftWriter {
         // The manifest is committed: the save has succeeded. Removing objects it no longer
         // references is best-effort housekeeping (a vanished or locked file must not turn a
         // complete save into a reported failure); a leftover is retried on the next save.
-        let referenced = Set(p.objects.map(\.path))
+        let referenced = Set(objects.map(\.path))
         for path in existing.sorted() where !referenced.contains(path) {
             if (try? DirBundle.removeFile(root, FS.join(root, path))) != nil { stats.objectsRemoved += 1 }
             verified?.objects[path] = nil
@@ -811,10 +877,11 @@ public final class PcraftWriter {
         case .package:
             return try saveDir(doc, url, opts)
         case .singleFile:
-            let p = try prepare(doc, opts)
+            // Handed to the archive writer, which lets go of the manifest once it is written.
+            var p: Prepared? = try prepare(doc, opts)
             var stats = SaveStats()
             try AtomicSave.atomicWriteStreaming(url) { fd throws(FormatError) in
-                stats = try writeZip(p, into: FileZipSink(fd: fd, path: url.path)).1
+                stats = try writeZip(p.take()!, into: FileZipSink(fd: fd, path: url.path)).1
             }
             return stats
         }

@@ -59,6 +59,9 @@ enum PcraftCodec {
     /// The content address: lower-case hex BLAKE3 of the uncompressed bytes.
     static func hash(_ data: [UInt8]) -> Hash { Convert.hex(BLAKE3.hash(data)) }
 
+    /// The content address as its 32 bytes.
+    static func digest(_ data: [UInt8]) -> ContentDigest { ContentDigest(BLAKE3.hash(data)) }
+
     /// Decodes a zstd frame of at most `max` bytes (`limitExceeded` beyond). With `exact`, the
     /// decoded length must be exactly that (`corrupt` otherwise).
     static func decompressBounded(_ data: [UInt8], max: Int, exact: Int?, what: String) throws(FormatError) -> [UInt8] {
@@ -109,5 +112,33 @@ enum PcraftCodec {
 
     static func decompress(_ data: [UInt8], expected: Int, what: String) throws(FormatError) -> [UInt8] {
         try decompressBounded(data, max: expected, exact: expected, what: what)
+    }
+}
+
+/// A content address (BLAKE3) as its 32 bytes, in four big-endian words, so digests order as their hex does. A save
+/// holds these for its tiles and blobs, not 64-character strings (AB-T-0328): `hex` makes the string where the
+/// manifest or a path needs it.
+struct ContentDigest: Hashable, Comparable, Sendable {
+    var w0, w1, w2, w3: UInt64
+
+    init(_ bytes: [UInt8]) {
+        precondition(bytes.count == 32, "a digest is 32 bytes")
+        func word(_ k: Int) -> UInt64 { bytes[k * 8 ..< k * 8 + 8].reduce(0) { $0 << 8 | UInt64($1) } }
+        (w0, w1, w2, w3) = (word(0), word(1), word(2), word(3))
+    }
+
+    static func < (a: ContentDigest, b: ContentDigest) -> Bool { (a.w0, a.w1, a.w2, a.w3) < (b.w0, b.w1, b.w2, b.w3) }
+
+    /// The 64 lower-case hex digits, as `Convert.hex` spells the bytes.
+    var hex: Hash {
+        String(unsafeUninitializedCapacity: 64) { out in
+            for (k, w) in [w0, w1, w2, w3].enumerated() {
+                for j in 0 ..< 16 {
+                    let d = UInt8(truncatingIfNeeded: w >> (60 - 4 * j)) & 15
+                    out[k * 16 + j] = d < 10 ? 0x30 + d : 0x57 + d
+                }
+            }
+            return 64
+        }
     }
 }
