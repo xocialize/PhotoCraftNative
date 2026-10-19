@@ -15,6 +15,8 @@ enum PhotocraftExtensions {
         "select.magicWand": #"{"x":px,"y":px,"tolerance":0..255=32,"sampleSize":1|3|5|11|31|51|101=1 (Point Sample, or the N by N Average),"contiguous":bool=true,"antiAlias":bool=true,"sampleAllLayers":bool=false,"mode":"replace|add|subtract|intersect"="replace"} (samples the visible alpha, Quick Mask, or layer mask when that is the picture)"#,
         // AB-T-0279: a Polygonal Lasso step.
         "select.lasso": #"{"points":[[x,y],…],"mode":"replace|add|subtract|intersect"="replace","antiAlias":bool=true,"feather":px=0,"polygonal":bool=false (the step is "Polygonal Lasso")}"#,
+        // AB-T-0285: Release takes the clipped run above out too.
+        "layer.releaseClippingMask": #"{"layer":id?} (no layer: every selected layer; each takes the layers clipped above it out too)"#,
     ]
 
     /// The params a command registered from `c` should have.

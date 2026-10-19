@@ -29,7 +29,6 @@ fileprivate func fillActive(_ s: Session, _ c: SIMD4<Float>) throws {
         try fillActive(s, SIMD4(1, 0, 0, 1))
         try s.execute("select.rect", ["x": 20, "y": 0, "width": 20, "height": 20])
         try s.execute("layer.layerMask.revealSelection")
-        try s.execute("select.deselect")
         try s.updateActive { $0.savedRevision = $0.revision }
         return (s, masked, bg)
     }

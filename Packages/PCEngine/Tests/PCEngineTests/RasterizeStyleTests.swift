@@ -107,7 +107,6 @@ import Testing
             try s.execute("layer.setProps", ["layer": .id(id), "fill": 0.4, "opacity": 0.7])
             try s.execute("select.rect", ["x": 0, "y": 0, "width": 34, "height": 48])
             try s.execute("layer.layerMask.revealSelection")
-            try s.execute("select.deselect")
             try addVectorMask(s, id, [(4, 4), (60, 4), (60, 26), (4, 26)])
             try bakeAndCheck(s, id, depth)
             try s.execute("edit.redo")

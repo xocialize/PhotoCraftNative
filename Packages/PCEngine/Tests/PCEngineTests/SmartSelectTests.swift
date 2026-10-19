@@ -288,7 +288,6 @@ import Testing
     @Test func refineEdgeWorksOnLayerMaskWithoutSelection() throws {
         let s = try blurredEdgeSelected()
         try s.execute("layer.layerMask.revealSelection")
-        try s.execute("select.deselect")
         #expect(s.active?.doc.selection == nil)
         #expect(s.active?.doc.layers.first?.mask != nil)
         #expect(s.isEnabled("select.refineEdge"))

@@ -289,7 +289,8 @@ enum CoreCommands: CommandModule {
             CommandSpec("layer.createClippingMask", "Create Clipping Mask", menu: ["Layer"], shortcut: "Cmd+Alt+G",
                         params: #"{"layer":id?} (no layer: every selected layer but the lowest clips to the layer below it)"#,
                         module: m, enabled: Pre.hasLayer) { s, p in try setClipped(s, p, true) },
-            CommandSpec("layer.releaseClippingMask", "Release Clipping Mask", menu: ["Layer"], params: #"{"layer":id?} (no layer: every selected layer)"#,
+            CommandSpec("layer.releaseClippingMask", "Release Clipping Mask", menu: ["Layer"],
+                        params: #"{"layer":id?} (no layer: every selected layer; each takes the layers clipped above it out too)"#,
                         module: m, enabled: Pre.hasLayer) { s, p in try setClipped(s, p, false) },
             CommandSpec("layer.layerMask.revealAll", "Reveal All", menu: ["Layer", "Layer Mask"],
                         params: #"{"layer":id?} (no layer: every selected layer that can take a mask)"#, module: m, enabled: Pre.hasLayer) { s, p in
@@ -304,7 +305,8 @@ enum CoreCommands: CommandModule {
                 guard let sel = s.active?.doc.selection else { throw EngineError.other("no selection") }
                 var mask = LayerMask.revealAll()
                 mask.surface = sel
-                return try setMask(s, p, "Add Layer Mask", mask)
+                // The selection is used up, as Hide Selection's is and Photoshop's both are (AB-T-0285).
+                return try setMask(s, p, "Add Layer Mask", mask, deselect: true)
             },
             CommandSpec("layer.layerMask.delete", "Delete", menu: ["Layer", "Layer Mask"], params: #"{"layer":id?}"#, module: m, enabled: Pre.hasLayer) { s, p in
                 try setMask(s, p, "Delete Layer Mask", nil)
@@ -537,6 +539,8 @@ enum CoreCommands: CommandModule {
 
     /// Create / Release Clipping Mask: with a `layer` param, that layer; otherwise the selection
     /// (Create clips every selected layer but the lowest; Release releases every selected layer).
+    /// Release takes the clipped run above each layer it releases out too, as Photoshop's does: the
+    /// layers below it stay clipped (measured in Photoshop 27, AB-T-0285).
     static func setClipped(_ s: Session, _ p: JSONValue, _ clip: Bool) throws -> JSONValue {
         let label = clip ? "Create Clipping Mask" : "Release Clipping Mask"
         var ids: [LayerId]
@@ -550,19 +554,30 @@ enum CoreCommands: CommandModule {
             default: ids = clip ? Array(sel.dropFirst()) : sel
             }
         }
-        try s.edit(label) { doc, _ in
+        let changed = try s.edit(label) { doc, _ -> [LayerId] in
+            var changed: [LayerId] = []
             for id in ids {
+                // A base isn't released, and keeps its group (Photoshop greys the item out for it).
+                let run = clip || doc.layer(id)?.clipped != true ? [] : ClipGroup.clippedAbove(doc, id)
                 guard doc.updateLayer(id, { $0.clipped = clip }) != nil else { throw EngineError.noLayer(id) }
+                if !changed.contains(id) { changed.append(id) }
+                for above in run where !changed.contains(above) {
+                    doc.updateLayer(above) { $0.clipped = false }
+                    changed.append(above)
+                }
             }
+            return changed
         }
-        return ["layers": .ids(ids)]
+        return ["layers": .ids(changed)]
     }
 
     /// Adds (`mask` non-nil) or removes a layer mask. Adding acts on every selected layer that can
     /// take one, in one step.
-    static func setMask(_ s: Session, _ p: JSONValue, _ label: String, _ mask: LayerMask?) throws -> JSONValue {
+    /// `deselect` drops the selection in the same step (Reveal Selection).
+    static func setMask(_ s: Session, _ p: JSONValue, _ label: String, _ mask: LayerMask?, deselect: Bool = false) throws -> JSONValue {
         let ids = mask != nil ? try LayerMulti.maskTargets(s, p) : [try s.layerParam(p)]
         try s.edit(label) { doc, _ in
+            if deselect { doc.selection = nil }
             let m = mask.map { LayerOps.maskAtDepth($0, doc.depth) }
             for id in ids {
                 if m != nil { LayerOps.backgroundToLayer(&doc, id) }

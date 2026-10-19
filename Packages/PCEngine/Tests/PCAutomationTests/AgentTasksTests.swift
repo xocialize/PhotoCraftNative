@@ -112,7 +112,7 @@ import Testing
         let inside = try await a.pixel(32, 24), outside = try await a.pixel(1, 1)
         #expect(inside.count == 4 && inside[0] > 0.99 && inside[1] < 0.01, "task 5: centre is red \(inside)")
         #expect(outside.count == 4 && outside[0] < 0.1, "task 5: corner shows the photo \(outside)")
-        _ = try await a.run("select.deselect")
+        #expect(try await a.inspect()["selectionBounds"] == .null, "task 5: Reveal Selection uses the selection up")
 
         // 6. Save a selection to a channel and load it back.
         _ = try await a.run("select.rect", ["x": 4, "y": 6, "width": 20, "height": 10])
@@ -272,7 +272,6 @@ import Testing
         #expect(try await a.inspect()["layers"]?[0]?["hasMask"] == true, "task 17")
         let boundary = try await a.pixel(20, 40)
         #expect(boundary[3] > 0.05 && boundary[3] < 0.95, "task 17: the feathered edge keeps partial alpha \(boundary)")
-        _ = try await a.run("select.deselect")
 
         // 18. Expand a selection and read its bounds back.
         _ = try await a.run("select.rect", ["x": 20, "y": 20, "width": 20, "height": 20])

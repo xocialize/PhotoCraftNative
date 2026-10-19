@@ -50,11 +50,14 @@ enum ExtraCommands: CommandModule {
 
     // MARK: Preconditions
 
-    static let hasMask: CommandEnabled = { s, _ in
-        switch s.activeLayer() {
-        case .failure(let e): return e.description
-        case .success(let l): return l.mask == nil ? "the active layer has no layer mask" : nil
+    /// The layer the command names (`"layer"`, else the active one) has a mask (AB-T-0285: Disable and Unlink
+    /// act on the layer they're given, which needn't be the active one).
+    static let hasMask: CommandEnabled = { s, p in
+        guard let d = s.active else { return "no document open" }
+        guard let id = Params.layerId(p) ?? d.activeLayer, let l = d.doc.layer(id) else {
+            return Params.layerId(p) == nil ? "no active layer" : "no such layer"
         }
+        return l.mask == nil ? (Params.layerId(p) == nil ? "the active layer has no layer mask" : "the layer has no layer mask") : nil
     }
 
     static let hasClipAndSelection: CommandEnabled = { s, _ in
@@ -537,10 +540,13 @@ enum ExtraCommands: CommandModule {
         }
     }
 
+    /// Layer › Ungroup Layers: the folder's children take its place. The layers clipped to the folder lose their
+    /// base and are released (`ClipGroup` rule 3), as Photoshop's are (AB-T-0285).
     static func ungroup(_ s: Session, _ p: JSONValue) throws -> JSONValue {
         let id = try s.layerParam(p)
         try s.edit("Ungroup Layers") { doc, active in
             guard let path = doc.path(of: id), let g = doc.layer(id), let idx = path.last else { throw EngineError.noLayer(id) }
+            let before = ClipGroup.Before.read(doc, [id])
             guard case .group(let group) = g.content else { throw EngineError.other("the active layer is not a group") }
             let children = group.children
             func splice(_ sib: inout [Layer]) {
@@ -556,6 +562,7 @@ enum ExtraCommands: CommandModule {
             } else {
                 doc.updateLayer(at: parent) { $0.withChildren { splice(&$0) } }
             }
+            ClipGroup.settle(&doc, placed: [], before: before)
             active = children.last?.id ?? doc.topLayer
         }
         return .null

@@ -311,7 +311,6 @@ private func maskAt(_ s: Session, _ x: Int32, _ y: Int32) -> Float {
             let s = try session(depth, "rgb")
             try s.execute("select.rect", ["x": 24, "y": 0, "width": 24, "height": 32])
             try s.execute("layer.layerMask.revealSelection")
-            try s.execute("select.deselect")
             let (pixels, offCanvas) = (rgba(s, 3, 3), maskAt(s, -500, 3))
             let n = steps(s)
             try s.execute("image.adjustments.invert", ["target": "mask"])

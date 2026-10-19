@@ -532,7 +532,6 @@ fileprivate func ellipsePath(_ x: Double, _ y: Double, _ w: Double, _ h: Double)
                     let (feather, density) = pmv
                     try s.execute("select.rect", ["x": 0, "y": 0, "width": 40, "height": 64])
                     try s.execute("layer.layerMask.revealSelection")
-                    try s.execute("select.deselect")
                     try s.edit("mask settings") { doc, _ in
                         doc.updateLayer(id) { l in
                             l.mask?.feather = feather

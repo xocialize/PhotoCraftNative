@@ -47,6 +47,13 @@ public enum ClipGroup {
         return Array(g.dropFirst())
     }
 
+    /// The clipped run directly above `id`, whether `id` is the base or clipped itself: what Release
+    /// Clipping Mask takes out with it.
+    public static func clippedAbove(_ doc: Document, _ id: LayerId) -> [LayerId] {
+        guard let path = doc.path(of: id), let (list, idx) = siblings(doc, path) else { return [] }
+        return list[(idx + 1)...].prefix { $0.clipped }.map(\.id)
+    }
+
     /// The clip groups of layers about to move or be deleted, read before they leave their slots.
     public struct Before: Sendable {
         var moving: [LayerId] = []

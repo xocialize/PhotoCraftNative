@@ -528,7 +528,6 @@ fileprivate func colorOverlay() -> Effect { .colorOverlay(Effect.ColorOverlay(co
             try s.execute("select.rect", ["x": 0, "y": 0, "width": 20, "height": 40])
             try s.execute("select.inverse")
             try s.execute("layer.layerMask.revealSelection")
-            try s.execute("select.deselect")
             #expect(try composite(s, 15, 15).y > 0.99 && composite(s, 15, 15).x > 0.99, "white shows through the mask")
             #expect(try s.execute("file.scripts.flattenAllMasks")["flattened"] == 1)
             let m = try #require(try doc(s).layer(id))
@@ -566,7 +565,6 @@ fileprivate func colorOverlay() -> Effect { .colorOverlay(Effect.ColorOverlay(co
             }
             try s.execute("select.rect", ["x": 0, "y": 0, "width": 20, "height": 40])
             try s.execute("layer.layerMask.revealSelection")
-            try s.execute("select.deselect")
             // Layer 2: a red square at the bottom-right with the same overlay and a disabled mask.
             try s.execute("layer.new.layer")
             try s.execute("select.rect", ["x": 30, "y": 30, "width": 8, "height": 8])
@@ -581,7 +579,6 @@ fileprivate func colorOverlay() -> Effect { .colorOverlay(Effect.ColorOverlay(co
             }
             try s.execute("select.rect", ["x": 34, "y": 34, "width": 2, "height": 2])
             try s.execute("layer.layerMask.revealSelection")
-            try s.execute("select.deselect")
             try s.edit("disable") { doc, _ in _ = doc.updateLayer(id2) { l in l.mask?.enabled = false } }
             let m1 = try doc(s).layer(id1)?.mask, v1 = try doc(s).layer(id1)?.vectorMask, m2 = try doc(s).layer(id2)?.mask
             #expect(m1?.enabled == true, "layer 1 raster mask is enabled")

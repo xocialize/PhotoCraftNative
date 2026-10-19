@@ -455,6 +455,21 @@ against PCRender's changed Satin (see the change requests). No compiler warnings
   - **`select.lasso {"polygonal": true}`** names its step "Polygonal Lasso", as Photoshop's History does for that
     tool. A scripted polygon selection (`set` the selection `to` a polygon) is "Lasso" whatever tool is current, so the
     name can't be confirmed through scripting; Magnetic Lasso keeps its own.
+* **Masks and clipping where PixelAgencyEditor worked around them (AB-T-0285).** Measured in Photoshop 27 the same
+  way:
+  - **Reveal Selection deselects** in its own step ("Add Layer Mask"), as Hide Selection already did; Photoshop does
+    for both.
+  - **Release Clipping Mask takes the clipped run above out too.** With B, C and D clipped to A, releasing C in
+    Photoshop leaves B clipped and C and D released (`ClipGroup.clippedAbove`). Without `"layer"`, each selected
+    layer releases with its run. Photoshop greys the item out for a base; given one, the engine changes nothing (the
+    group stays). The result's `layers` lists every layer released.
+  - **Ungroup settles clip groups.** A layer clipped to the folder loses its base and is released (`ClipGroup` rule
+    3, `Before.read` + `settle`), as `layer.delete` and `layer.moveTo` already did and as Photoshop's Ungroup Layers
+    does.
+  - **`layer.layerMask.enabled` / `linked` check the layer they're given.** Their enabled check (`hasMask`) read the
+    active layer whatever `"layer"` named; it reads `"layer"`, else the active layer.
+  - Tests: `MaskAndClipTests`. Tests that deselected after Reveal Selection no longer do (`select.deselect` needs a
+    selection); `LitmusTests` lost that step.
 * **Deep nesting.** Debug builds recurse through `Equatable` on 100 nested groups (photocraft's cap);
   the tests that build them run on an 8 MB thread. Release frames are far smaller.
 

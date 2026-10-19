@@ -25,8 +25,8 @@ import Testing
         ("type.create", ["x": 10, "y": 40, "text": "PC", "size": 24, "color": "#ffffff"]),
         ("layer.newAdjustmentLayer.hueSaturation", ["hue": 30, "saturation": -20]),
         ("select.rect", ["x": 0, "y": 0, "width": 48, "height": 64]),
+        // Reveal Selection uses the selection up (AB-T-0285).
         ("layer.layerMask.revealSelection", .object([:])),
-        ("select.deselect", .object([:])),
     ]
 
     /// The composite through PCRender (straight RGBA, row-major).

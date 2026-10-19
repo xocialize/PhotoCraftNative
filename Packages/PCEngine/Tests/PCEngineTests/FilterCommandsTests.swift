@@ -43,7 +43,6 @@ import Testing
         if revealSelection {
             try s.execute("select.all")
             try s.execute("layer.layerMask.revealSelection")
-            try s.execute("select.deselect")
         } else {
             try s.execute("layer.layerMask.revealAll")
         }

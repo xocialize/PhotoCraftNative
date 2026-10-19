@@ -129,7 +129,6 @@ import Testing
         s = try session()
         try s.execute("select.rect", ["x": 0, "y": 0, "width": 20, "height": 20])
         try s.execute("layer.layerMask.revealSelection")
-        try s.execute("select.deselect")
         // `view.layerMask {"mode":"gray"}` (mask_view_cmds) sets this view state.
         let layer = try #require(s.active?.activeLayer)
         try s.updateActive { $0.channelView.layerMask = LayerMaskView(layer: layer, mode: .gray) }
