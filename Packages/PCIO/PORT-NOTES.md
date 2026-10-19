@@ -713,7 +713,74 @@ photocraft-format's, so bundles go both ways:
   its 4.5 MB of text (it cost ~40 MB). The overhead still grows by about 1.5 KB per tile (about 38 MB from
   1,024 to 25,600 tiles, was about 55 MB), so it isn't flat. What grows now is held while the archive streams,
   not the manifest build: the manifest text (~176 B per tile), the hash strings and the tables keyed by them
-  (`Collect`, `hashCache`), each object's path, and the ZIP central directory.
+  (`Collect`, `hashCache`), each object's path, and the ZIP central directory. AB-T-0328 took that on (next).
+- **Less held per tile (AB-T-0328).** A single-file save now holds:
+  - **Hashes as 32-byte digests.** `Collect`, the writer's `hashCache` and the object list hold `ContentDigest`s
+    (four big-endian words, so they order as their hex). The hex string is made only for the manifest (once per
+    distinct object, kept in `Collect`'s own tables) and for each path as it is written. `TileRef.hash` is still
+    the public `String`.
+  - **Paths made at write time.** `Prepared.objects` is `(ObjectName, StoreObject)`: tile or blob and its digest,
+    ordered as the paths are (`blobs/` before `tiles/`, then by hash). A package save makes the paths once, up front.
+  - **No manifest model while the archive streams.** `prepare` returns the JSON and its format version; the model
+    (every `TileRef` and its hash string) is gone when it returns. `prepareWithModel` returns it for tests. Forced
+    ZIP64 and the format 2 rewrite patch the top-level `format_version` digits in the text
+    (`ManifestJSON.formatVersionRange`, `withFormatVersion`), which is what encoding the model again wrote.
+  - **The manifest let go once written.** `writeZip` takes its `Prepared` (`consuming`; `save` and `saveZip` hand it
+    over). The format 2 text's CRC is taken up front (its digit patched in place and back), and at the end only the
+    digit and the CRCs are rewritten (`ZipStreamWriter.patchStored`, `package`).
+  - **`prepare` holds one hash table.** `updateHashCache` brings the writer's cache to the document (new tiles hashed
+    on all cores, gone ones dropped) in place, and `Collect` reads and fills it there. `seen` (a second table of every
+    tile) is gone, and `Collect`'s tables are freed before the manifest is encoded.
+  - **No per-entry record beside the central directory.** `ZipLayout` kept a `Placed` (48 bytes) per entry for
+    `replaceStored`. A replace now reads its entry's offsets back from its central directory record.
+
+  Measured each option (release, M5 Max, 2026-10-19, one session; heap in use, sampled during the save, beyond
+  where it was; `SaveHeapProbeTests`, `PCRAFT_SAVE_PROBE=32,160`: 1,024 and 25,600 distinct 8-bit grey tiles):
+
+  | step, cumulative | at 25,600 tiles |
+  |---|---|
+  | 781832e | `Prepared` 14.39 MB; `prepare` peak 23.9 MB; stream peak 33.6–34.4 MB |
+  | no second copy of the object list | no change (it was transient) |
+  | paths made at write time | `Prepared` 9.69 MB (−4.7) |
+  | 32-byte digests, model still kept | 10.10 MB (+0.4: the model still holds every hash string) |
+  | no model while streaming | 6.18 MB; stream peak 26.0–27.2 MB |
+  | `prepare` with one hash table | `prepare` peak 13.8 MB (was 25.2) |
+  | manifest let go once written | stream peak 23.8–24.0 MB |
+  | no `Placed`, the CRC taken in place | stream peak 20.1–22.0 MB |
+
+  At 1,024 tiles the stream peak is 11–14 MB at both commits. So the stream's growth over 24,576 tiles went from
+  about 21 MB (860 B per tile) to about 9 MB (350 B: the hash cache, the central directory, the object list). Two
+  more were measured and dropped as noise: reserving the central directory up front, and building the hash cache
+  without its pending dictionary.
+
+  Bytes are unchanged: the 460 `PCRAFT_HASH_DUMP` lines (`SaveHashDumpTests`, `CorpusHashDumpTests`) are identical
+  at 781832e and after, and so is `Zip64BigTests`' 4.50 GiB file (made format 2 at the end, the patched path;
+  SHA-256 a4799fc9…). `SaveMemoryTests` checks the digest spelling and order, the version patch against encoding
+  again (a document name holding a lookalike member included), path order, the hash cache following the document,
+  and a handed-over `Prepared` writing a copy's bytes; `ZipTests.patchStoredRewritesPartOfAnEntry` checks every
+  index, classic and ZIP64.
+
+  `Zip64BigTests` save overhead (RSS), the same session, 3 runs each, nothing else building:
+
+  | file | 781832e | after |
+  |---|---|---|
+  | 0.50 GiB (1,024 tiles) | 188–192 MB | 187–190 MB |
+  | 4.50 GiB (9,216 tiles) | 194–199 MB | 194–198 MB |
+  | 12.51 GiB (25,600 tiles) | 221–238 MB | 213–215 MB |
+
+  **Not flat yet:** about 25 MB of growth from 1,024 to 25,600 tiles, down from about 39 MB. Most of what's left
+  isn't live. libmalloc keeps freed large blocks resident for reuse (its large-entry cache: "Malloc Large (empty)"
+  in `vmmap`), so every multi-megabyte table a save frees stays in the RSS: `Collect`'s tables, the manifest text,
+  the central directory's earlier buffers. `PCRAFT_SAVE_PROBE_NOISE=<side>` (with `PCRAFT_SAVE_PROBE_PHASES=1` for
+  `prepare` and the stream apart) samples the heap and the RSS side by side on `Zip64BigTests`' own documents.
+  From 1,024 to 25,600 tiles:
+
+  | | heap peak | RSS peak | RSS peak, `MallocLargeCache=0` |
+  |---|---|---|---|
+  | 781832e | +21 MB | +47 MB | +24 MB |
+  | after | +10 MB | +34 MB | +10 MB |
+
+  `malloc_zone_pressure_relief` after each batch didn't return it.
 
 
 ## Tests
