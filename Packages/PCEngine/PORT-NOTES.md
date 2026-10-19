@@ -441,6 +441,20 @@ against PCRender's changed Satin (see the change requests). No compiler warnings
   `ImportResult.sourceLayerIds`) and `sourceDocumentId`, so a host keeps its ids for the layers across a reload.
   `Session.openFile` is unchanged; `openFileImport` gives the import's result too. `comp` joins
   `EngineIO.layeredExtensions`; the batch commands still skip it (they read bytes). `CompOpenTests`.
+* **Select commands where PixelAgencyEditor worked around them (AB-T-0279).** Checked in Photoshop 27 through its
+  scripting interface (new documents, closed unsaved; scripts in `$PHOTOCRAFT_FIXTURES/ps-oracle/probe-ab-t-0279-0285`).
+  - **Inverse of everything deselects.** Select All then Inverse leaves Photoshop with no selection, in a step named
+    "Select Inverse". `select.inverse` used to store an empty, non-nil surface, which passed `Pre.hasSelection` and
+    stopped edits with nothing visible; it now sets nil, as the other select commands do. The step stays "Inverse".
+  - **`select.magicWand` takes `"sampleSize"`**: 1 (Point Sample, the default), 3, 5, 11, 31, 51 or 101 (the N by N
+    Averages Photoshop's options bar offers); anything else is refused. The wand matches PCAlgo's
+    `Selection.wandSample`: the mean of the square around the click, cut to the canvas, colour weighted by alpha
+    (the RGB under transparent pixels doesn't count), each channel rounded. A contiguous fill whose clicked pixel
+    isn't within tolerance of that mean selects nothing, as the editor's kernel did. Photoshop's averaging itself
+    wasn't measured: its Sample Size is a tool option, which the oracle doesn't change.
+  - **`select.lasso {"polygonal": true}`** names its step "Polygonal Lasso", as Photoshop's History does for that
+    tool. A scripted polygon selection (`set` the selection `to` a polygon) is "Lasso" whatever tool is current, so the
+    name can't be confirmed through scripting; Magnetic Lasso keeps its own.
 * **Deep nesting.** Debug builds recurse through `Equatable` on 100 nested groups (photocraft's cap);
   the tests that build them run on an 8 MB thread. Release frames are far smaller.
 

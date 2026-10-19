@@ -119,14 +119,39 @@ extension Selection {
 
     // MARK: 8-bit magic wand
 
+    /// The colour the Magic Wand matches for a click at `seed` with Photoshop's Sample Size: the pixel itself for a
+    /// `size` of 1 (Point Sample), else the average of the `size` × `size` square around it ("3 by 3 Average" …
+    /// "101 by 101 Average"), cut to `area`. Colour is averaged weighted by alpha, so the RGB under transparent pixels
+    /// doesn't count; alpha is the plain mean. Each rounds to the nearest level. Nil if the seed is outside `area`.
+    public static func wandSample(_ img: [SIMD4<UInt8>], area: PixelRect, seed: (x: Int32, y: Int32), size: Int) -> SIMD4<UInt8>? {
+        guard area.contains(x: seed.x, y: seed.y), img.count == area.area else { return nil }
+        let w = area.width, h = area.height
+        let sx = Int(seed.x - area.x0), sy = Int(seed.y - area.y0)
+        let r = max(size, 1) / 2
+        if r == 0 { return img[sy * w + sx] }
+        var rgb = SIMD3<UInt64>(repeating: 0), alpha: UInt64 = 0, n: UInt64 = 0
+        for y in max(sy - r, 0)...min(sy + r, h - 1) {
+            for x in max(sx - r, 0)...min(sx + r, w - 1) {
+                let p = img[y * w + x], a = UInt64(p.w)
+                rgb &+= SIMD3(UInt64(p.x), UInt64(p.y), UInt64(p.z)) &* a
+                alpha += a
+                n += 1
+            }
+        }
+        let c: SIMD3<UInt64> = alpha == 0 ? .zero : (rgb &+ alpha / 2) / alpha
+        return SIMD4(UInt8(c.x), UInt8(c.y), UInt8(c.z), UInt8((alpha + n / 2) / n))
+    }
+
     /// Magic wand on 8-bit pixels (photocraft `wand_region`): a scanline flood fill (or a global
     /// match) marking one byte per pixel, then anti-aliasing only the edges inside the touched
     /// bounding box. Matches `magicWand` for 8-bit sources; nil if the seed is outside `area`.
+    /// `target` is the colour to match (`wandSample`'s average), the seed's own by default; a contiguous fill whose
+    /// seed doesn't match it selects nothing (nil).
     public static func wandRegion(_ img: [SIMD4<UInt8>], area: PixelRect, seed: (x: Int32, y: Int32), tolerance: Float,
-                                  contiguous: Bool, antiAlias: Bool) -> SelectionRegion? {
+                                  contiguous: Bool, antiAlias: Bool, target: SIMD4<UInt8>? = nil) -> SelectionRegion? {
         if !area.contains(x: seed.x, y: seed.y) { return nil }
         let w = area.width, h = area.height
-        let target = img[Int(seed.y - area.y0) * w + Int(seed.x - area.x0)]
+        let target = target ?? img[Int(seed.y - area.y0) * w + Int(seed.x - area.x0)]
         let tol = Int(SelectionKit.i32Cast(Float.maximum((tolerance + 1e-3).rounded(.down), 0)))
         // Copied selections can leave RGB under zero alpha: invisible colours must not split a
         // transparent region.
@@ -138,6 +163,7 @@ extension Selection {
         var marks = [UInt8](repeating: 0, count: w * h)
         var bx0 = Int.max, by0 = Int.max, bx1 = 0, by1 = 0
         if contiguous {
+            if !similar(img[Int(seed.y - area.y0) * w + Int(seed.x - area.x0)]) { return nil }
             // Span fill: fill a run, then scan the rows above and below it for new seeds.
             var stack: [(Int, Int)] = [(Int(seed.x - area.x0), Int(seed.y - area.y0))]
             while let top = stack.popLast() {

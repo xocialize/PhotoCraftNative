@@ -94,6 +94,11 @@ order of operations and edge semantics) and a **Metal compute path that must mat
   when the source patch's variance is at most 1e-5 of its mean². photocraft's test, `> 1e-10`, read float
   rounding of a plain patch's moments as variance, so the gain went to its limit and a plain fill shifted
   (0.8 → 0.84 at Default). The test is products only, so Metal can't fuse it differently.
+* **The Magic Wand's Sample Size (AB-T-0279).** `Selection.wandSample(img, area:, seed:, size:)` is the colour
+  Photoshop's N by N Average matches: the mean of the `size` × `size` square around the click, cut to `area`, colour
+  weighted by alpha, alpha the plain mean, each rounded (size 1 is the pixel itself). `wandRegion` takes it as
+  `target:` (default the seed's own colour, photocraft's behaviour); a contiguous fill whose seed isn't within
+  tolerance of the target returns nil. It replaces PixelAgencyEditor's WandPixels.c averaging.
 
 ## Filters
 

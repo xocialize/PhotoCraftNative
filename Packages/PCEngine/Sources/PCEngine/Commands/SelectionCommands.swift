@@ -17,7 +17,7 @@ public enum SelectionCommands: CommandModule {
 
     public static func register(into r: inout CommandRegistry) {
         r.add(CommandSpec("select.magicWand", "Magic Wand",
-                          params: #"{"x":px,"y":px,"tolerance":0..255=32,"contiguous":bool=true,"antiAlias":bool=true,"sampleAllLayers":bool=false,"mode":"replace|add|subtract|intersect"="replace"} (samples the visible alpha, Quick Mask, or layer mask when that is the picture)"#,
+                          params: #"{"x":px,"y":px,"tolerance":0..255=32,"sampleSize":1|3|5|11|31|51|101=1 (Point Sample, or the N by N Average),"contiguous":bool=true,"antiAlias":bool=true,"sampleAllLayers":bool=false,"mode":"replace|add|subtract|intersect"="replace"} (samples the visible alpha, Quick Mask, or layer mask when that is the picture)"#,
                           module: m, enabled: Pre.hasDoc, run: magicWand))
         r.add(CommandSpec("select.colorRange", "Color Range…", menu: ["Select"],
                           params: ##"{"select":"sampledColors|reds|yellows|greens|cyans|blues|magentas|highlights|midtones|shadows|outOfGamut"="sampledColors","color":"#rrggbb"=foreground,"colors":["#rrggbb",…]?,"points":[[x,y],…]? (eyedropper samples),"subtractPoints":[[x,y],…]? (minus eyedropper),"order":["+"|"-",…]? (click order of points and subtractPoints; default all points first),"fuzziness":0..200=40 (tones: 0..100 %=20),"localized":bool=false,"range":0..100=100 (% of the longer side),"tonalRange":level|[lo,hi] (shadows 65, highlights 190, midtones [105,150]),"invert":bool=false,"sampleAllLayers":bool=true,"mode":"replace|add|subtract|intersect"="replace"}"##,
@@ -37,7 +37,7 @@ public enum SelectionCommands: CommandModule {
         r.add(CommandSpec("select.similar", "Similar", menu: ["Select"], params: #"{"tolerance":0..255=32,"sampleAllLayers":bool=false}"#,
                           module: m, enabled: hasSelection) { s, p in try growSimilar(s, p, contiguous: false) })
         r.add(CommandSpec("select.lasso", "Lasso",
-                          params: #"{"points":[[x,y],…],"mode":"replace|add|subtract|intersect"="replace","antiAlias":bool=true,"feather":px=0}"#,
+                          params: #"{"points":[[x,y],…],"mode":"replace|add|subtract|intersect"="replace","antiAlias":bool=true,"feather":px=0,"polygonal":bool=false (the step is "Polygonal Lasso")}"#,
                           module: m, enabled: Pre.hasDoc, run: lasso))
     }
 
@@ -73,9 +73,10 @@ public enum SelectionCommands: CommandModule {
 
     /// PCAlgo's `Selection.wandRegion`, nil when `img` does not cover `area` (never traps).
     static func wandRegion(_ img: [SIMD4<UInt8>], _ area: PixelRect, seed: (Int32, Int32), tolerance: Float, contiguous: Bool,
-                           antiAlias: Bool) -> SelectionRegion? {
+                           antiAlias: Bool, target: SIMD4<UInt8>? = nil) -> SelectionRegion? {
         guard img.count == area.area else { return nil }
-        return Selection.wandRegion(img, area: area, seed: (x: seed.0, y: seed.1), tolerance: tolerance, contiguous: contiguous, antiAlias: antiAlias)
+        return Selection.wandRegion(img, area: area, seed: (x: seed.0, y: seed.1), tolerance: tolerance, contiguous: contiguous,
+                                    antiAlias: antiAlias, target: target)
     }
 
     /// A Double as Rust's `Display` prints it (`30` for 30.0).
@@ -168,11 +169,20 @@ public enum SelectionCommands: CommandModule {
 
     // MARK: Magic Wand
 
+    /// Photoshop's Magic Wand Sample Sizes: Point Sample (1) and the N by N Averages.
+    static let wandSampleSizes = [1, 3, 5, 11, 31, 51, 101]
+
     static func magicWand(_ s: Session, _ p: JSONValue) throws -> JSONValue {
         let x = i32(f(p, "x", 0).rounded(.down)), y = i32(f(p, "y", 0).rounded(.down))
+        let size = p["sampleSize"].map { $0.doubleValue ?? .nan } ?? 1
+        guard let sampleSize = wandSampleSizes.first(where: { Double($0) == size }) else {
+            throw EngineError.bad("select.magicWand", "sampleSize must be one of 1, 3, 5, 11, 31, 51, 101")
+        }
         let (area, img) = try shownGray(s) ?? sampleRGBA8(s, allLayers: b(p, "sampleAllLayers", false))
+        // AB-T-0279: an averaged sample matches the square's mean colour, which the clicked pixel may not.
+        let target = img.count == area.area ? Selection.wandSample(img, area: area, seed: (x: x, y: y), size: sampleSize) : nil
         let region = wandRegion(img, area, seed: (x, y), tolerance: f(p, "tolerance", 32), contiguous: b(p, "contiguous", true),
-                                antiAlias: b(p, "antiAlias", true))
+                                antiAlias: b(p, "antiAlias", true), target: target)
         let m = algoMode(mode(p))
         let selected = try s.edit("Magic Wand") { doc, _ -> Bool in
             doc.selection = Selection.combineRegion(doc.selection, region, mode: m)
@@ -614,7 +624,8 @@ public enum SelectionCommands: CommandModule {
             return SIMD2(Float(x), Float(y))
         }
         if pts.count < 3 { throw EngineError.bad("select.lasso", "needs at least 3 points") }
-        return try polygonSelection(s, "select.lasso", "Lasso", pts, p)
+        // Photoshop's History names the Polygonal Lasso tool's step apart from the Lasso's (AB-T-0279).
+        return try polygonSelection(s, "select.lasso", b(p, "polygonal", false) ? "Polygonal Lasso" : "Lasso", pts, p)
     }
 
     /// Selects the polygon `pts` with the lasso tools' `mode`, `antiAlias` and `feather` params,

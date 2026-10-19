@@ -169,7 +169,8 @@ enum CoreCommands: CommandModule {
                     var sel = Surface(format: .gray8)
                     sel.writeRegion(b, data)
                     sel.prune()
-                    doc.selection = sel
+                    // Inverting everything leaves nothing selected: Photoshop deselects (AB-T-0279).
+                    doc.selection = sel.tileCount > 0 ? sel : nil
                 }
                 return .null
             },

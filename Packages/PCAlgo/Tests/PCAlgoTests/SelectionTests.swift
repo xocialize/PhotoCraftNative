@@ -104,6 +104,39 @@ enum SelTest {
         #expect(Selection.wandRegion(img, area: area, seed: (0, 0), tolerance: 10, contiguous: true, antiAlias: true) == nil)
     }
 
+    /// AB-T-0279: the Magic Wand's Sample Size — the mean of the square around the click, cut to the area, colour
+    /// weighted by alpha; the wand then matches that colour.
+    @Test func wandSampleAveragesTheSquareAroundTheClick() {
+        let area = PixelRect(x: 10, y: 20, width: 4, height: 3)
+        // Row-major 4 × 3: grey levels 0, 10, 20 … 110, opaque, except (11, 21) transparent red.
+        var img: [SIMD4<UInt8>] = (0..<12).map { (i: Int) -> SIMD4<UInt8> in
+            let v = UInt8(i * 10)
+            return SIMD4(v, v, v, 255)
+        }
+        img[5] = SIMD4(255, 0, 0, 0)
+        #expect(Selection.wandSample(img, area: area, seed: (x: 11, y: 21), size: 1) == SIMD4(255, 0, 0, 0), "Point Sample")
+        // 3 by 3 around (12, 21): levels 10, 20, 30, 60, 70, 90, 100, 110 and the transparent pixel. Its red doesn't
+        // count; alpha is 8 / 9 of 255.
+        let mean: Double = 490.0 / 8 // 10 + 20 + 30 + 60 + 70 + 90 + 100 + 110
+        let v = UInt8(mean.rounded())
+        #expect(Selection.wandSample(img, area: area, seed: (x: 12, y: 21), size: 3) == SIMD4(v, v, v, UInt8((255.0 * 8 / 9).rounded())))
+        // At a corner the square is cut to the area: (10, 20)'s 3 by 3 is 0, 10, 40 and the transparent pixel.
+        let corner = UInt8((50.0 / 3).rounded())
+        #expect(Selection.wandSample(img, area: area, seed: (x: 10, y: 20), size: 3) == SIMD4(corner, corner, corner, 191))
+        // 101 by 101 covers the whole area.
+        let levels: [Int] = (0..<12).filter { $0 != 5 }.map { $0 * 10 }
+        let all = UInt8((Double(levels.reduce(0, +)) / 11).rounded())
+        #expect(Selection.wandSample(img, area: area, seed: (x: 13, y: 22), size: 101) == SIMD4(all, all, all, UInt8((255.0 * 11 / 12).rounded())))
+        #expect(Selection.wandSample(img, area: area, seed: (x: 9, y: 20), size: 3) == nil)
+        // All transparent: colour 0.
+        #expect(Selection.wandSample([SIMD4<UInt8>](repeating: SIMD4(9, 9, 9, 0), count: 12), area: area, seed: (x: 11, y: 21), size: 3) == .zero)
+        // The wand matches the target given, and a contiguous fill whose seed doesn't match it selects nothing.
+        let target = SIMD4<UInt8>(55, 55, 55, 255)
+        #expect(Selection.wandRegion(img, area: area, seed: (x: 11, y: 20), tolerance: 5, contiguous: true, antiAlias: false, target: target) == nil)
+        let r = Selection.wandRegion(img, area: area, seed: (x: 11, y: 21), tolerance: 5, contiguous: false, antiAlias: false, target: target)
+        #expect(r?.at(12, 21) == 1 && r?.at(11, 21) == 0 && r?.at(13, 21) == 0, "only level 60 is within 5 of 55")
+    }
+
     // MARK: Color Range
 
     /// photocraft `color_range_falloff`.

@@ -555,4 +555,80 @@ import Testing
         #expect(try Selection.edt([true, true], w: 2, h: 1, on: .cpu) == [0, 0])
         #expect(try Selection.edt([true], w: 2, h: 1, on: .cpu).isEmpty)
     }
+
+    // MARK: AB-T-0279: the editor's select.* workarounds
+
+    @Test func inverseOfEverythingDeselects() throws {
+        let s = try session()
+        try s.execute("select.all")
+        let steps = pastCount(s)
+        try s.execute("select.inverse")
+        #expect(s.active?.doc.selection == nil, "Photoshop deselects; an empty selection would still pass hasSelection")
+        #expect(!s.isEnabled("select.deselect"))
+        #expect(pastCount(s) == steps + 1 && s.active?.history.undoLabel == "Inverse")
+        #expect(s.undo())
+        #expect(coverage(s, 0, 0) == 1 && coverage(s, 39, 29) == 1)
+        // A partial selection still inverts.
+        try s.execute("select.rect", ["x": 0, "y": 0, "width": 20, "height": 30])
+        try s.execute("select.inverse")
+        #expect(coverage(s, 5, 5) == 0 && coverage(s, 30, 5) == 1)
+    }
+
+    /// Columns 0..<20 alternate grey 200 (even x) and 240 (odd x); the rest stays white.
+    func stripes() throws -> Session {
+        let s = try session()
+        for x in Int32(0)..<20 {
+            let v: Float = x % 2 == 0 ? 200 / 255 : 240 / 255
+            try Self.paint(s, Self.rect(x, 0, x + 1, 30), SIMD4(v, v, v, 1))
+        }
+        return s
+    }
+
+    @Test func magicWandSampleSizeMatchesTheAverage() throws {
+        // Point Sample (the default, or 1) matches the clicked grey only: the 240 columns differ by 40.
+        for params: JSONValue in [["x": 10, "y": 15, "tolerance": 30, "antiAlias": false],
+                                  ["x": 10, "y": 15, "tolerance": 30, "antiAlias": false, "sampleSize": 1]] {
+            let s = try stripes()
+            try s.execute("select.magicWand", params)
+            #expect(coverage(s, 10, 0) == 1 && coverage(s, 10, 29) == 1)
+            #expect(coverage(s, 9, 15) == 0 && coverage(s, 11, 15) == 0 && coverage(s, 12, 15) == 0, "contiguous")
+        }
+        // 3 by 3 Average: (240 + 200 + 240) / 3 ≈ 227, which both greys are within 30 of; white (28 away from 227) too,
+        // but red is not.
+        let s = try stripes()
+        try s.execute("select.magicWand", ["x": 10, "y": 15, "tolerance": 30, "antiAlias": false, "sampleSize": 3])
+        #expect(coverage(s, 9, 15) == 1 && coverage(s, 10, 15) == 1 && coverage(s, 19, 15) == 1)
+        #expect(coverage(s, 0, 0) == 1 && coverage(s, 39, 29) == 1)
+        #expect(coverage(s, 30, 10) == 0, "red isn't within 30 of the average")
+        #expect(s.active?.history.undoLabel == "Magic Wand")
+        // An average the clicked pixel isn't within tolerance of selects nothing: a lone black pixel on white.
+        let lone = try session()
+        try Self.paint(lone, Self.rect(20, 25, 21, 26), SIMD4(0, 0, 0, 1))
+        try lone.execute("select.magicWand", ["x": 20, "y": 25, "tolerance": 30, "antiAlias": false, "sampleSize": 3])
+        #expect(lone.active?.doc.selection == nil)
+        // Not contiguous, the same average selects the white around it and leaves the black pixel out.
+        try lone.execute("select.magicWand", ["x": 20, "y": 25, "tolerance": 30, "antiAlias": false, "sampleSize": 3,
+                                              "contiguous": false])
+        #expect(coverage(lone, 20, 25) == 0 && coverage(lone, 21, 25) == 1 && coverage(lone, 0, 0) == 1)
+        // Photoshop's sizes only.
+        for bad: JSONValue in [7, 0, 2.5, "point"] {
+            #expect(throws: EngineError.self) {
+                try lone.execute("select.magicWand", ["x": 20, "y": 25, "sampleSize": bad])
+            }
+        }
+        for size in [5, 11, 31, 51, 101] {
+            try lone.execute("select.magicWand", ["x": 5, "y": 5, "sampleSize": .int(size)])
+        }
+    }
+
+    @Test func lassoNamesAPolygonalStep() throws {
+        let s = try session()
+        try s.execute("select.lasso", ["points": [[0, 0], [20, 0], [0, 20]], "polygonal": true])
+        #expect(s.active?.history.undoLabel == "Polygonal Lasso")
+        #expect(coverage(s, 2, 2) == 1)
+        try s.execute("select.lasso", ["points": [[0, 0], [20, 0], [0, 20]], "polygonal": false])
+        #expect(s.active?.history.undoLabel == "Lasso")
+        try s.execute("select.lasso", ["points": [[0, 0], [20, 0], [0, 20]]])
+        #expect(s.active?.history.undoLabel == "Lasso")
+    }
 }
