@@ -408,6 +408,28 @@ import Testing
         #expect(throws: PCIOError.self) { try w.replaceStored(2, [], crc: 0) }
     }
 
+    /// Part of a stored entry rewritten in place, its CRC given (AB-T-0328: a manifest's version digit, the rest of
+    /// it no longer kept), at any index: the place is read back from the central directory, classic or ZIP64.
+    @Test(arguments: [false, true]) func patchStoredRewritesPartOfAnEntry(_ forceZip64: Bool) throws {
+        let entries: [(String, [UInt8])] = [("manifest.json", Array("{\"format_version\": 1, \"x\": 1}".utf8)),
+                                            ("thumb.png", [UInt8](repeating: 3, count: 40)),
+                                            ("tiles/a.zst", [UInt8](repeating: 9, count: 100))]
+        for index in entries.indices {
+            var stream = ZipStreamWriter(ZipMemorySink(), forceZip64: forceZip64)
+            for (name, data) in entries { try stream.add(name, data) }
+            var changed = entries
+            changed[index].1[5] = 0x32
+            try stream.patchStored(index, at: 5, [0x32], crc: CRC32.checksum(changed[index].1))
+            var direct = ZipWriter(forceZip64: forceZip64)
+            for (name, data) in changed { try direct.add(name, data) }
+            #expect(try stream.finish().bytes == direct.finish(), "entry \(index)")
+        }
+        var w = ZipStreamWriter(ZipMemorySink())
+        try w.add("a", Array("hello".utf8))
+        #expect(throws: PCIOError.self) { try w.patchStored(0, at: 4, [1, 2], crc: 0) }
+        #expect(throws: PCIOError.self) { try w.patchStored(1, at: 0, [1], crc: 0) }
+    }
+
     @Test func fileReaderReadsWhatTheMemoryReaderReads() throws {
         for (label, bytes) in try Self.archives() {
             let memory = try ZipReader(bytes)

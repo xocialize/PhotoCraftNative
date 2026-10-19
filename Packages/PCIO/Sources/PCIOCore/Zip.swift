@@ -45,13 +45,35 @@ struct ZipLayout: Sendable {
     }
 
     var central: [UInt8] = []
-    var placed: [Placed] = []
+    /// Entries so far. Where each one is isn't kept beside the central directory, which says it (AB-T-0328).
+    private(set) var count = 0
     var entryUsedZip64 = false
     let forceZip64: Bool
 
     init(forceZip64: Bool) { self.forceZip64 = forceZip64 }
 
-    var count: Int { placed.count }
+    /// Where entry `index` is, read back from its central directory entry as `entry` wrote it: a size or offset is
+    /// in the ZIP64 field (sizes first) exactly when its classic field holds `max32`, and the local header has a
+    /// ZIP64 field exactly when the sizes are in one.
+    func placed(_ index: Int) -> Placed? {
+        guard index >= 0, index < count else { return nil }
+        func u16(_ i: Int) -> Int { Int(central[i]) | Int(central[i + 1]) << 8 }
+        func u32(_ i: Int) -> Int { u16(i) | u16(i + 2) << 16 }
+        func u64(_ i: Int) -> Int { u32(i) | u32(i + 4) << 32 }
+        var at = 0
+        for _ in 0 ..< index { at += 46 + u16(at + 28) + u16(at + 30) + u16(at + 32) }
+        let nameLength = u16(at + 28)
+        var size = u32(at + 20), offset = u32(at + 42)
+        var field = at + 46 + nameLength + 4
+        let sizes64 = size == max32
+        if sizes64 {
+            size = u64(field + 8)
+            field += 16
+        }
+        if offset == max32 { offset = u64(field) }
+        let data = offset + 30 + nameLength + (sizes64 ? 20 : 0)
+        return Placed(local: offset, data: data, central: at, size: size, method: UInt16(u16(at + 10)))
+    }
 
     /// Whether the archive, finished after `written` bytes of local headers and data, has ZIP64
     /// records.
@@ -92,7 +114,7 @@ struct ZipLayout: Sendable {
             le64(&out, UInt64(csize))
         }
         // Central directory entry.
-        placed.append(Placed(local: offset, data: offset + out.count, central: central.count, size: csize, method: method))
+        count += 1
         let extraLength = (sizes64 ? 16 : 0) + (offset64 ? 8 : 0)
         le32(&central, centralSignature)
         le16(&central, needed) // made by (MS-DOS attributes, this spec version)
@@ -125,10 +147,18 @@ struct ZipLayout: Sendable {
     /// Checks that STORE entry `index` can take `size` new bytes, sets its CRC to `crc` in the
     /// central directory, and returns where its local header's CRC and its data are.
     mutating func replace(_ index: Int, size: Int, crc: UInt32) throws -> (crcOffset: Int, dataOffset: Int) {
-        guard placed.indices.contains(index), placed[index].method == 0, placed[index].size == size else {
+        guard placed(index)?.size == size else {
             throw PCIOError.unsupported("zip entry \(index): only a STORE entry's bytes can be replaced, with as many bytes")
         }
-        let p = placed[index]
+        return try patch(index, within: 0 ..< size, crc: crc)
+    }
+
+    /// Checks that `range` lies within STORE entry `index`'s bytes, sets the entry's CRC to `crc` in the central
+    /// directory, and returns where its local header's CRC and its data are.
+    mutating func patch(_ index: Int, within range: Range<Int>, crc: UInt32) throws -> (crcOffset: Int, dataOffset: Int) {
+        guard let p = placed(index), p.method == 0, range.lowerBound >= 0, range.upperBound <= p.size else {
+            throw PCIOError.unsupported("zip entry \(index): only a STORE entry's bytes can be replaced, within its length")
+        }
         var c: [UInt8] = []
         le32(&c, crc)
         central.replaceSubrange(p.central + 16 ..< p.central + 20, with: c)
@@ -333,6 +363,16 @@ public struct ZipStreamWriter<Sink: ZipSink> {
         le32(&c, crc)
         try c.withUnsafeBytes { try sink.overwrite($0, at: crcOffset) }
         try data.withUnsafeBytes { try sink.overwrite($0, at: dataOffset) }
+    }
+
+    /// Rewrites `bytes` at `offset` in STORE entry `index`, whose CRC-32 as rewritten is `crc`: an entry whose content
+    /// is only settled once later entries are written, without keeping all of it (AB-T-0328).
+    package mutating func patchStored(_ index: Int, at offset: Int, _ bytes: [UInt8], crc: UInt32) throws {
+        let (crcOffset, dataOffset) = try layout.patch(index, within: offset ..< offset + bytes.count, crc: crc)
+        var c: [UInt8] = []
+        le32(&c, crc)
+        try c.withUnsafeBytes { try sink.overwrite($0, at: crcOffset) }
+        try bytes.withUnsafeBytes { try sink.overwrite($0, at: dataOffset + offset) }
     }
 
     private mutating func put(_ bytes: [UInt8]) throws {
