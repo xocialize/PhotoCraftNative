@@ -420,6 +420,19 @@ public struct SurfaceM: Codable, Hashable, Sendable {
     public var tiles: [TileRef]
 
     public init(format: PixelFormat, default d: String, tiles: [TileRef]) { self.format = format; self.default = d; self.tiles = tiles }
+
+    /// Saving a manifest (`ManifestJSON.encode`), the tile list is handed to the writer and a placeholder stands in its
+    /// place, so tiles never pass through `JSONEncoder` (AB-T-0255). Otherwise as synthesized.
+    public func encode(to encoder: any Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(format, forKey: .format)
+        try c.encode(self.default, forKey: .default)
+        if let lists = encoder.userInfo[ManifestJSON.tileListsKey] as? ManifestJSON.TileLists {
+            try c.encode(lists.placeholder(tiles), forKey: .tiles)
+        } else {
+            try c.encode(tiles, forKey: .tiles)
+        }
+    }
 }
 
 public struct VideoDataM: Codable, Hashable, Sendable {

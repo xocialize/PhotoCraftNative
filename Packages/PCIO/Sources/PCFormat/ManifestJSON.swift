@@ -18,6 +18,137 @@ enum ManifestJSON {
         return e
     }
 
+    // MARK: Tile lists
+
+    static let tileListsKey = CodingUserInfoKey(rawValue: "pcraft.tileLists")!
+
+    /// The surfaces' tile lists of one manifest being encoded (AB-T-0255). A save's manifest is mostly `{hash, tx, ty}`
+    /// objects, thousands of them: through `JSONEncoder`, a `JSONTree` and the pretty text, each cost 2–3 KB while the
+    /// manifest was built. `SurfaceM` hands its list here instead and encodes a placeholder string, unique to this
+    /// encode; `expand` writes the lists in place of their placeholders, as `writePretty` would have.
+    final class TileLists: @unchecked Sendable {
+        /// Never in a document's own strings: a random UUID per encode.
+        let prefix = "pcraft-tiles-\(UUID().uuidString)-"
+        private(set) var lists: [[TileRef]] = []
+
+        func placeholder(_ tiles: [TileRef]) -> String {
+            lists.append(tiles)
+            return prefix + String(lists.count - 1)
+        }
+
+        /// `text` (pretty, with placeholders) with each placeholder replaced by its list, written in serde_json's
+        /// pretty style at the placeholder's indent: `{"hash", "tx", "ty"}` objects, keys sorted. The result is sized
+        /// exactly first, so its buffer never regrows (a doubled buffer would stay with the save's manifest).
+        func expand(_ text: [UInt8]) -> [UInt8] {
+            if lists.isEmpty { return text }
+            let quoted = Array(("\"" + prefix).utf8)
+            // Where each placeholder is (its quotes included), the indent level of its line, and its list.
+            var found: [(range: Range<Int>, level: Int, list: Int)] = []
+            var i = 0, lineStart = 0
+            let n = text.count, q = quoted.count
+            while i < n {
+                let b = text[i]
+                if b == 0x0A { lineStart = i + 1 }
+                if b == 0x22, i + q <= n, text[i ..< i + q].elementsEqual(quoted) {
+                    var j = i + q, index = 0
+                    while j < n, text[j] >= 0x30, text[j] <= 0x39 {
+                        index = index * 10 + Int(text[j] - 0x30)
+                        j += 1
+                    }
+                    if j < n, text[j] == 0x22, index < lists.count {
+                        var spaces = 0
+                        while lineStart + spaces < n, text[lineStart + spaces] == 0x20 { spaces += 1 }
+                        found.append((i ..< j + 1, spaces / 2, index))
+                        i = j + 1
+                        continue
+                    }
+                }
+                i += 1
+            }
+            var size = text.count
+            for f in found { size += Self.length(lists[f.list], level: f.level) - f.range.count }
+            var out: [UInt8] = []
+            out.reserveCapacity(size)
+            var from = 0
+            for f in found {
+                out.append(contentsOf: text[from ..< f.range.lowerBound])
+                Self.write(lists[f.list], level: f.level, &out)
+                from = f.range.upperBound
+            }
+            out.append(contentsOf: text[from...])
+            assert(out.count == size)
+            return out
+        }
+
+        /// The bytes `write` writes for `tiles` at `level`.
+        static func length(_ tiles: [TileRef], level: Int) -> Int {
+            if tiles.isEmpty { return 2 }
+            let line = { (level: Int) in 1 + 2 * level }
+            // "{" and "}" lines, the three members' lines, `"hash": ` + `,`, `"tx": ` + `,`, `"ty": `.
+            let fixed = 2 * (line(level + 1) + 1) + 3 * line(level + 2) + 9 + 7 + 6
+            var total = 1 + line(level) + 1 + (tiles.count - 1)
+            for t in tiles {
+                total += fixed + escapedLength(t.hash) + decimalLength(t.tx) + decimalLength(t.ty)
+            }
+            return total
+        }
+
+        /// `JSONTree.writeString`'s output length.
+        static func escapedLength(_ s: String) -> Int {
+            var n = 2
+            for b in s.utf8 {
+                switch b {
+                case UInt8(ascii: "\""), UInt8(ascii: "\\"), 0x0A, 0x0D, 0x09: n += 2
+                case 0 ..< 0x20: n += 6
+                default: n += 1
+                }
+            }
+            return n
+        }
+
+        static func decimalLength(_ v: Int32) -> Int {
+            var m = v.magnitude, n = v < 0 ? 2 : 1
+            while m >= 10 {
+                m /= 10
+                n += 1
+            }
+            return n
+        }
+
+        /// One tile list as the value of a member at `level`, as `JSONTree.render` writes an array of objects.
+        static func write(_ tiles: [TileRef], level: Int, _ out: inout [UInt8]) {
+            if tiles.isEmpty {
+                out += [UInt8(ascii: "["), UInt8(ascii: "]")]
+                return
+            }
+            func newline(_ level: Int) {
+                out.append(0x0A)
+                out.append(contentsOf: repeatElement(0x20, count: 2 * level))
+            }
+            func member(_ key: StaticString, _ last: Bool, _ value: (inout [UInt8]) -> Void) {
+                newline(level + 2)
+                out.append(UInt8(ascii: "\""))
+                key.withUTF8Buffer { out.append(contentsOf: $0) }
+                out += [UInt8(ascii: "\""), UInt8(ascii: ":"), 0x20]
+                value(&out)
+                if !last { out.append(UInt8(ascii: ",")) }
+            }
+            out.append(UInt8(ascii: "["))
+            for (k, t) in tiles.enumerated() {
+                if k > 0 { out.append(UInt8(ascii: ",")) }
+                newline(level + 1)
+                out.append(UInt8(ascii: "{"))
+                member("hash", false) { JSONTree.writeString(t.hash, &$0) }
+                member("tx", false) { $0.append(contentsOf: String(t.tx).utf8) }
+                member("ty", true) { $0.append(contentsOf: String(t.ty).utf8) }
+                newline(level + 1)
+                out.append(UInt8(ascii: "}"))
+            }
+            newline(level)
+            out.append(UInt8(ascii: "]"))
+        }
+    }
+
     static func tree<T: Encodable>(_ value: T, _ e: JSONEncoder) throws(FormatError) -> JSONTree {
         let data: Data
         do { data = try e.encode(value) } catch { throw .json(FormatError.jsonMessage(error)) }
@@ -27,6 +158,8 @@ enum ManifestJSON {
     /// The manifest as pretty JSON text.
     static func encode(_ m: Manifest) throws(FormatError) -> [UInt8] {
         let e = encoder()
+        let lists = TileLists()
+        e.userInfo[tileListsKey] = lists
         var shallow = m
         shallow.document.layers = []
         var t = try tree(shallow, e)
@@ -36,7 +169,7 @@ enum ManifestJSON {
         t["document"]["layers"] = .array(layers)
         var out: [UInt8] = []
         t.writePretty(&out, indent: 0)
-        return out
+        return lists.expand(out)
     }
 
     static func layerTree(_ l: LayerM, _ e: JSONEncoder) throws(FormatError) -> JSONTree {

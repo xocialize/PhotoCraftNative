@@ -691,6 +691,29 @@ photocraft-format's, so bundles go both ways:
   archive's first entry must hold whole (Foundation's `JSONEncoder` per layer, then `JSONTree`).
   Heap in use after a save is back where it started (+0.1 MB). Process peak at 4.50 GiB is 10.1 GB
   (was 20.1 GB).
+- **Tile lists skip JSONEncoder (AB-T-0255).** `ManifestJSON.encode` hands each `SurfaceM`'s tile list to a
+  `TileLists` (through the encoder's `userInfo`) and encodes a placeholder string unique to that encode; `expand`
+  then writes the lists into the pretty text at the placeholders' indents, sized exactly first. Tiles no longer
+  pass through `JSONEncoder` → `Data` → `JSONTree`. The text is byte for byte what the old path wrote:
+  `ManifestTileListTests` compares the two encoders (every mode and depth, nested groups, negative tiles,
+  placeholder-like names), and 460 saves hash the same at 2b43d81 and after (`PCRAFT_HASH_DUMP`:
+  `SaveHashDumpTests` saves `richDoc` in 4 modes × 3 depths as ZIP, resave, previews, forced ZIP64, streamed
+  single file and package, plus a 70,000-tile manifest; PCIOTests' `CorpusHashDumpTests` saves all 191 corpus
+  files through `DocumentIO.export` and as forced ZIP64).
+  Memory, 2026-10-18, release, the same Mac, measured in one session against 2b43d81 (save peak over the RSS with
+  the document loaded, `Zip64BigTests`):
+
+  | file | 2b43d81 (2 runs) | after (3 runs) |
+  |---|---|---|
+  | 0.50 GiB (1,024 tiles) | 189–193 MB | 180–189 MB |
+  | 4.50 GiB (9,216 tiles) | 208–212 MB | 195–204 MB |
+  | 12.51 GiB (25,600 tiles) | 244–251 MB | 224–225 MB |
+
+  On 25,600 8-bit grey tiles, `prepare`'s peak fell from +50 MB to +26 MB, and re-encoding the manifest costs
+  its 4.5 MB of text (it cost ~40 MB). The overhead still grows by about 1.5 KB per tile (about 38 MB from
+  1,024 to 25,600 tiles, was about 55 MB), so it isn't flat. What grows now is held while the archive streams,
+  not the manifest build: the manifest text (~176 B per tile), the hash strings and the tables keyed by them
+  (`Collect`, `hashCache`), each object's path, and the ZIP central directory.
 
 
 ## Tests
