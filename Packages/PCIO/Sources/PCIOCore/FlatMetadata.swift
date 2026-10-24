@@ -19,7 +19,8 @@ public enum FlatMetadata {
         /// Whether the container was recognised (PNG, JPEG, WebP, TIFF): then a missing `icc`
         /// means the file is untagged.
         public var container = false
-        /// The container's own resolution, exactly as stored (PNG `pHYs`), pixels per inch.
+        /// The container's own resolution (PNG `pHYs`), pixels per inch, rounded to whole ppi on
+        /// each axis as Photoshop reads it (AB-D-0156).
         public var dpi: SIMD2<Double>?
         /// The data ends before the container's end marker (PNG `IEND`, JPEG EOI after the scan).
         public var truncated = false
@@ -72,6 +73,16 @@ public enum FlatMetadata {
 
     // MARK: PNG
 
+    /// A `pHYs` axis (pixels per metre) in ppi, rounded to the nearest whole ppi as Photoshop
+    /// 27.11 opens it (AB-D-0156, measured in AB-L-0305: 2835 → 72, 2900 → 74, 11811 → 300).
+    /// PNG can't store 72 ppi exactly (2835 px/m is 72.009), so the exact value would show 72.009
+    /// where Photoshop shows 72. Below half a ppi it stays exact rather than reading as 0.
+    public static func pngPPI(_ pixelsPerMetre: Double) -> Double {
+        let ppi = pixelsPerMetre * 0.0254
+        let whole = ppi.rounded()
+        return whole >= 1 ? whole : ppi
+    }
+
     /// `eXIf` (before or after IDAT), then the CRC-valid text chunks: XMP from the reserved
     /// keyword, the rest in tEXt, zTXt, iTXt groups (the order photocraft's decoder gives).
     static func png(_ b: [UInt8]) -> Metadata {
@@ -93,7 +104,7 @@ public enum FlatMetadata {
             if kind == "IEND" { sawEnd = true; break }
             if kind == "pHYs", n == 9, data[data.startIndex + 8] == 1 {
                 let x = Double(be32(b, start)), y = Double(be32(b, start + 4))
-                if x > 0, y > 0 { m.dpi = SIMD2(x * 0.0254, y * 0.0254) }
+                if x > 0, y > 0 { m.dpi = SIMD2(pngPPI(x), pngPPI(y)) }
             }
             if kind == "eXIf", m.exif == nil {
                 m.exif = Array(data)

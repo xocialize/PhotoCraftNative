@@ -273,7 +273,7 @@ public struct ImageIOCodec: FlatImageCodec {
         let alphaInfo = img.alphaInfo
         let hasAlpha = !(alphaInfo == .none || alphaInfo == .noneSkipFirst || alphaInfo == .noneSkipLast)
         let meta = FlatMetadata.read(data)
-        // A PNG's resolution exactly as `pHYs` stores it (ImageIO rounds it), and none without one.
+        // A PNG's resolution from `pHYs` in whole ppi (AB-D-0156), and none without one.
         if FlatMetadata.formatName(data) == "PNG" { dpi = meta.dpi.map { ($0.x, $0.y) } }
         // The profile as the file stores it (CoreGraphics re-serialises profiles and invents one
         // for untagged files); CoreGraphics' only for containers not read here.

@@ -32,9 +32,10 @@ import Testing
         #expect(abs(r.document.resolutionDpi - 300) < 0.01, "\(r.document.resolutionDpi)")
         let notes = Self.resolutionNotes(r)
         #expect(notes.count == 1, "\(r.warnings)")
-        // 150 ppi is stored as 5906 pixels per metre: 150.01 ppi, as in photocraft's fixture.
+        // 150 ppi is stored as 5906 pixels per metre: 150.01 ppi, as in photocraft's fixture; it
+        // opens at whole ppi, as in Photoshop (AB-D-0156).
         #expect(Self.pHYsY(png).map { String(format: "%.2f", $0) } == "150.01")
-        #expect(notes.first.map { $0.contains("150.01") && $0.contains("300.00") } == true, "\(notes)")
+        #expect(notes.first.map { $0.contains("150.00") && $0.contains("300.00") } == true, "\(notes)")
     }
 
     /// The vertical resolution (ppi) of a PNG's pHYs chunk.
