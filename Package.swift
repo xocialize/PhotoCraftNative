@@ -68,7 +68,7 @@ let package = Package(
         .package(url: "https://github.com/xocialize/ForgeLightKit.git", from: "0.3.0"),
         // PCPlatform's codecs. webp-swift takes media-bridge by URL too, so a path dependency would
         // collide on package identity.
-        .package(url: "https://github.com/xocialize/media-bridge.git", from: "0.40.0"),
+        .package(url: "https://github.com/xocialize/media-bridge.git", from: "0.40.1"),
         .package(url: "https://github.com/xocialize/webp-swift.git", from: "0.1.0"),
         // The official MCP Swift SDK (PCAutomation), at the version the fleet's ML[X] Image Server uses.
         .package(url: "https://github.com/modelcontextprotocol/swift-sdk.git", from: "0.12.1"),

@@ -1,5 +1,5 @@
 {
-  "originHash" : "928f82e09518fc6a3425c3bc9be59a65ab1104cf580b4b8228d4c41d761e17d7",
+  "originHash" : "ab6bb1e281c29ff3d8457e7e696c67f9de25e93f96cb59a21c47a57ae4af3362",
   "pins" : [
     {
       "identity" : "colorizekit",
@@ -87,8 +87,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/xocialize/media-bridge.git",
       "state" : {
-        "revision" : "34c28725586febdebe6cb7c18e330d92ba876553",
-        "version" : "0.40.0"
+        "revision" : "c7db57aebd14a111808d1d495cf5623907dc3065",
+        "version" : "0.40.1"
       }
     },
     {

@@ -213,7 +213,10 @@ public enum RawDeveloper {
         switch o.decoderVersion {
         case .osDefault: break
         case .version8: if f.supportedDecoderVersions.contains(.version8) { f.decoderVersion = .version8 } else { warnings.append("decoder version 8 unavailable") }
-        case .version9: if f.supportedDecoderVersions.contains(.version9) { f.decoderVersion = .version9 } else { warnings.append("decoder version 9 unavailable") }
+        // Version 9 is macOS 27's (AB-T-0419): before it, the OS default decodes, as for any version the filter lacks.
+        case .version9:
+            if #available(macOS 27.0, *), f.supportedDecoderVersions.contains(.version9) { f.decoderVersion = .version9 }
+            else { warnings.append("decoder version 9 unavailable") }
         }
         if let ev = o.exposureEV { f.exposure = ev }
         if let b = o.boost { f.boostAmount = b } else if s.output == .linearFloat {
