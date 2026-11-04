@@ -94,7 +94,12 @@ public struct PlatformImageCodec: FlatImageCodec {
         do { img = try ImageCodecs.decode(Data(data), options: opts) } catch { throw PCIOError.codec("\(error)") }
         var surface = img.surface
         let hasAlpha = surface.format.alpha
-        if !hasAlpha { surface = surface.convertedAny(to: surface.format.with(alpha: true)) }
+        // An added alpha is opaque, the default pixel's too: the image's own pixels keep it, and the
+        // surface reads transparent past them, as every layer the engine makes does (AB-T-0422/0423).
+        if !hasAlpha {
+            surface = surface.convertedAny(to: surface.format.with(alpha: true))
+                .withTransparentDefault(within: PixelRect(size: PixelSize(width: img.size.width, height: img.size.height)))
+        }
         let meta = FlatMetadata.read(data)
         var dpi = img.metadata.resolution.map { (x: $0.x, y: $0.y) }
         if FlatMetadata.formatName(data) == "PNG" { dpi = meta.dpi.map { (x: $0.x, y: $0.y) } }

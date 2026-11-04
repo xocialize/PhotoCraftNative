@@ -284,6 +284,11 @@ public enum DocumentIO {
         }
         var surface = img.surface
         if surface.format != doc.pixelFormat, surface.format.mode == doc.pixelFormat.mode { surface = surface.converted(to: doc.pixelFormat) }
+        // The layer reads transparent where it has no tile, as a File › New layer does: with an
+        // opaque default (an alpha added to a decoded image), a solid tile of that colour is no
+        // content, so Canvas Size whitened an opaque black Background (AB-T-0422) and the editor's
+        // tools refused it (AB-T-0423).
+        surface = surface.withTransparentDefault(within: doc.bounds)
         // As in Photoshop: an opaque image opens as the locked Background layer, one with an
         // alpha channel as a normal layer named "Layer 0" (a Background can't hold transparency).
         var l = Layer(name: img.hasAlpha ? "Layer 0" : "Background", content: .raster(surface))

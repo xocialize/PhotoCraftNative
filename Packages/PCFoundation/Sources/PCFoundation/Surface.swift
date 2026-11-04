@@ -498,6 +498,27 @@ public struct Surface: Sendable, Equatable {
         }
     }
 
+    /// The same pixels inside `bounds` on a surface whose missing tiles read transparent (all
+    /// zero), with nothing outside `bounds` (AB-T-0422, AB-T-0423). A decoded image without an
+    /// alpha channel gains an opaque one, and its default pixel with it (`converted(to:)`): an
+    /// opaque default makes a tile of that colour read as no content (`contentBounds`, `prune`),
+    /// unlike every layer the engine makes. Inside `bounds`, where the surface had no tile, the
+    /// result holds the old default as shared solid tiles (`fill`); whole tiles inside are kept
+    /// as they are. A surface already transparent by default comes back unchanged.
+    public func withTransparentDefault(within bounds: PixelRect) -> Surface {
+        if defaultPixel.allSatisfy({ $0 == 0 }) { return self }
+        var out = Surface(format: format)
+        out.fill(bounds, with: defaultPixelValue)
+        var whole: [(TileCoord, Tile)] = []
+        for (c, t) in store {
+            let r = c.rect.intersect(bounds)
+            if r.isEmpty { continue }
+            if r == c.rect { whole.append((c, t)) } else { out.writeInterleaved(r, readInterleaved(r)) }
+        }
+        out.putTiles(whole)
+        return out
+    }
+
     /// The pixels of `content` moved by (dx, dy).
     public func translated(dx: Int32, dy: Int32, content: PixelRect) -> Surface {
         var out = Surface(format: format)

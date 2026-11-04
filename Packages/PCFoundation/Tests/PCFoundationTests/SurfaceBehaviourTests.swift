@@ -462,3 +462,37 @@ enum Reference {
         }
     }
 }
+
+/// `withTransparentDefault(within:)`: an alpha added to an opaque image makes its default opaque, and a solid tile of
+/// that colour stops being content (AB-T-0422, AB-T-0423).
+@Suite struct TransparentDefaultTests {
+    @Test func anOpaqueDefaultBecomesContentInsideTheBounds() {
+        // 300 × 200 of opaque black with one grey pixel, made without alpha and pruned, then given an opaque alpha.
+        var rgb = Surface(format: PixelFormat(mode: .rgb, sample: .u8, alpha: false))
+        let bounds = PixelRect(x0: 0, y0: 0, x1: 300, y1: 200)
+        rgb.fill(bounds, with: [0, 0, 0])
+        rgb.setPixel(x: 260, y: 150, [0.5, 0.5, 0.5])
+        rgb.prune()
+        let opaque = rgb.converted(to: PixelFormat(mode: .rgb, sample: .u8, alpha: true))
+        #expect(opaque.defaultPixelValue == [0, 0, 0, 1])
+        #expect(opaque.contentBounds != bounds)
+
+        let s = opaque.withTransparentDefault(within: bounds)
+        #expect(s.defaultPixelValue == [0, 0, 0, 0])
+        #expect(s.contentBounds == bounds)
+        #expect(s.pixel(x: 0, y: 0) == [0, 0, 0, 1])
+        #expect(s.pixel(x: 299, y: 199) == [0, 0, 0, 1])
+        #expect(abs(s.pixel(x: 260, y: 150)[0] - 0.5) < 0.01)
+        #expect(s.pixel(x: 300, y: 0) == [0, 0, 0, 0])
+        #expect(s.pixel(x: 0, y: 200) == [0, 0, 0, 0])
+        #expect(s.pixel(x: -1, y: -1) == [0, 0, 0, 0])
+        // Whole solid tiles stay shared: a few tiles, not one per tile of the image.
+        #expect(s.tileCount <= opaque.tileCount + bounds.tiles.count)
+    }
+
+    @Test func aTransparentDefaultComesBackUnchanged() {
+        var s = Surface(format: PixelFormat(mode: .rgb, sample: .u8, alpha: true))
+        s.fill(PixelRect(x0: 0, y0: 0, x1: 10, y1: 10), with: [1, 0, 0, 1])
+        #expect(s.withTransparentDefault(within: PixelRect(x0: 0, y0: 0, x1: 5, y1: 5)) == s)
+    }
+}
