@@ -39,7 +39,9 @@ enum BackgroundCommands: CommandModule {
         }
         let bg = s.tools.background
         let renderer = s.services.renderer
-        try s.edit("Background From Layer") { doc, active in
+        // Photoshop 27.11 names the step "Convert to Background", from the menu's `make backgroundLayer` event or
+        // `isBackgroundLayer = true` (AB-T-0432).
+        try s.edit("Convert to Background") { doc, active in
             if LayerOps.backgroundId(doc) != nil { throw EngineError.other("the document already has a Background layer") }
             guard let l = doc.layer(id) else { throw EngineError.noLayer(id) }
             if let why = convertible(l) { throw EngineError.other(why) }

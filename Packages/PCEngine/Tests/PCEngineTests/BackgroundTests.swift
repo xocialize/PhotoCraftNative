@@ -54,6 +54,19 @@ import Testing
         return (s, [bg, a, b])
     }
 
+    /// The steps take Photoshop 27.11's History names (AB-T-0432, by script): Layer from Background is "Make Layer" and
+    /// Background from Layer "Convert to Background".
+    @Test func stepsTakePhotoshopsHistoryNames() throws {
+        let s = Session()
+        try s.execute("file.new", ["width": 4, "height": 4])
+        try s.execute("layer.new.layerFromBackground")
+        #expect(doc(s).background == nil && doc(s).layers.first?.name == "Layer 0")
+        #expect(s.active?.history.undoLabel == "Make Layer")
+        try s.execute(cmd)
+        #expect(doc(s).background != nil)
+        #expect(s.active?.history.undoLabel == "Convert to Background")
+    }
+
     @Test func makesTheLayerTheBackgroundAtTheBottom() throws {
         for depth in [8, 16, 32] {
             let (s, l) = try session(depth)

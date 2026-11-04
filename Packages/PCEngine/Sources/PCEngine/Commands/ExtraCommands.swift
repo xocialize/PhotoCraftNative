@@ -481,8 +481,10 @@ enum ExtraCommands: CommandModule {
 
     // MARK: Layers
 
+    /// Layer › New › Layer from Background…: the Background becomes "Layer 0", unlocked. Photoshop 27.11 names the step
+    /// "Make Layer", whether from the menu's `set` event or `isBackgroundLayer = false` (AB-T-0432).
     static func layerFromBackground(_ s: Session) throws -> JSONValue {
-        let id = try s.edit("Layer From Background") { doc, active -> LayerId in
+        let id = try s.edit("Make Layer") { doc, active -> LayerId in
             guard let bg = doc.background?.id else { throw EngineError.other("the document has no Background layer") }
             doc.updateBackground { LayerOps.unlockBackground(&$0) }
             active = bg
