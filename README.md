@@ -51,6 +51,12 @@ swift build && swift test        # from the repository root
 One package at a time: `swift build --target PCPSD`, `swift test --filter PCPSDTests`. Metal shaders ship as `.metal`
 resources compiled at first use (`MetalContext.library(bundle:key:)`), so `swift build` and Xcode build the same sources.
 
+## Licence
+
+PhotoCraftNative is licensed under the MIT License or the Apache License, Version 2.0, at your option
+([LICENSE-MIT](LICENSE-MIT), [LICENSE-APACHE](LICENSE-APACHE)), the same pair as photocraft. An app that ships it
+carries [NOTICE](NOTICE), which reproduces the licences of the work it takes from.
+
 ## Attribution
 
 photocraft: © 2026 ArtCraft Team and the PhotoCraft contributors, MIT OR Apache-2.0. PhotoDemon: © 2026 Tanner
