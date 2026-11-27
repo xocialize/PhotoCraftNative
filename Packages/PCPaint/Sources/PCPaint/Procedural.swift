@@ -85,8 +85,20 @@ public enum Procedural {
         }
     }
 
+    /// Most primitives one generated tip is drawn from, and most (pixel × primitive) visits it costs: every pixel is
+    /// tested against every primitive, so both counts are the caller's to multiply (photocraft #8957).
+    static let maxPrimitives: UInt32 = 4096
+    static let maxTipWork: UInt64 = 1 << 27
+
+    /// `count` limited so that an `n`×`n` tip tests at most `maxTipWork` pixel/primitive pairs.
+    static func clampPrimitives(_ n: UInt32, _ count: UInt32) -> UInt32 {
+        let perPrimitive = max(UInt64(n) * UInt64(n), 1)
+        return min(count, maxPrimitives, UInt32(clamping: maxTipWork / perPrimitive))
+    }
+
     /// A spatter tip: a cluster of round droplets of different sizes.
     public static func spatterTip(_ n: UInt32, _ seed: UInt32, _ drops: UInt32) -> GrayTile {
+        let drops = clampPrimitives(n, drops)
         let salt = UInt64(seed) + 202
         let s = Float(n)
         let blobs: [(Float, Float, Float)] = (0..<drops).map { i in
@@ -155,6 +167,7 @@ public enum Procedural {
 
     /// Grass: a tuft of tapered, slightly curved blades rising from the bottom edge.
     public static func grassTip(_ n: UInt32, _ seed: UInt32, _ blades: UInt32) -> GrayTile {
+        let blades = clampPrimitives(n, blades)
         let salt = UInt64(seed) + 505
         let s = Float(n)
         let bl: [(Float, Float, Float, Float)] = (0..<blades).map { i in
@@ -207,7 +220,7 @@ public enum Procedural {
     public static func rakeTip(_ n: UInt32, _ seed: UInt32, _ bristles: UInt32) -> GrayTile {
         let salt = UInt64(seed) + 707
         let s = Float(n)
-        let k = max(bristles, 1)
+        let k = max(clampPrimitives(n, bristles), 1)
         let dots: [(Float, Float, Float)] = (0..<k).map { i in
             let x = s * (Float(i) + 0.5) / Float(k)
             let y = s / 2 + (PaintRNG.hash2(Int32(i), 0, salt) - 0.5) * s * 0.08

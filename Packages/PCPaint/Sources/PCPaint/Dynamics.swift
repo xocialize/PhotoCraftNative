@@ -7,10 +7,40 @@
 
 import Foundation
 
-/// Maximum pulled-string length at 100 % smoothing, in screen pixels.
-public let maxStringPx: Double = 100
+/// Maximum pulled-string length at 100 % smoothing, in screen pixels: 150 px at 50 %, as measured in the reference
+/// application (photocraft #11888).
+public let maxStringPx: Double = 300
 /// Stroke time over which exponential smoothing moves its fraction of the way to the pointer.
 public let smoothingStepMs: Double = 16
+/// Exponential smoothing's time constant at 100 % smoothing, in ms, and the power of the amount it scales by:
+/// `tau = smoothingTauMs · amount^smoothingTauExp`. Fitted to the reference application's lag (photocraft #11888):
+/// a 200 px drag in 40 moves 10 ms apart ends 19 px short at 10 % (tau 43 ms) and 78 px short at 50 % (tau 173 ms).
+public let smoothingTauMs: Double = 314
+public let smoothingTauExp: Double = 0.864
+
+/// The fraction of the way to the pointer exponential smoothing moves in one `smoothingStepMs` at `amount`, clamped
+/// to 0...1. At 0 (or NaN) it is 1: no smoothing.
+public func smoothingPull(_ amount: Double) -> Double {
+    let a = amount.isNaN ? 0 : min(max(amount, 0), 1)
+    let tau = smoothingTauMs * pow(a, smoothingTauExp)
+    return tau > 0 ? 1 - exp(-smoothingStepMs / tau) : 1
+}
+
+/// Does the brush's pose (pressure, tilt, rotation, wheel) differ from `p`'s by more than `eps`? A pen that only
+/// changes pressure or tilt in place leaves the brush behind too (photocraft #7747).
+func poseDiffers(_ brush: StrokePoint, _ p: StrokePoint, _ eps: Float) -> Bool {
+    let r = p.rotation - brush.rotation + 540
+    let dr = r - 360 * (r / 360).rounded(.down) - 180
+    return abs(p.pressure - brush.pressure) > eps || abs(p.tiltX - brush.tiltX) > eps || abs(p.tiltY - brush.tiltY) > eps
+        || abs(dr) > eps || abs(p.wheel - brush.wheel) > eps
+}
+
+/// Most steps one distance-spaced segment emits: two far-apart points at a quarter-pixel spacing would otherwise be
+/// billions of steps (photocraft #8957).
+let maxDistanceStepsPerSegment = 1 << 20
+/// Most steps one stroke emits in total, over all its segments and spacing modes; later ones are dropped (a real
+/// stroke is orders of magnitude shorter; photocraft #11195).
+let maxStepsPerStroke: UInt64 = 1 << 21
 /// With Spacing unchecked, one dab per this many milliseconds of stroke time.
 public let speedSpacingMs: Double = 8
 /// Longest pixel-grid segment (in pixels) before falling back to distance spacing.
@@ -37,6 +67,9 @@ public struct Smoother: Sendable {
     var zoom: Double
     var pos: StrokePoint?
     var lastInput: StrokePoint?
+    /// Has time passed between two input points? Then the stroke is timed, and a later point with no time since the
+    /// last one moves the brush no further (not by the untimed pull; photocraft #12246).
+    var timed = false
 
     /// `zoom` is the view zoom (only used with `adjustForZoom`).
     public init(_ cfg: Smoothing, zoom: Float) {
@@ -74,19 +107,24 @@ public struct Smoother: Sendable {
         }
         // Exponential: every SMOOTHING_STEP_MS of stroke time moves `a` of the way towards the
         // pointer, so the feel doesn't depend on how often the device reports.
-        let a = 1 - minR(amount, 0.95)
+        let a = smoothingPull(amount)
         let dt = prevInput.map { p.time - $0.time } ?? 0
         let still = prevInput.map { $0.x == p.x && $0.y == p.y } ?? false
         if still && !cfg.catchUp { return }
+        let hasTime = dt > 0 && dt.isFinite
+        timed = timed || hasTime
+        // No time passed in a timed stroke (two reports in one millisecond): the brush stays where it is.
+        if timed && !hasTime { return }
         let iters: Int, step: Double
-        if dt > 0 && dt.isFinite {
+        if hasTime {
             let steps = dt / smoothingStepMs
             let it = clampR(steps.rounded(.up), 1, 64)
             iters = Int(it)
             step = 1 - pow(1 - a, minR(steps, 64) / it)
         } else {
+            // A stroke without timestamps was never measured: one step per point with the pull it always had.
             iters = 1
-            step = a
+            step = 1 - minR(amount, 0.95)
         }
         var cur = pos
         for _ in 0..<iters {
@@ -102,7 +140,7 @@ public struct Smoother: Sendable {
     /// Is Stroke Catch-Up still pulling the brush towards a pointer that has stopped?
     public var lagging: Bool {
         guard active && cfg.catchUp && !cfg.pulledString, let pos, let last = lastInput else { return false }
-        return abs(pos.x - last.x) + abs(pos.y - last.y) > 0.01
+        return abs(pos.x - last.x) + abs(pos.y - last.y) > 0.01 || poseDiffers(pos, last, 1e-3)
     }
 
     /// The string between the brush and the pointer (brush, pointer) while smoothing holds the
@@ -113,10 +151,11 @@ public struct Smoother: Sendable {
         return (SIMD2(pos.x, pos.y), SIMD2(last.x, last.y))
     }
 
-    /// End of stroke: with Catch-Up On Stroke End the brush finishes at the last pointer position.
+    /// End of stroke: with Catch-Up On Stroke End the brush finishes at the last pointer position and pose. Not in
+    /// Pulled String Mode: the brush stays the string's length behind the pointer (measured, photocraft #11888).
     public mutating func finish(_ out: inout [StrokePoint]) {
-        if !active || !cfg.catchUpOnEnd { return }
-        if let pos, let last = lastInput, pos.x != last.x || pos.y != last.y {
+        if !active || !cfg.catchUpOnEnd || cfg.pulledString { return }
+        if let pos, let last = lastInput, pos.x != last.x || pos.y != last.y || poseDiffers(pos, last, 0) {
             self.pos = last
             out.append(last)
         }
@@ -182,6 +221,7 @@ public struct PathWalker: Sendable {
     }
 
     mutating func emit(_ point: StrokePoint, _ out: (StepInput) -> Void) {
+        if step >= maxStepsPerStroke { return }
         let s = StepInput(point: point, direction: dir, initialDirection: initialDir ?? dir, step: step)
         step += 1
         out(s)
@@ -233,7 +273,7 @@ public struct PathWalker: Sendable {
                 speedAcc += dt
                 let maxN = asUsize(maxR((len / minSpeedStep).rounded(.up), 1))
                 var n = 0
-                while speedAcc >= iv && n < maxN {
+                while speedAcc >= iv && n < maxN && step < maxStepsPerStroke {
                     speedAcc -= iv
                     let f = clampR((dt - speedAcc) / dt, 0, 1)
                     emit(lerpPoint(a, p, f), out)
@@ -244,12 +284,17 @@ public struct PathWalker: Sendable {
                 var done = false
                 if let g = grid { done = gridSteps(a, p, g, out) }
                 if !done {
-                    while nextAt <= len + 1e-9 {
+                    var emitted = 0
+                    while nextAt <= len + 1e-9 && emitted < maxDistanceStepsPerSegment && step < maxStepsPerStroke {
                         let q = lerpPoint(a, p, minR(nextAt / len, 1))
                         emit(q, out)
                         nextAt += maxR(stepLen(q), 0.25)
+                        emitted += 1
                     }
-                    nextAt -= len
+                    // Cut short: the rest of the segment is skipped and spacing restarts at its end; only when the cap
+                    // held back a step still due, so a segment that ends right at the cap keeps its carry-over.
+                    let cutShort = emitted == maxDistanceStepsPerSegment && nextAt <= len + 1e-9
+                    nextAt = cutShort ? maxR(stepLen(p), 0.25) : nextAt - len
                 }
             }
         }

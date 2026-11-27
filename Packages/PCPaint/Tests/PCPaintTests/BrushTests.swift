@@ -561,22 +561,24 @@ import PCFoundation
         // Pulled string: jitter smaller than the string moves nothing; the brush trails by the string.
         let ps = Smoothing(amount: 0.2, pulledString: true, catchUpOnEnd: false)
         let jitter = (0..<20).map { StrokePoint($0 % 2 == 0 ? 0 : 5, 0, 1) }
-        #expect(smoothPoints(ps, zoom: 1, jitter).count == 1, "within the 20 px string: no motion")
+        #expect(smoothPoints(ps, zoom: 1, jitter).count == 1, "within the 60 px string (300 px at 100 %, photocraft #11888): no motion")
         var far = smoothPoints(ps, zoom: 1, [StrokePoint(0, 0, 1), StrokePoint(100, 0, 1)])
-        #expect(abs(far.last!.x - 80) < 1e-4)
+        #expect(abs(far.last!.x - 40) < 1e-4)
         far = smoothPoints(ps, zoom: 2, [StrokePoint(0, 0, 1), StrokePoint(100, 0, 1)])
-        #expect(abs(far.last!.x - 90) < 1e-4)
+        #expect(abs(far.last!.x - 70) < 1e-4)
         // Stroke catch-up: a pause (timestamps) lets the brush converge on the pointer.
         let a = StrokePoint(0, 0, 1).with(time: 0)
         let b = a.with(x: 100, time: 16)
-        let c = b.with(time: 500)
+        // the measured lag (photocraft #11888) needs a longer pause than the old pull did
+        let c = b.with(time: 1000)
+        let d = b.with(time: 2000)
         var s = Smoother(Smoothing(amount: 0.8, catchUp: true, catchUpOnEnd: false), zoom: 1)
         var out: [StrokePoint] = []
-        for p in [a, b, c] { s.push(p, &out) }
+        for p in [a, b, c, d] { s.push(p, &out) }
         #expect(out.last!.x > 99, "\(out.last!.x)")
         s = Smoother(Smoothing(amount: 0.8, catchUp: false, catchUpOnEnd: false), zoom: 1)
         out = []
-        for p in [a, b, c] { s.push(p, &out) }
+        for p in [a, b, c, d] { s.push(p, &out) }
         #expect(out.last!.x < 70, "\(out.last!.x)")
     }
 
@@ -611,11 +613,13 @@ import PCFoundation
             return out.last?.x ?? 0
         }
         let fast = run(1), slow = run(16)
-        // Two 16 ms steps of a 0.2 pull: 1 − 0.8² = 36 % of the way.
-        #expect(abs(slow - 36) < 1e-4, "\(slow)")
+        // Two 16 ms steps of one step's pull `a`: 1 − (1 − a)² of the way (photocraft #11888).
+        let a = smoothingPull(0.8)
+        #expect(abs(slow - 100 * (1 - (1 - a) * (1 - a))) < 1e-4, "\(slow)")
         #expect(abs(fast - slow) < 1e-4, "1000 Hz \(fast) vs 60 Hz \(slow)")
         var s = Smoother(cfg, zoom: 1)
         var out: [StrokePoint] = []
+        // without timestamps: one step per point with the pull it always had (photocraft e9a204f96)
         for x in [0.0, 100] { s.push(StrokePoint(x, 0, 1), &out) }
         #expect(abs((out.last?.x ?? 0) - 20) < 1e-4)
     }
