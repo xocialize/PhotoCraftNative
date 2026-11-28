@@ -228,4 +228,27 @@ import PCFoundation
         #expect(abs(rgb.data[0] - 0.7) < 1e-5)
         try Parity.check(f, src: src, out: inner, ctx: Self.cmykCtx(b))
     }
+
+    /// The Gaussian Blur filter itself below radius 1, CPU against Metal over the channel
+    /// variants, with the source sized by the filter's halo: the wider kernel must fit in it.
+    @Test func smallGaussianRadiiMatchOnMetal() throws {
+        for radius: Float in [0.1, 0.3, 0.95] { try Parity.checkVariants(GaussianBlur(radius: radius)) }
+    }
+
+    /// CMYK with alpha is two planes on Metal, (c, m, y, a) and (k, 0, 0, a): the ink rules hold
+    /// on both and alpha stays untouched.
+    @Test func cmykWithAlphaMatchesOnMetal() throws {
+        let b = PixelRect(x0: 0, y0: 0, x1: 12, y1: 12), inner = PixelRect(x0: 2, y0: 2, x1: 10, y1: 10)
+        var data: [Float] = []
+        for y in 0..<12 { for x in 0..<12 { data += [Float((x * 7 + y * 3) % 11) / 10, Float((x + y * 5) % 7) / 6, Float(x % 3) / 2, Float(y % 4) / 3, Float((x + y) % 5) / 4] } }
+        let src = FloatImage(rect: b, channels: 5, data: data)
+        let ctx = FilterContext(bounds: b, mode: .cmyk, alpha: true)
+        var k = [Float](repeating: 0, count: 25)
+        k[12] = 2; k[11] = -0.5; k[13] = -0.5
+        try Parity.check(FindEdges(), src: src, out: inner, ctx: ctx)
+        try Parity.check(Solarize(), src: src, ctx: ctx)
+        try Parity.check(CustomKernel(kernel: k, scale: 1, offset: 20), src: src, out: inner, ctx: ctx)
+        let sol = Solarize().cpu(src, out: b, ctx: ctx)
+        #expect(stride(from: 4, to: sol.data.count, by: 5).allSatisfy { sol.data[$0] == src.data[$0] }, "alpha untouched")
+    }
 }

@@ -104,10 +104,25 @@ extension FileCommands {
 
     // MARK: Save a Copy
 
+    /// Whether two paths name the same existing file (same device and inode, links followed).
+    static func sameFile(_ a: String, _ b: String) -> Bool {
+        var x = stat(), y = stat()
+        guard stat(a, &x) == 0, stat(b, &y) == 0 else { return false }
+        return x.st_dev == y.st_dev && x.st_ino == y.st_ino
+    }
+
     static func saveACopy(_ s: Session, _ p: JSONValue) throws -> JSONValue {
         let cmd = "file.saveACopy"
         let path = try strParam(p, "path", cmd)
         guard var doc = s.active?.doc else { throw EngineError.noDocument }
+        // A copy over the document's own file replaces it, and a flat or lossy format can't be
+        // undone, so it takes an explicit `"overwrite": true` (photocraft #7437, `502d055c6`). The
+        // param is not in the command's notation yet: that text is held equal to the catalogue
+        // generated from photocraft 184c226a.
+        if let own = s.active?.path, sameFile(path, own), p["overwrite"]?.boolValue != true {
+            throw EngineError.badParams(
+                cmd: cmd, msg: "`path` is the document's own file, so the copy would replace it: choose another path, or pass \"overwrite\": true")
+        }
         let opts = try SaveOpts.from(s, p, cmd)
         if p["layers"]?.boolValue == false {
             // "Layers" unchecked in Save a Copy: write the flattened image.

@@ -77,6 +77,8 @@ public enum FileRead {
         if fstat(fd, &st) != 0 { throw IOError.last(url.path) }
         if st.st_mode & S_IFMT == S_IFDIR { throw IOError(errno: EISDIR, url.path) }
         if st.st_mode & S_IFMT != S_IFREG { throw IOError(.invalidInput, "\(url.path): not a regular file") }
+        // It is a regular file: back to ordinary blocking reads, as photocraft's `read_path` does.
+        _ = fcntl(fd, F_SETFL, 0)
         let len = UInt64(max(0, st.st_size))
         var r = FileDescriptorReader(fd: fd)
         return try readAll(&r, sizeHint: min(len, maxOpenBytes), chunk: chunk, limit: maxOpenBytes)

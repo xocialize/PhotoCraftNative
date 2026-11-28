@@ -155,6 +155,24 @@ fileprivate func colorOverlay() -> Effect { .colorOverlay(Effect.ColorOverlay(co
         #expect(throws: (any Error).self) { try s.execute("file.revert") }
     }
 
+    /// photocraft #7437 (`502d055c6`): Save a Copy onto the document's own file is refused
+    /// without `"overwrite": true`.
+    @Test func saveACopyRefusesTheDocumentsOwnFile() throws {
+        let dir = try ioDir("copy-own")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let s = try session(20, 10, 16)
+        let own = dir.appendingPathComponent("doc.psd").path
+        try s.execute("file.saveAs", ["path": .string(own)])
+        #expect(try #require(s.active).path == own)
+        let before = try Data(contentsOf: URL(fileURLWithPath: own))
+        for spelling in [own, dir.path + "/./doc.psd"] {
+            #expect(throws: (any Error).self) { try s.execute("file.saveACopy", ["path": .string(spelling), "layers": false]) }
+            #expect(try Data(contentsOf: URL(fileURLWithPath: own)) == before)
+        }
+        try s.execute("file.saveACopy", ["path": .string(own), "layers": false, "overwrite": true])
+        try s.execute("file.saveACopy", ["path": .string(dir.appendingPathComponent("other.psd").path)])
+    }
+
     @Test func saveACopyKeepsPathAndDirtyState() throws {
         let dir = try ioDir("copy")
         defer { try? FileManager.default.removeItem(at: dir) }
