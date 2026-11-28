@@ -22,7 +22,8 @@ public struct SmartBlur: Filter, Hashable {
         self.radius = radius; self.threshold = threshold; self.quality = quality; self.mode = mode
     }
     public var label: String { "Smart Blur" }
-    public func halo(bounds: PixelRect) -> Halo { .reach(radius) }
+    /// The kernel clamps the radius to 100 px: the source window is sized by what it uses (photocraft #8946).
+    public func halo(bounds: PixelRect) -> Halo { .reach(min(radius, 100)) }
 
     /// The threshold test spans every colour channel: one GPU plane must hold them all.
     public var gpuChannels: GPUChannels { .joint }

@@ -231,7 +231,8 @@ public struct LensBlur: Filter, Hashable {
     public func hash(into h: inout Hasher) { h.combine(radius); h.combine(blades); h.combine(seed); h.combine(depth) }
 
     public var label: String { "Lens Blur" }
-    public func halo(bounds: PixelRect) -> Halo { .reach(radius) }
+    /// The kernel clamps the radius to 100 px: the source window is sized by what it uses (photocraft #8946).
+    public func halo(bounds: PixelRect) -> Halo { .reach(min(radius, 100)) }
     static let levels = 8
 
     var boost: Float { clampf(brightness, 0, 100) / 100 * 4 }

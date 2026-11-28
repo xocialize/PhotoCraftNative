@@ -251,4 +251,21 @@ import PCFoundation
         let sol = Solarize().cpu(src, out: b, ctx: ctx)
         #expect(stride(from: 4, to: sol.data.count, by: 5).allSatisfy { sol.data[$0] == src.data[$0] }, "alpha untouched")
     }
+
+    /// photocraft #8946 `a_huge_canvas_gets_a_coarser_field_not_a_huge_one`: 400,000² px at 2 px per node would be
+    /// 4·10¹⁰ nodes.
+    @Test func aHugeCanvasGetsACoarserLiquifyField() {
+        let f = LiquifyField(bounds: PixelRect(x0: 0, y0: 0, x1: 400_000, y1: 400_000), cell: 2)
+        #expect(f.w * f.h <= LiquifyField.maxNodes && f.d.count == f.w * f.h && f.freeze.count == f.d.count)
+        #expect(f.cell > 64)
+        #expect(LiquifyField(bounds: PixelRect(x0: 0, y0: 0, x1: 100, y1: 100), cell: 2).cell == 2)
+    }
+
+    /// photocraft #8946: Smart Blur and Lens Blur size their source window by the 100 px their kernels use.
+    @Test func blurHalosFollowTheKernelsClamp() {
+        let b = PixelRect(x0: 0, y0: 0, x1: 10, y1: 10)
+        #expect(SmartBlur(radius: 1e9).halo(bounds: b) == SmartBlur(radius: 100).halo(bounds: b))
+        #expect(LensBlur(radius: 1e9).halo(bounds: b) == LensBlur(radius: 100).halo(bounds: b))
+        #expect(SmartBlur(radius: 3).halo(bounds: b) == .radius(4))
+    }
 }

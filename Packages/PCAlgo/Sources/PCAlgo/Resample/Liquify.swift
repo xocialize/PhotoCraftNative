@@ -170,12 +170,25 @@ public struct LiquifyField: Sendable, Equatable, Codable {
         a.bounds == b.bounds && a.cell == b.cell && a.w == b.w && a.h == b.h && a.d == b.d && a.freeze == b.freeze
     }
 
+    /// Most nodes of a field's displacement grid (12 bytes each with the freeze mask): 192 MB.
+    public static let maxNodes = 1 << 24
+
     public init(bounds: PixelRect, cell c: Double) {
-        let cell = clampR(c, 1, 64)
+        var cell = clampR(c, 1, 64)
+        func nodes(_ cell: Double) -> (Int, Int) {
+            (toUsize((Double(bounds.width) / cell).rounded(.up)) + 2, toUsize((Double(bounds.height) / cell).rounded(.up)) + 2)
+        }
+        var (w, h) = nodes(cell)
+        // The extent is the document canvas, which a file declares: past the node budget the field gets coarser
+        // (it is interpolated anyway) instead of asking for gigabytes (photocraft #8946).
+        while w.multipliedReportingOverflow(by: h).overflow || w * h > LiquifyField.maxNodes {
+            cell *= 2
+            (w, h) = nodes(cell)
+        }
         self.bounds = bounds
         self.cell = cell
-        w = toUsize((Double(bounds.width) / cell).rounded(.up)) + 2
-        h = toUsize((Double(bounds.height) / cell).rounded(.up)) + 2
+        self.w = w
+        self.h = h
         d = [SIMD2<Float>](repeating: .zero, count: w * h)
         freeze = [Float](repeating: 0, count: w * h)
     }
