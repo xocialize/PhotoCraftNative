@@ -17,6 +17,12 @@ enum PhotocraftExtensions {
         "select.lasso": #"{"points":[[x,y],…],"mode":"replace|add|subtract|intersect"="replace","antiAlias":bool=true,"feather":px=0,"polygonal":bool=false (the step is "Polygonal Lasso")}"#,
         // AB-T-0285: Release takes the clipped run above out too.
         "layer.releaseClippingMask": #"{"layer":id?} (no layer: every selected layer; each takes the layers clipped above it out too)"#,
+        // AB-R-1213: whole-layer transforms while a selection is active.
+        "edit.transform": ##"{"layer":id?,"rect":[x0,y0,x1,y1]? (source frame; default = layer content ∩ selection),"quad":[[x,y]×4]? (where the frame's corners go, clockwise from top-left),"matrix":[a,b,c,d,e,f]? (affine alternative),"interpolation":"bicubic|bilinear|nearest"="bicubic","target":"pixels"|"mask"|"quickMask"|{"channel":i}=Channels panel target (an unlinked mask, an alpha channel or the Quick Mask transforms alone; a linked mask moves with its layer),"selection":"use|ignore"="use" (ignore: the whole layer transforms and the selection stays where it is)}"##,
+        // AB-R-1213: a host's Preserve Transparency.
+        "filter.blur.gaussianBlur": ##"{"radius":0.1..1000=1,"preserveTransparency":bool=false (a pixel layer keeps its alpha, as a transparency-locked one does)}"##,
+        // photocraft #7437 (502d055c6), taken after the catalogue's revision.
+        "file.saveACopy": ##"{"path":str (format from the extension),"quality":0..12? (JPEG),"layers":bool=true,"overwrite":bool=false (replace the document's own file),"tiffLayers":bool=false (TIFF: keep the layers; flat by default),"tgaBits":24|32? (TGA: 32 writes the alpha channel, or else the transparency, as the alpha; unset, 32 with an alpha channel or transparency, else 24)}"##,
     ]
 
     /// The params a command registered from `c` should have.

@@ -119,7 +119,7 @@ import Testing
         // Every id is photocraft's, with photocraft's metadata.
         for spec in specs {
             let c = try #require(PhotocraftCatalog.byId[spec.id], "\(spec.id) is not a photocraft id")
-            #expect(spec.label == c.label && spec.menu == c.menu && spec.shortcut == c.shortcut && spec.params == c.params, "\(spec.id)")
+            #expect(spec.label == c.label && spec.menu == c.menu && spec.shortcut == c.shortcut && spec.params == PhotocraftExtensions.expected(c), "\(spec.id)")
         }
     }
 
@@ -144,7 +144,10 @@ import Testing
             try s.execute("file.new", ["width": 48, "height": 32])
             try s.execute("layer.new.layer")
             try s.edit("square") { doc, active in
-                _ = doc.withRaster(of: active!) { $0.fill(PixelRect(x0: 16, y0: 8, x1: 32, y1: 24), with: [1, 0, 0, 1]) }
+                _ = doc.withRaster(of: active!) {
+                    $0.fill(PixelRect(x0: 16, y0: 8, x1: 24, y1: 24), with: [1, 0, 0, 1])
+                    $0.fill(PixelRect(x0: 24, y0: 8, x1: 32, y1: 24), with: [0, 0, 1, 1])
+                }
             }
             let before = try activePixels(s)
             try s.execute("filter.blur.gaussianBlur", params)
@@ -155,6 +158,9 @@ import Testing
         func alpha(_ px: [Float]) -> [Float] { stride(from: 3, to: px.count, by: 4).map { px[$0] } }
         #expect(alpha(plain.after) != plain.alphaBefore, "a plain blur spreads the alpha")
         #expect(alpha(kept.after) == kept.alphaBefore, "the alpha is as it was")
+        // The colour did blur: at the seam between the red and blue halves (x 23, y 16) red is no longer 1.
+        let seam = (16 * 48 + 23) * 4
+        #expect(kept.after[seam] < 0.9 && kept.after[seam + 2] > 0.1, "\(kept.after[seam]) \(kept.after[seam + 2])")
         #expect(throws: (any Error).self) { _ = try blurred(["radius": 4, "preserveTransparency": "yes"]) }
     }
 

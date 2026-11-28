@@ -116,9 +116,7 @@ extension FileCommands {
         let path = try strParam(p, "path", cmd)
         guard var doc = s.active?.doc else { throw EngineError.noDocument }
         // A copy over the document's own file replaces it, and a flat or lossy format can't be
-        // undone, so it takes an explicit `"overwrite": true` (photocraft #7437, `502d055c6`). The
-        // param is not in the command's notation yet: that text is held equal to the catalogue
-        // generated from photocraft 184c226a.
+        // undone, so it takes an explicit `"overwrite": true` (photocraft #7437, `502d055c6`).
         if let own = s.active?.path, sameFile(path, own), p["overwrite"]?.boolValue != true {
             throw EngineError.badParams(
                 cmd: cmd, msg: "`path` is the document's own file, so the copy would replace it: choose another path, or pass \"overwrite\": true")
@@ -277,7 +275,7 @@ extension FileCommands {
             CommandSpec("file.revert", "Revert", menu: ["File"], shortcut: "F12", params: "{} (reloads the saved file as one undoable step)", module: m,
                         enabled: canRevert) { s, _ in try revert(s) },
             CommandSpec("file.saveACopy", "Save a Copy…", menu: ["File"], shortcut: "Cmd+Alt+S",
-                        params: #"{"path":str (format from the extension),"quality":0..12? (JPEG),"layers":bool=true,"tiffLayers":bool=false (TIFF: keep the layers; flat by default),"tgaBits":24|32? (TGA: 32 writes the alpha channel, or else the transparency, as the alpha; unset, 32 with an alpha channel or transparency, else 24)}"#,
+                        params: #"{"path":str (format from the extension),"quality":0..12? (JPEG),"layers":bool=true,"overwrite":bool=false (replace the document's own file),"tiffLayers":bool=false (TIFF: keep the layers; flat by default),"tgaBits":24|32? (TGA: 32 writes the alpha channel, or else the transparency, as the alpha; unset, 32 with an alpha channel or transparency, else 24)}"#,
                         module: m, enabled: nativeDoc, run: saveACopy),
             CommandSpec("file.openAs", "Open As…", menu: ["File"], shortcut: "Cmd+Alt+Shift+O",
                         params: #"{"path":str,"as":"psd|png|jpg|tiff|…"? (decode as this format)}"#, module: m, enabled: native, run: openAs),

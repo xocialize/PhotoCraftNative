@@ -464,8 +464,7 @@ enum TransformCommands: CommandModule {
         guard let st = s.active else { throw EngineError.noDocument }
         let id0: LayerId? = p["layer"]?.uint64Value.map { LayerId($0) } ?? st.activeLayer
         // `"selection": "ignore"`: the whole layer transforms, not its selected pixels, and the selection stays where
-        // it is (what a host's Move or Free Transform of whole layers wants while a selection is active). Not in the
-        // command's notation, which is held equal to photocraft's.
+        // it is (what a host's Move or Free Transform of whole layers wants while a selection is active).
         let ignoresSelection: Bool
         switch p["selection"]?.stringValue {
         case nil, "use"?: ignoresSelection = false
@@ -549,7 +548,7 @@ enum TransformCommands: CommandModule {
 
     static func register(into r: inout CommandRegistry) {
         r.add(CommandSpec("edit.transform", "Free Transform",
-                          params: #"{"layer":id?,"rect":[x0,y0,x1,y1]? (source frame; default = layer content ∩ selection),"quad":[[x,y]×4]? (where the frame's corners go, clockwise from top-left),"matrix":[a,b,c,d,e,f]? (affine alternative),"interpolation":"bicubic|bilinear|nearest"="bicubic","target":"pixels"|"mask"|"quickMask"|{"channel":i}=Channels panel target (an unlinked mask, an alpha channel or the Quick Mask transforms alone; a linked mask moves with its layer)}"#,
+                          params: #"{"layer":id?,"rect":[x0,y0,x1,y1]? (source frame; default = layer content ∩ selection),"quad":[[x,y]×4]? (where the frame's corners go, clockwise from top-left),"matrix":[a,b,c,d,e,f]? (affine alternative),"interpolation":"bicubic|bilinear|nearest"="bicubic","target":"pixels"|"mask"|"quickMask"|{"channel":i}=Channels panel target (an unlinked mask, an alpha channel or the Quick Mask transforms alone; a linked mask moves with its layer),"selection":"use|ignore"="use" (ignore: the whole layer transforms and the selection stays where it is)}"#,
                           module: m, enabled: hasLayer, run: transform))
     }
 }

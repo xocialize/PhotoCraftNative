@@ -219,8 +219,8 @@ enum FilterCommands: CommandModule {
             let ready = f
             try doc.withRaster(of: layer) { surf in
                 // `"preserveTransparency": true` filters the colour alone, as a transparency lock does, without the
-                // layer having one (a host's Preserve Transparency checkbox). Not in the commands' notation, which is
-                // held equal to photocraft's.
+                // layer having one (a host's Preserve Transparency checkbox). Every filter validated by field rules takes
+                // it; Gaussian Blur's notation names it.
                 let before = locks.transparency || params["preserveTransparency"]?.boolValue == true ? surf : nil
                 let content = surf.contentBounds
                 let area = outputArea(ready, content: content, bounds: bounds, selectionBounds: selBounds)
@@ -229,7 +229,8 @@ enum FilterCommands: CommandModule {
             }
             return f
         case .smart:
-            let sf = SmartFilter(command: id, params: params, blend: .normal, opacity: 1, visible: true)
+            // Pixel layers only: a smart filter has no alpha of its own to keep, so the key is not recorded.
+            let sf = SmartFilter(command: id, params: params.removing("preserveTransparency"), blend: .normal, opacity: 1, visible: true)
             try addSmartFilter(&doc, layer, sf, selection: selection, services: services)
             return f
         default:
@@ -346,7 +347,8 @@ enum FilterCommands: CommandModule {
 
     static func specs() -> [CommandSpec] {
         [
-            filterCmd("filter.blur.gaussianBlur", "Gaussian Blur…", ["Filter", "Blur"], ##"{"radius":0.1..1000=1}"##),
+            filterCmd("filter.blur.gaussianBlur", "Gaussian Blur…", ["Filter", "Blur"],
+                      ##"{"radius":0.1..1000=1,"preserveTransparency":bool=false (a pixel layer keeps its alpha, as a transparency-locked one does)}"##),
             filterCmd("filter.blur.blur", "Blur", ["Filter", "Blur"], "{}"),
             filterCmd("filter.blur.blurMore", "Blur More", ["Filter", "Blur"], "{}"),
             filterCmd("filter.sharpen.sharpen", "Sharpen", ["Filter", "Sharpen"], "{}"),

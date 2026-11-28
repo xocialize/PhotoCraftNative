@@ -410,7 +410,7 @@ import Testing
             let spec = try #require(s.registry.spec(id))
             let pc = try #require(PhotocraftCatalog.byId[id])
             #expect(spec.isAvailable)
-            #expect(spec.module == pc.module && spec.label == pc.label && spec.menu == pc.menu && spec.shortcut == pc.shortcut && spec.params == pc.params, "\(id)")
+            #expect(spec.module == pc.module && spec.label == pc.label && spec.menu == pc.menu && spec.shortcut == pc.shortcut && spec.params == PhotocraftExtensions.expected(pc), "\(id)")
         }
     }
 }
