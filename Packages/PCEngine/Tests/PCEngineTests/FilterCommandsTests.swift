@@ -136,6 +136,28 @@ import Testing
         }
     }
 
+    /// `"preserveTransparency": true` filters the colour alone: the layer keeps its alpha, as a transparency-locked
+    /// layer does, without having the lock.
+    @Test func preserveTransparencyKeepsTheLayersAlpha() throws {
+        func blurred(_ params: JSONValue) throws -> (alphaBefore: [Float], after: [Float]) {
+            let s = Session()
+            try s.execute("file.new", ["width": 48, "height": 32])
+            try s.execute("layer.new.layer")
+            try s.edit("square") { doc, active in
+                _ = doc.withRaster(of: active!) { $0.fill(PixelRect(x0: 16, y0: 8, x1: 32, y1: 24), with: [1, 0, 0, 1]) }
+            }
+            let before = try activePixels(s)
+            try s.execute("filter.blur.gaussianBlur", params)
+            return (stride(from: 3, to: before.count, by: 4).map { before[$0] }, try activePixels(s))
+        }
+        let plain = try blurred(["radius": 4])
+        let kept = try blurred(["radius": 4, "preserveTransparency": true])
+        func alpha(_ px: [Float]) -> [Float] { stride(from: 3, to: px.count, by: 4).map { px[$0] } }
+        #expect(alpha(plain.after) != plain.alphaBefore, "a plain blur spreads the alpha")
+        #expect(alpha(kept.after) == kept.alphaBefore, "the alpha is as it was")
+        #expect(throws: (any Error).self) { _ = try blurred(["radius": 4, "preserveTransparency": "yes"]) }
+    }
+
     @Test func selectionLimitsTheFilter() throws {
         let s = try session()
         try paintPattern(s)

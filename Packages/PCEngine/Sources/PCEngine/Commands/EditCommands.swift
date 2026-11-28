@@ -525,27 +525,62 @@ enum EditCommands: CommandModule {
         return ["layer": .id(nid)]
     }
 
+    /// What Merge Visible keeps and where the merged layer goes, as Photoshop 27.11 has it (measured by script,
+    /// AB-T-0342, AB-T-0343): every shown layer merges into the active one, which gives the result its name and its
+    /// place among the layers that stay. Hidden layers stay in their order, those inside shown folders too, lifted out
+    /// of them. A shown Background takes the merge instead, whichever layer is active.
+    struct VisibleMerge {
+        /// The layers that stay, bottom to top.
+        var rest: [Layer] = []
+        /// Where the merged layer goes in `rest`.
+        var place = 0
+        var name = ""
+        var locks = Locks()
+        var intoBackground = false
+    }
+
+    /// The plan, or why Photoshop's Merge Visible "is not currently available": the active layer is hidden, or fewer
+    /// than two layers are shown.
+    static func visibleMerge(_ doc: Document, active: LayerId?) -> Result<VisibleMerge, EngineError> {
+        var plan = VisibleMerge()
+        var shown = 0
+        var activeShown = false
+        // Bottom to top, a folder after what it holds (it sits above its layers in the panel).
+        func visit(_ l: Layer) {
+            guard l.visible else { plan.rest.append(l); return }
+            if let children = l.children { children.forEach(visit) } else { shown += 1 }
+            if l.id == active {
+                activeShown = true
+                plan.place = plan.rest.count
+                plan.name = l.name
+                plan.locks = l.isGroup ? Locks() : l.locks
+            }
+        }
+        doc.layers.forEach(visit)
+        if !activeShown { return .failure(.other("the active layer is hidden")) }
+        if shown < 2 { return .failure(.other("there are not enough visible layers to merge")) }
+        if let background = doc.background, background.visible {
+            plan.intoBackground = true
+            plan.place = 0
+            plan.name = background.name
+            plan.locks = background.locks
+        }
+        return .success(plan)
+    }
+
     static func mergeVisible(_ s: Session) throws -> JSONValue {
         let renderer = s.services.renderer
         try s.edit("Merge Visible") { doc, active in
-            let visible = doc.layers.indices.filter { doc.layers[$0].visible }
-            if visible.count < 2 && !visible.contains(where: { doc.layers[$0].isGroup }) {
-                throw EngineError.other("there are not enough visible layers to merge")
-            }
-            guard let lowest = visible.first else { throw EngineError.other("there are not enough visible layers to merge") }
-            let base = doc.layers[lowest]
-            let isBackground = lowest == 0 && doc.isBackground(base.id)
-            // Composite of visible layers only (hidden ones stay where they are).
+            let plan = try visibleMerge(doc, active: active).get()
+            // Composite of the shown layers only: a hidden layer is not drawn wherever it sits.
             var solo = doc
             solo.layers = solo.layers.filter(\.visible)
             let fmt = doc.pixelFormat
-            let pixels = try Pixels.compositeLayers(solo, format: fmt, background: isBackground ? SIMD3(1, 1, 1) : nil, renderer: renderer)
-            var merged = Layer.raster(base.name, surface: pixels)
-            merged.locks = base.locks
-            var out: [Layer] = []
-            for (i, l) in doc.layers.enumerated() {
-                if i == lowest { out.append(merged) } else if !l.visible { out.append(l) }
-            }
+            let pixels = try Pixels.compositeLayers(solo, format: fmt, background: plan.intoBackground ? SIMD3(1, 1, 1) : nil, renderer: renderer)
+            var merged = Layer.raster(plan.name, surface: pixels)
+            merged.locks = plan.locks
+            var out = plan.rest
+            out.insert(merged, at: plan.place)
             doc.layers = out
             active = merged.id
         }
@@ -847,7 +882,12 @@ enum EditCommands: CommandModule {
         r.add(CommandSpec("layer.new.layerViaCut", "Layer via Cut", menu: ["Layer", "New"], shortcut: "Cmd+Shift+J", module: m, enabled: hasPixels) { s, _ in
             try layerVia(s, cut: true)
         })
-        r.add(CommandSpec("layer.mergeVisible", "Merge Visible", menu: ["Layer"], shortcut: "Cmd+Shift+E", module: m, enabled: Pre.hasDoc) { s, _ in
+        let canMergeVisible: CommandEnabled = { s, _ in
+            guard let d = s.active else { return "no document open" }
+            if case .failure(let e) = visibleMerge(d.doc, active: d.activeLayer) { return "\(e)" }
+            return nil
+        }
+        r.add(CommandSpec("layer.mergeVisible", "Merge Visible", menu: ["Layer"], shortcut: "Cmd+Shift+E", module: m, enabled: canMergeVisible) { s, _ in
             try mergeVisible(s)
         })
         for (id, label, shortcut, kind) in [("image.autoTone", "Auto Tone", "Cmd+Shift+L", "tone"), ("image.autoContrast", "Auto Contrast", "Cmd+Alt+Shift+L", "contrast"),

@@ -495,7 +495,8 @@ enum IntelligenceBridge: CommandModule {
             o["document"] = .int(i)
             o["width"] = .int(out.document.size.width)
             o["height"] = .int(out.document.size.height)
-            o["appliedFactor"] = .number(out.receipt.metrics["appliedFactor"] ?? Double(f))
+            // PCIntelligence's upscale receipt names the factor the provider applied `appliedScale` (AB-T-0337).
+            o["appliedFactor"] = .number(out.receipt.metrics["appliedScale"] ?? Double(f))
             return .object(o)
         })
     }

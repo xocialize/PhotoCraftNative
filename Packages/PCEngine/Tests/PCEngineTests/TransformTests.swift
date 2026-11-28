@@ -100,6 +100,23 @@ import Testing
         #expect((sel.y0, sel.y1) == (60, 70), "selection moves too")
     }
 
+    /// `"selection": "ignore"`: the whole layer moves though a selection is active, and the selection stays where it
+    /// was (a host's Move of whole layers; PixelAgencyEditor lifted the selection around the command for this).
+    @Test func ignoringTheSelectionMovesTheWholeLayerAndLeavesTheSelection() throws {
+        let s = try session()
+        try s.execute("select.rect", ["x": 10, "y": 10, "width": 10, "height": 10])
+        try s.execute("edit.transform", ["matrix": [1, 0, 0, 1, 0, 50], "selection": "ignore"])
+        #expect(activeBounds(s) == rect(10, 60, 30, 70), "the whole rectangle moved, the unselected half too")
+        let sel = try #require(s.active?.doc.selection).contentBounds
+        #expect(sel == rect(10, 10, 20, 20), "the selection stayed")
+        // The default frame is the layer's whole content, not its part in the selection.
+        let framed = try session()
+        try framed.execute("select.rect", ["x": 10, "y": 10, "width": 10, "height": 10])
+        try framed.execute("edit.transform", ["quad": [[10, 10], [50, 10], [50, 30], [10, 30]], "selection": "ignore", "interpolation": "nearest"])
+        #expect(activeBounds(framed) == rect(10, 10, 50, 30), "20 × 10 scaled to 40 × 20 from the whole content")
+        #expect(throws: (any Error).self) { try framed.execute("edit.transform", ["matrix": [1, 0, 0, 1, 1, 1], "selection": "some"]) }
+    }
+
     @Test func withSelectionBoundsDropTheVacatedArea() throws {
         // #1097: moving every pixel through a selection left transparent but coloured pixels
         // behind, so the layer bounds were the union of the old and new positions.

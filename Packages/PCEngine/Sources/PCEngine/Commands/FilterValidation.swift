@@ -145,6 +145,11 @@ enum FilterValidation {
                 case "coalesce":
                     valid = value.stringValue != nil
                     expected = "a string"
+                case "preserveTransparency":
+                    // Not photocraft's: a pixel layer keeps its alpha, as a transparency-locked one does
+                    // (`FilterCommands.apply`).
+                    valid = value.boolValue != nil
+                    expected = "true or false"
                 case "target":
                     let named = value.stringValue.map { ["pixels", "mask", "quickMask"].contains($0) } ?? false
                     let channel = value.objectValue.map { $0.count == 1 && $0["channel"]?.uint64Value != nil } ?? false

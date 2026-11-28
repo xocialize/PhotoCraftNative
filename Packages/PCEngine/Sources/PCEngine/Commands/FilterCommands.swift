@@ -218,7 +218,10 @@ enum FilterCommands: CommandModule {
         case .raster:
             let ready = f
             try doc.withRaster(of: layer) { surf in
-                let before = locks.transparency ? surf : nil
+                // `"preserveTransparency": true` filters the colour alone, as a transparency lock does, without the
+                // layer having one (a host's Preserve Transparency checkbox). Not in the commands' notation, which is
+                // held equal to photocraft's.
+                let before = locks.transparency || params["preserveTransparency"]?.boolValue == true ? surf : nil
                 let content = surf.contentBounds
                 let area = outputArea(ready, content: content, bounds: bounds, selectionBounds: selBounds)
                 try run(ready, on: &surf, area: area, bounds: bounds, selection: selection, extent: docBounds.union(content), ctx: ctx, label: label)

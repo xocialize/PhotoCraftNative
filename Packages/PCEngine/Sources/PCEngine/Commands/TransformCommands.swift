@@ -463,6 +463,17 @@ enum TransformCommands: CommandModule {
         let p = withPanelTarget(s, p0)
         guard let st = s.active else { throw EngineError.noDocument }
         let id0: LayerId? = p["layer"]?.uint64Value.map { LayerId($0) } ?? st.activeLayer
+        // `"selection": "ignore"`: the whole layer transforms, not its selected pixels, and the selection stays where
+        // it is (what a host's Move or Free Transform of whole layers wants while a selection is active). Not in the
+        // command's notation, which is held equal to photocraft's.
+        let ignoresSelection: Bool
+        switch p["selection"]?.stringValue {
+        case nil, "use"?: ignoresSelection = false
+        case "ignore"?: ignoresSelection = true
+        default: throw bad("`selection` must be \"use\" or \"ignore\"")
+        }
+        var framed = st.doc
+        if ignoresSelection { framed.selection = nil }
         let lone = try loneTarget(st.doc, id0, p)
         let id: LayerId?
         if lone != nil && Channels.isChannelTarget(p) {
@@ -478,10 +489,10 @@ enum TransformCommands: CommandModule {
         } else {
             let b: PixelRect
             if let surf = lone {
-                b = targetBounds(st.doc, surf)
+                b = targetBounds(framed, surf)
             } else if let id {
                 guard let l = st.doc.layer(id) else { throw EngineError.noLayer(id) }
-                b = transformBounds(st.doc, l)
+                b = transformBounds(framed, l)
             } else {
                 b = .empty
             }
@@ -507,14 +518,14 @@ enum TransformCommands: CommandModule {
         let isLone = lone != nil
         let services = s.services
         try s.edit("Free Transform") { doc, _ in
-            let sel = doc.selection
+            let sel = ignoresSelection ? nil : doc.selection
             if isLone {
                 // A targeted unlinked mask, alpha channel or Quick Mask transforms by itself.
                 if !h.isIdentity {
                     try Channels.withTargetSurface(&doc, layer: id, p) { surf, _ in
                         surf = sel.map { warpGraySelected(surf, $0, h, interp) } ?? warpGray(surf, h, interp)
                     }
-                    if let cur = doc.selection { doc.selection = nonEmpty(warpGray(cur, h, .bilinear)) }
+                    if !ignoresSelection, let cur = doc.selection { doc.selection = nonEmpty(warpGray(cur, h, .bilinear)) }
                 }
                 return
             }
@@ -530,7 +541,7 @@ enum TransformCommands: CommandModule {
                 let snapshot = doc
                 doc.updateLayer(id) { l in refreshText(snapshot, &l, services: services) }
                 // The selection outline moves with the pixels.
-                if let cur = doc.selection { doc.selection = nonEmpty(warpGray(cur, h, .bilinear)) }
+                if !ignoresSelection, let cur = doc.selection { doc.selection = nonEmpty(warpGray(cur, h, .bilinear)) }
             }
         }
         return ["rect": .doubles(rect)]

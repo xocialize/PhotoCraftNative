@@ -557,15 +557,113 @@ import Testing
 
     @Test func mergeVisibleKeepsHiddenLayers() throws {
         let s = try session()
+        let red = try #require(s.active?.activeLayer)
         try s.execute("layer.new.layer")
         let hidden = try #require(s.active?.activeLayer)
         try s.execute("layer.setProps", ["layer": .id(hidden), "visible": false])
+        // The active layer must be shown (below).
+        try s.execute("layer.select", ["layer": .id(red)])
         try s.execute("layer.mergeVisible")
         let d = try #require(s.active?.doc)
         #expect(d.layers.count == 2)
         #expect(d.layers[0].name == "Background")
         #expect(d.layers[1].id == hidden)
         #expect(Array(d.layers[0].surface?.pixel(x: 20, y: 20).prefix(3) ?? []) == [1, 0, 0])
+    }
+
+    /// A session whose document holds exactly `layers` (bottom to top), `active` being the layer of that name.
+    func stack(_ layers: [Layer], active: String) throws -> Session {
+        let s = Session()
+        try s.execute("file.new", ["width": 40, "height": 40])
+        try s.edit("stack") { doc, a in
+            doc.layers = layers
+            a = doc.walk().first { $0.layer.name == active }?.layer.id
+        }
+        return s
+    }
+
+    /// A pixel layer with a 4 px square of `color` at (`x`, 0).
+    func square(_ name: String, x: Int32, _ color: [Float], visible: Bool = true) -> Layer {
+        var surface = Surface(format: PixelFormat(mode: .rgb, sample: .u8, alpha: true))
+        surface.fill(PixelRect(x0: x, y0: 0, x1: x + 4, y1: 4), with: color)
+        var l = Layer.raster(name, surface: surface)
+        l.visible = visible
+        return l
+    }
+
+    func names(_ s: Session) -> [String] { s.active?.doc.layers.map { $0.visible ? $0.name : "\($0.name) (hidden)" } ?? [] }
+
+    /// Photoshop 27.11 (AB-T-0343): every shown layer merges into the active one, which gives the result its name
+    /// and its place among the hidden layers. A, B (hidden), C, D bottom to top.
+    @Test func mergeVisibleMergesIntoTheActiveLayer() throws {
+        func layers() -> [Layer] {
+            [square("A", x: 0, [1, 0, 0, 1]), square("B", x: 8, [0, 1, 0, 1], visible: false), square("C", x: 16, [0, 0, 1, 1]), square("D", x: 24, [1, 1, 0, 1])]
+        }
+        for (active, expected) in [("D", ["B (hidden)", "D"]), ("C", ["B (hidden)", "C"]), ("A", ["A", "B (hidden)"])] {
+            let s = try stack(layers(), active: active)
+            try s.execute("layer.mergeVisible")
+            #expect(names(s) == expected, "active \(active)")
+            let d = try #require(s.active)
+            let merged = try #require(d.doc.layers.first { $0.name == active })
+            #expect(d.activeLayer == merged.id)
+            // A, C and D are in it; the hidden B is not.
+            #expect(merged.surface?.pixel(x: 1, y: 1) == [1, 0, 0, 1])
+            #expect(merged.surface?.pixel(x: 17, y: 1) == [0, 0, 1, 1])
+            #expect(merged.surface?.pixel(x: 25, y: 1) == [1, 1, 0, 1])
+            #expect(merged.surface?.pixel(x: 9, y: 1)[3] == 0)
+            #expect(s.active?.doc.layers.first { !$0.visible }?.surface?.pixel(x: 9, y: 1) == [0, 1, 0, 1])
+        }
+    }
+
+    /// A hidden layer inside a shown folder stays, lifted out of the folder: A, G{g1, g2 hidden} with g1 active gives
+    /// g1, g2 (hidden); with the folder active the result takes the folder's name.
+    @Test func mergeVisibleKeepsHiddenLayersInShownFolders() throws {
+        func layers() -> [Layer] {
+            [square("A", x: 0, [1, 0, 0, 1]), .group("G", [square("g1", x: 8, [0, 1, 0, 1]), square("g2", x: 16, [0, 0, 1, 1], visible: false)])]
+        }
+        let s = try stack(layers(), active: "g1")
+        try s.execute("layer.mergeVisible")
+        #expect(names(s) == ["g1", "g2 (hidden)"])
+        let merged = try #require(s.active?.doc.layers.first)
+        #expect(merged.surface?.pixel(x: 1, y: 1) == [1, 0, 0, 1] && merged.surface?.pixel(x: 9, y: 1) == [0, 1, 0, 1])
+        #expect(merged.surface?.pixel(x: 17, y: 1)[3] == 0)
+        #expect(s.active?.doc.layers.last?.surface?.pixel(x: 17, y: 1) == [0, 0, 1, 1])
+
+        let folder = try stack(layers(), active: "G")
+        try folder.execute("layer.mergeVisible")
+        #expect(Set(names(folder)) == ["G", "g2 (hidden)"])
+        // One step.
+        try folder.execute("edit.undo")
+        #expect(names(folder) == ["A", "G"])
+    }
+
+    /// A shown Background takes the merge, whichever layer is active.
+    @Test func mergeVisibleGoesIntoAShownBackground() throws {
+        let s = try session()
+        let d0 = try #require(s.active)
+        #expect(d0.doc.background != nil && d0.activeLayer != d0.doc.background?.id)
+        try s.execute("layer.mergeVisible")
+        let d = try #require(s.active)
+        #expect(d.doc.layers.count == 1 && d.doc.background?.id == d.doc.layers[0].id && d.activeLayer == d.doc.layers[0].id)
+        #expect(Array(d.doc.layers[0].surface?.pixel(x: 20, y: 20).prefix(3) ?? []) == [1, 0, 0])
+    }
+
+    /// Not available with the active layer hidden, or with only one layer shown.
+    @Test func mergeVisibleIsRefusedAsPhotoshopRefusesIt() throws {
+        let hiddenActive = try stack([square("A", x: 0, [1, 0, 0, 1]), square("B", x: 8, [0, 1, 0, 1]), square("C", x: 16, [0, 0, 1, 1], visible: false)],
+                                     active: "C")
+        #expect(throws: (any Error).self) { try hiddenActive.execute("layer.mergeVisible") }
+        #expect(names(hiddenActive) == ["A", "B", "C (hidden)"])
+        let one = try stack([square("A", x: 0, [1, 0, 0, 1]), square("B", x: 8, [0, 1, 0, 1], visible: false)], active: "A")
+        #expect(throws: (any Error).self) { try one.execute("layer.mergeVisible") }
+        // A layer inside a hidden folder is not shown.
+        let inHidden = try stack([square("A", x: 0, [1, 0, 0, 1]), {
+            var g = Layer.group("G", [square("g1", x: 8, [0, 1, 0, 1])])
+            g.visible = false
+            return g
+        }()], active: "A")
+        #expect(throws: (any Error).self) { try inHidden.execute("layer.mergeVisible") }
+        #expect(names(inHidden) == ["A", "G (hidden)"])
     }
 
     @Test func autoToneStretchesALowContrastLayer() throws {
