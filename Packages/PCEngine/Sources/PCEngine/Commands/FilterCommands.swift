@@ -276,7 +276,8 @@ enum FilterCommands: CommandModule {
         do { try go(f.filter) } catch let e as EngineError { throw e } catch { throw EngineError.other("\(label): \(error)") }
     }
 
-    /// Restores the alpha of every changed tile (a transparency-locked layer keeps its alpha).
+    /// Restores the alpha of every changed tile (a transparency-locked layer keeps its alpha), and the whole pixel
+    /// where that alpha is 0, so the layer's content bounds are what they were.
     static func keepAlpha(_ old: Surface, _ new: inout Surface) {
         guard old.format == new.format, new.format.alpha else { return }
         var coords = Set<TileCoord>()
@@ -288,7 +289,14 @@ enum FilterCommands: CommandModule {
             let o = old.readRegion(r)
             var v = new.readRegion(r)
             var k = n - 1
-            while k < v.count { v[k] = o[k]; k += n }
+            while k < v.count {
+                v[k] = o[k]
+                // A clear pixel takes its old colour back too: a blur writes colour under the clear pixels around
+                // the outline, which shows nowhere but grew the layer's content bounds by the blur's reach
+                // (AB-T-0690).
+                if o[k] == 0 { for c in (k - n + 1) ..< k { v[c] = o[c] } }
+                k += n
+            }
             new.writeRegion(r, v)
         }
         new.prune()

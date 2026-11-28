@@ -164,6 +164,37 @@ import Testing
         #expect(throws: (any Error).self) { _ = try blurred(["radius": 4, "preserveTransparency": "yes"]) }
     }
 
+    /// AB-T-0690: a filter that keeps alpha (a transparency lock, or `"preserveTransparency": true`) leaves the layer's
+    /// content bounds as they were. A blur used to leave colour under the clear pixels around the outline, so the
+    /// bounds grew by its reach though nothing visible changed.
+    @Test func keepingAlphaKeepsTheLayersBounds() throws {
+        func bounds(radius: Double, lock: Bool) throws -> (before: PixelRect, after: PixelRect) {
+            let s = Session()
+            try s.execute("file.new", ["width": 80, "height": 60])
+            try s.execute("layer.new.layer")
+            let id = try #require(s.active?.activeLayer)
+            try s.edit("square") { doc, _ in
+                _ = doc.withRaster(of: id) {
+                    $0.fill(PixelRect(x0: 20, y0: 15, x1: 40, y1: 45), with: [1, 0, 0, 1])
+                    $0.fill(PixelRect(x0: 40, y0: 15, x1: 60, y1: 45), with: [0, 0, 1, 1])
+                }
+                if lock { doc.updateLayer(id) { $0.locks.transparency = true } }
+            }
+            let before = try #require(s.active?.doc.layer(id)?.surface?.contentBounds)
+            try s.execute("filter.blur.gaussianBlur", lock ? ["radius": .number(radius)] : ["radius": .number(radius), "preserveTransparency": true])
+            let surface = try #require(s.active?.doc.layer(id)?.surface)
+            // The colour did blur across the seam.
+            #expect(surface.pixel(x: 39, y: 30)[0] < 0.95)
+            return (before, surface.contentBounds)
+        }
+        for radius in [0.5, 3, 12] {
+            for lock in [false, true] {
+                let b = try bounds(radius: radius, lock: lock)
+                #expect(b.before == PixelRect(x0: 20, y0: 15, x1: 60, y1: 45) && b.after == b.before, "radius \(radius) lock \(lock): \(b.after)")
+            }
+        }
+    }
+
     @Test func selectionLimitsTheFilter() throws {
         let s = try session()
         try paintPattern(s)
