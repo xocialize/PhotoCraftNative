@@ -27,6 +27,28 @@ enum BlurCore {
         return k.map { $0 / s }
     }
 
+    /// Gaussian Blur's kernel for `radius` (its standard deviation), photocraft
+    /// `gaussian_blur_kernel` (#8544). Sampling the curve at whole pixels leaves a small radius
+    /// almost no blur: at 0.3 the kernel's variance is 0.008, not 0.09. Below 1 the sampling width
+    /// is chosen so the kernel has exactly the variance `radius²`; from 1 up it is unchanged.
+    static func gaussianBlurKernel(_ radius: Float) -> [Float] {
+        if !(radius >= 0.05 && radius < 1) { return gaussianKernel(radius) }
+        func variance(_ k: [Float]) -> Float {
+            let r = Float(k.count / 2)
+            var s: Float = 0
+            for (i, w) in k.enumerated() { s += w * (Float(i) - r) * (Float(i) - r) }
+            return s
+        }
+        let target = radius * radius
+        // The sampled kernel's variance only falls short of sigma², so the width lies above `radius`.
+        var lo = radius, hi = radius + 1
+        for _ in 0..<40 {
+            let mid = 0.5 * (lo + hi)
+            if variance(gaussianKernel(mid)) < target { lo = mid } else { hi = mid }
+        }
+        return gaussianKernel(0.5 * (lo + hi))
+    }
+
     /// Box widths (odd) whose `n`-fold convolution has standard deviation `sigma` (photocraft
     /// `boxes_for_gauss`).
     static func boxesForGauss(_ sigma: Float, _ n: Int) -> [Int] {
@@ -206,7 +228,7 @@ enum BlurCore {
     /// above (photocraft `blur::gaussian`).
     static func gaussian(_ src: FloatImage, _ out: PixelRect, _ alpha: Bool, _ radius: Float) -> FloatImage {
         if let boxes = gaussianBoxes(radius) { return boxPasses(src, out, alpha, boxes) }
-        let k = gaussianKernel(radius)
+        let k = gaussianBlurKernel(radius)
         return convSep(src, out, k, k, alpha)
     }
 }
@@ -335,7 +357,7 @@ extension GPUPass {
         if let boxes = BlurCore.gaussianBoxes(radius) {
             try encodeBoxPasses(input: src, inRect: srcRect, output: output, outRect: outRect, boxes: boxes)
         } else {
-            let k = BlurCore.gaussianKernel(radius)
+            let k = BlurCore.gaussianBlurKernel(radius)
             try encodeConvSep(input: src, inRect: srcRect, output: output, outRect: outRect, kx: k, ky: k)
         }
     }

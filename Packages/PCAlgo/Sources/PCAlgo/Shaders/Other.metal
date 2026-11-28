@@ -76,7 +76,7 @@ struct pca_custom_params {
     int count;
     float scale;
     float offset;
-    float pad;
+    float sub;   // 1: channel values are ink (CMYK); the kernel runs on 1 − ink
 };
 
 kernel void pca_custom(constant pca_frame& f [[buffer(0)]], constant pca_custom_params& p [[buffer(1)]],
@@ -87,8 +87,13 @@ kernel void pca_custom(constant pca_frame& f [[buffer(0)]], constant pca_custom_
     float4 o = pca_get(src, f, q);
     if (p.count == 0) { dst.write(o, gid); return; }
     float4 sum = float4(0.0f);
-    for (int i = 0; i < p.count; i++) sum += pca_get(src, f, q + int2(taps[i].dx, taps[i].dy)) * taps[i].w;
+    bool ink = p.sub != 0.0f;
+    for (int i = 0; i < p.count; i++) {
+        float4 t = pca_get(src, f, q + int2(taps[i].dx, taps[i].dy));
+        sum += (ink ? 1.0f - t : t) * taps[i].w;
+    }
     float4 v = sum / p.scale + p.offset;
+    if (ink) v = 1.0f - v;
     if (f.alpha != 0u) v.w = o.w;
     dst.write(v, gid);
 }

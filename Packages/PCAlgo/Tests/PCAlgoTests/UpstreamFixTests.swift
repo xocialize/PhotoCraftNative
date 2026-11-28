@@ -117,4 +117,115 @@ import PCFoundation
         }, interp: .bicubic, on: backend)
         #expect(Self.worstColourOffset(out) <= 1.0 / 255.0)
     }
+
+    /// photocraft #3415: an edge tangent is an axis, so a link along an edge costs the same
+    /// whichever way the gradient that defined the tangent points.
+    @Test func magneticLassoDirectionCostIgnoresGradientPolarity() {
+        let t = SIMD2<Float>(1, 0), r = SIMD2<Float>(-1, 0)
+        let along = MagneticLasso.directionCost(t, t, 1, 0, 1)
+        #expect(abs(along) < 1e-6)
+        #expect(abs(MagneticLasso.directionCost(t, r, 1, 0, 1) - along) < 1e-6)
+        #expect(abs(MagneticLasso.directionCost(r, t, 1, 0, 1) - along) < 1e-6)
+        #expect(MagneticLasso.directionCost(t, t, 0, 1, 1) > 0.6)
+    }
+
+    /// photocraft #8544 `small_gaussian_radii_blur_smoothly`: below 1 the kernel's variance is the
+    /// radius squared and grows smoothly; from 1 up the kernel is unchanged.
+    @Test func smallGaussianRadiiBlurSmoothly() {
+        func spread(_ k: [Float]) -> Float {
+            let r = Float(k.count / 2)
+            return k.enumerated().reduce(0) { $0 + $1.element * (Float($1.offset) - r) * (Float($1.offset) - r) }
+        }
+        var last: Float = 0
+        for step in 1...20 {
+            let radius = Float(step) * 0.05
+            let k = BlurCore.gaussianBlurKernel(radius)
+            #expect(abs(k.reduce(0, +) - 1) < 1e-5, "normalised at \(radius)")
+            if radius < 1 { #expect(abs(spread(k) - radius * radius) < 1e-4, "variance at \(radius): \(spread(k))") }
+            #expect(spread(k) > last, "grows at \(radius)")
+            last = spread(k)
+        }
+        for radius: Float in [1, 1.5, 2.7, 4] { #expect(BlurCore.gaussianBlurKernel(radius) == BlurCore.gaussianKernel(radius)) }
+    }
+
+    /// photocraft #9959: the clouds' tails are compressed, not clipped onto the two colours, and
+    /// the mid-tones keep their slope.
+    @Test func cloudsDoNotClipToTheColours() {
+        let b = PixelRect(x0: 0, y0: 0, x1: 256, y1: 256)
+        let f = Clouds(seed: 7, difference: false, foreground: SIMD4(0, 0, 0, 1), background: SIMD4(1, 1, 1, 1))
+        let src = FloatImage(rect: b, channels: 4)
+        let out = f.cpu(src, out: b, ctx: FilterContext(bounds: b, mode: .rgb, alpha: true))
+        var lo: Float = 1, hi: Float = 0, sum: Float = 0
+        for i in stride(from: 0, to: out.data.count, by: 4) { lo = min(lo, out.data[i]); hi = max(hi, out.data[i]); sum += out.data[i] }
+        let mean = sum / Float(out.data.count / 4)
+        #expect(lo > 0 && hi < 1, "\(lo)…\(hi)")
+        #expect(hi - lo > 0.6, "\(lo)…\(hi)")
+        #expect(abs(mean - 0.5) < 0.1, "\(mean)")
+    }
+
+    /// photocraft #5745 `an_image_wholly_inside_the_composite_still_gets_its_side`: the first
+    /// image covers the whole grid, the second only its right part, all of it overlap. It used to
+    /// be skipped, so the first image kept everything.
+    @Test func anImageWhollyInsideTheCompositeStillGetsItsSide() {
+        let (w, h) = (120, 40)
+        let luma = [[Float]](repeating: [Float](repeating: 0.5, count: w * h), count: 2)
+        let cover = [[Bool](repeating: true, count: w * h), (0..<(w * h)).map { $0 % w >= 70 }]
+        let labels = Panorama.seamLabels(width: w, height: h, luma: luma, cover: cover, order: [0, 1])
+        for y in 0..<h {
+            #expect(labels[y * w + 5] == 0 && labels[y * w + w - 1] == 1, "row \(y)")
+            let row = Array(labels[(y * w)..<((y + 1) * w)])
+            let first = row.firstIndex(of: 1) ?? 0
+            #expect(first >= 70 && row[first...].allSatisfy { $0 == 1 }, "row \(y)")
+        }
+        // An image centred on the composite has no side: the first image keeps the overlap.
+        let centred = [[Bool](repeating: true, count: w * h), (0..<(w * h)).map { (20..<100).contains($0 % w) }]
+        #expect(Panorama.seamLabels(width: w, height: h, luma: luma, cover: centred, order: [0, 1]).allSatisfy { $0 == 0 })
+        let same = [[Bool]](repeating: [Bool](repeating: true, count: w * h), count: 2)
+        #expect(Panorama.seamLabels(width: w, height: h, luma: luma, cover: same, order: [0, 1]).allSatisfy { $0 == 0 })
+    }
+
+    // MARK: CMYK samples are ink
+
+    /// A CMYK image without alpha: four inks per pixel, values in 0…1.
+    static func cmyk(_ b: PixelRect, _ px: (Int32, Int32) -> [Float]) -> FloatImage {
+        var data: [Float] = []
+        for y in b.y0..<b.y1 { for x in b.x0..<b.x1 { data += px(x, y) } }
+        return FloatImage(rect: b, channels: 4, data: data)
+    }
+
+    static func cmykCtx(_ b: PixelRect) -> FilterContext { FilterContext(bounds: b, mode: .cmyk, alpha: false) }
+
+    /// photocraft #4222: Find Edges writes the edge strength as ink in CMYK, so a flat area is
+    /// paper white (no ink), not 100 % ink; Solarize inverts the channels below 50 % ink.
+    @Test func findEdgesAndSolarizeTreatCMYKAsInk() throws {
+        let b = PixelRect(x0: 0, y0: 0, x1: 12, y1: 12)
+        let flat = Self.cmyk(b) { _, _ in [0.3, 0.3, 0.3, 0.3] }
+        let inner = PixelRect(x0: 2, y0: 2, x1: 10, y1: 10)
+        let edges = try FilterEngine.apply(FindEdges(), to: flat, output: inner, context: Self.cmykCtx(b), on: .cpu)
+        #expect(edges.data.allSatisfy { $0 == 0 }, "flat CMYK is no ink")
+        let rgb = try FilterEngine.apply(FindEdges(), to: flat, output: inner, context: FilterContext(bounds: b, mode: .rgb, alpha: true), on: .cpu)
+        #expect(rgb.data.enumerated().allSatisfy { $0.offset % 4 == 3 || $0.element == 1 }, "flat RGB is white")
+
+        let sol = Solarize().cpu(Self.cmyk(b) { _, _ in [0.2, 0.8, 0.5, 0.4] }, out: b, ctx: Self.cmykCtx(b))
+        #expect(Array(sol.data[0..<4]).enumerated().allSatisfy { abs($0.element - [0.8, 0.8, 0.5, 0.6][$0.offset]) < 1e-6 })
+
+        let noisy = Self.cmyk(b) { x, y in [Float((x * 7 + y * 3) % 11) / 10, Float((x + y * 5) % 7) / 6, Float(x % 3) / 2, Float(y % 4) / 3] }
+        try Parity.check(FindEdges(), src: noisy, out: inner, ctx: Self.cmykCtx(b))
+        try Parity.check(Solarize(), src: noisy, ctx: Self.cmykCtx(b))
+    }
+
+    /// photocraft #7076: in CMYK the Custom filter runs on 1 − ink, so a positive offset brightens.
+    @Test func customOffsetBrightensInCMYK() throws {
+        let b = PixelRect(x0: 0, y0: 0, x1: 10, y1: 10)
+        let src = Self.cmyk(b) { _, _ in [0.5, 0.5, 0.5, 0.5] }
+        var k = [Float](repeating: 0, count: 25)
+        k[12] = 1
+        let f = CustomKernel(kernel: k, scale: 1, offset: 51)
+        let inner = PixelRect(x0: 2, y0: 2, x1: 8, y1: 8)
+        let out = try FilterEngine.apply(f, to: src, output: inner, context: Self.cmykCtx(b), on: .cpu)
+        #expect(out.data.allSatisfy { abs($0 - 0.3) < 1e-5 }, "less ink: \(out.data[0])")
+        let rgb = try FilterEngine.apply(f, to: src, output: inner, context: FilterContext(bounds: b, mode: .rgb, alpha: true), on: .cpu)
+        #expect(abs(rgb.data[0] - 0.7) < 1e-5)
+        try Parity.check(f, src: src, out: inner, ctx: Self.cmykCtx(b))
+    }
 }

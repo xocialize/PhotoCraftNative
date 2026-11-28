@@ -29,7 +29,12 @@ inline float pca_ren_clouds_value(float x, float y, float freq0, uint seed) {
         amp *= 0.5f;
         freq *= 2.0f;
     }
-    return clamp((sum / norm - 0.5f) * 2.2f + 0.5f, 0.0f, 1.0f);
+    // An S-curve with slope 2.2 at mid-grey that meets 0 and 1 only where the sum does, so the
+    // tails are compressed instead of clipped to the two colours (photocraft #9959).
+    const float c = 2.2f;
+    float h = sqrt(c * c - 1.0f);
+    float d = (sum / norm - 0.5f) * 2.0f * h;
+    return clamp(0.5f + 0.5f * c / h * d / sqrt(1.0f + d * d), 0.0f, 1.0f);
 }
 
 struct pca_ren_clouds_params {

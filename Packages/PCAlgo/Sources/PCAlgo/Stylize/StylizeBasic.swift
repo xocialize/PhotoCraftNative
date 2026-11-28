@@ -205,7 +205,7 @@ public struct FindEdges: Filter, Hashable {
     public func halo(bounds: PixelRect) -> Halo { .radius(1) }
 
     public func cpu(_ src: FloatImage, out: PixelRect, ctx: FilterContext) -> FloatImage {
-        let n = src.channels, cc = ctx.colorChannels(n)
+        let n = src.channels, cc = ctx.colorChannels(n), sub = ctx.subtractive
         var res = src.crop(out)
         if out.isEmpty || n == 0 { return res }
         let ow = out.width
@@ -221,7 +221,10 @@ public struct FindEdges: Filter, Hashable {
                             @inline(__always) func g(_ dx: Int32, _ dy: Int32) -> Float { s.get(x + dx, y + dy, c) }
                             let gx = (g(1, -1) + 2 * g(1, 0) + g(1, 1)) - (g(-1, -1) + 2 * g(-1, 0) + g(-1, 1))
                             let gy = (g(-1, 1) + 2 * g(0, 1) + g(1, 1)) - (g(-1, -1) + 2 * g(0, -1) + g(1, -1))
-                            d.value[o + c] = clampf(1 - (gx * gx + gy * gy).squareRoot() / 4, 0, 1)
+                            // CMYK samples are ink, so there the edge strength is the ink itself;
+                            // `1 − edge` turned flat CMYK areas to full ink (photocraft #4222).
+                            let e = clampf((gx * gx + gy * gy).squareRoot() / 4, 0, 1)
+                            d.value[o + c] = sub ? e : 1 - e
                         }
                     }
                 }
@@ -231,7 +234,7 @@ public struct FindEdges: Filter, Hashable {
     }
 
     public func encodeGPU(_ pass: GPUPass) throws {
-        try pass.dispatchOut("pca_sty_find_edges", params: NoParams())
+        try pass.dispatchOut("pca_sty_find_edges", params: PerPixelParams(op: pass.ctx.subtractive ? 1 : 0))
     }
 }
 
@@ -243,10 +246,12 @@ public struct Solarize: Filter, Hashable {
     public var label: String { "Solarize" }
     public func halo(bounds: PixelRect) -> Halo { .radius(0) }
     public func cpu(_ src: FloatImage, out: PixelRect, ctx: FilterContext) -> FloatImage {
-        StylizeKit.perPixel(src, out, ctx) { $0 > 0.5 ? 1 - $0 : $0 }
+        // Solarize inverts the highlights. CMYK samples are ink, so there the channels below 50 %
+        // ink (the light ones) invert (photocraft #4222).
+        ctx.subtractive ? StylizeKit.perPixel(src, out, ctx) { $0 < 0.5 ? 1 - $0 : $0 } : StylizeKit.perPixel(src, out, ctx) { $0 > 0.5 ? 1 - $0 : $0 }
     }
     public func encodeGPU(_ pass: GPUPass) throws {
-        try pass.dispatchOut("pca_sty_per_pixel", params: PerPixelParams(op: 1))
+        try pass.dispatchOut("pca_sty_per_pixel", params: PerPixelParams(op: pass.ctx.subtractive ? 2 : 1))
     }
 }
 

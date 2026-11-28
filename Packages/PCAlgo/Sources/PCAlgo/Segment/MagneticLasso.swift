@@ -425,10 +425,11 @@ public enum MagneticLasso {
     /// an edge, up to 1 cutting across it or turning sharply.
     static func directionCost(_ tp: SIMD2<Float>, _ tq: SIMD2<Float>, _ dx: Int, _ dy: Int, _ len: Float) -> Float {
         if tp == .zero || tq == .zero { return neutralDirection }
-        var l = SIMD2(Float(dx) / len, Float(dy) / len)
-        if tp.x * l.x + tp.y * l.y < 0 { l = -l }
-        let dp = clampf(tp.x * l.x + tp.y * l.y, -1, 1)
-        let dq = clampf(l.x * tq.x + l.y * tq.y, -1, 1)
+        // An edge tangent is an axis, not a directed vector: reversing the strongest channel's
+        // gradient must not make an otherwise straight edge expensive to follow (photocraft #3415).
+        let l = SIMD2(Float(dx) / len, Float(dy) / len)
+        let dp = clampf(abs(tp.x * l.x + tp.y * l.y), 0, 1)
+        let dq = clampf(abs(l.x * tq.x + l.y * tq.y), 0, 1)
         return 2 / (3 * PCAMath.pi) * (acosf(dp) + acosf(dq))
     }
 

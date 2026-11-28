@@ -290,7 +290,7 @@ public struct CustomKernel: Filter, Hashable {
     }
 
     public func cpu(_ src: FloatImage, out: PixelRect, ctx: FilterContext) -> FloatImage {
-        let n = src.channels, cc = ctx.colorChannels(n)
+        let n = src.channels, cc = ctx.colorChannels(n), sub = ctx.subtractive
         let k = taps
         let s: Float = scale == 0 ? 1 : scale
         let off = offset / 255
@@ -304,9 +304,15 @@ public struct CustomKernel: Filter, Hashable {
                         let x = out.x0 + Int32(ox), y = out.y0 + Int32(oy)
                         let i = (oy * out.width + ox) * n
                         for c in 0..<cc {
+                            // CMYK samples are ink: convolve brightness (1 − ink), then back to ink,
+                            // so a positive offset brightens (photocraft #7076).
                             var sum: Float = 0
-                            for (dx, dy, w) in k { sum += src.get(x + dx, y + dy, c) * w }
-                            rs.value[i + c] = sum / s + off
+                            for (dx, dy, w) in k {
+                                let v = src.get(x + dx, y + dy, c)
+                                sum += (sub ? 1 - v : v) * w
+                            }
+                            let r = sum / s + off
+                            rs.value[i + c] = sub ? 1 - r : r
                         }
                     }
                 }
@@ -316,10 +322,10 @@ public struct CustomKernel: Filter, Hashable {
     }
 
     struct Tap: BitwiseCopyable { var dx: Int32; var dy: Int32; var w: Float; var pad: Float = 0 }
-    struct Params: BitwiseCopyable { var count: Int32; var scale: Float; var offset: Float; var pad: Float = 0 }
+    struct Params: BitwiseCopyable { var count: Int32; var scale: Float; var offset: Float; var sub: Float = 0 }
     public func encodeGPU(_ pass: GPUPass) throws {
         let t = taps.map { Tap(dx: $0.0, dy: $0.1, w: $0.2) }
-        let p = Params(count: Int32(t.count), scale: scale == 0 ? 1 : scale, offset: offset / 255)
+        let p = Params(count: Int32(t.count), scale: scale == 0 ? 1 : scale, offset: offset / 255, sub: pass.ctx.subtractive ? 1 : 0)
         try pass.dispatchOut("pca_custom", params: p, buffers: [try pass.buffer(t)])
     }
 }

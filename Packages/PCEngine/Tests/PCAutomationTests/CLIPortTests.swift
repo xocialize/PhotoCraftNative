@@ -510,6 +510,33 @@ func writeNoisePNG(_ url: URL, _ w: Int, _ h: Int, seed: UInt8) throws {
         #expect(after.count == 2 && zip(after, before).allSatisfy { $0.0 == $1.0 && $0.1 != $1.1 }, "both inputs replaced")
     }
 
+    /// photocraft #7437: `convert in.jpg in.jpg` re-encoded the original in place. An <out> that
+    /// is the <in> file, however it is spelt (./, a hard or symbolic link), is refused before
+    /// anything is read, and `--in-place` opts in.
+    @Test func convertRefusesToWriteOverItsInput() async throws {
+        let d = try tempDir("convert-in-place")
+        defer { try? FileManager.default.removeItem(at: d) }
+        let file = d.appendingPathComponent("a.png")
+        try writeNoisePNG(file, 8, 4, seed: 5)
+        let before = try Data(contentsOf: file)
+        let hard = d.appendingPathComponent("hard.png"), soft = d.appendingPathComponent("soft.png")
+        try FileManager.default.linkItem(at: file, to: hard)
+        try FileManager.default.createSymbolicLink(at: soft, withDestinationURL: file)
+        for out in [file.path, d.path + "/./a.png", hard.path, soft.path] {
+            let (code, _, err) = await invoke(["convert", file.path, out, "--format", "jpg"])
+            #expect(code == 1, "\(out): \(err)")
+            #expect(err.contains("is the input file") && err.contains("--in-place"), "\(err)")
+            #expect(try Data(contentsOf: file) == before, "\(out) changed the original")
+        }
+        // Another output runs as before; --in-place opts in.
+        let (c1, _, e1) = await invoke(["convert", file.path, d.appendingPathComponent("b.png").path])
+        #expect(c1 == 0, "\(e1)")
+        #expect(try Data(contentsOf: file) == before)
+        let (c2, _, e2) = await invoke(["convert", file.path, file.path, "--format", "jpg", "--in-place"])
+        #expect(c2 == 0, "\(e2)")
+        #expect(try Data(contentsOf: file) != before)
+    }
+
     @Test func commandsListing() async throws {
         let (code, out, _) = await invoke(["commands"])
         #expect(code == 0 && out.contains("file.new"))

@@ -18,8 +18,10 @@ public enum CLI {
         pccli: headless PhotoCraft (native port of photocraft-cli)
 
         USAGE:
-          pccli convert <in> <out> [--format <ext>] [--quality <1-100>] [--tiff-layers] [--tga-bits <24|32>]
+          pccli convert <in> <out> [--format <ext>] [--quality <1-100>] [--in-place] [--tiff-layers] [--tga-bits <24|32>]
               Convert between formats (.psd, .psb, .pcraft, .ora, .tif, .png, .jpg, .webp, .exr, …).
+              An <out> that is the <in> file is refused, as the result would replace the original;
+              --in-place allows it.
               TIFF output is flat unless --tiff-layers keeps the layers (Photoshop layer data).
               --quality sets the JPEG or WebP quality; a WebP written with a quality is lossy, without one lossless.
               --tga-bits sets a TGA's bits per pixel: 32 writes the alpha channel (or else the transparency) as
@@ -85,7 +87,7 @@ public enum CLI {
     static let serverFlags: Set<String> = ["--port", "--control-token", "--control-token-file", "--automation-read-root", "--automation-write-root"]
 
     static let subcommands: [Subcommand] = [
-        Subcommand(name: "convert", values: ["--format", "--quality", "--tga-bits"], bare: ["--tiff-layers"]),
+        Subcommand(name: "convert", values: ["--format", "--quality", "--tga-bits"], bare: ["--in-place", "--tiff-layers"]),
         Subcommand(name: "info", values: [], bare: ["--compact"]),
         Subcommand(name: "run", values: ["--new", "--cmd", "--params", "--out", "--format", "--quality", "--tga-bits"], bare: ["--tiff-layers"]),
         Subcommand(name: "batch", values: ["--actions", "--action", "--in", "--out", "--format", "--quality", "--tga-bits"], bare: ["--in-place", "--tiff-layers"]),
@@ -206,6 +208,14 @@ public enum CLI {
 
     static func convert(_ a: Args, _ io: IO) throws {
         guard a.positional.count == 2 else { throw AutomationError.other("convert needs <in> <out>") }
+        // An output that is the input file itself, however it is spelt (relative, with `./`,
+        // through a hard or symbolic link), would replace the original, and a lossy re-encode
+        // can't be undone: refused before anything is read unless `--in-place` asks for it, as
+        // `batch` refuses an `--out` that is its `--in` folder (photocraft #7437).
+        if !a.has("--in-place") && sameFile(a.positional[0], a.positional[1]) {
+            throw AutomationError.other(
+                "\(a.positional[1]) is the input file, so the result would replace the original: choose another output, or pass --in-place to overwrite it")
+        }
         let opts = try exportOptions(a)
         let o = try FlatFiles.open(path: a.positional[0])
         warnAll(io, o.warnings)
@@ -363,6 +373,13 @@ public enum CLI {
     }
 
     /// Whether `a` and `b` name the same existing folder, however they are spelt.
+    /// Whether two paths name the same existing file (same device and inode, symbolic links followed).
+    static func sameFile(_ a: String, _ b: String) -> Bool {
+        var x = stat(), y = stat()
+        guard stat(a, &x) == 0, stat(b, &y) == 0 else { return false }
+        return x.st_dev == y.st_dev && x.st_ino == y.st_ino
+    }
+
     static func sameDir(_ a: String, _ b: String) -> Bool {
         guard let x = realpath(a, nil), let y = realpath(b, nil) else { return false }
         defer { free(x); free(y) }

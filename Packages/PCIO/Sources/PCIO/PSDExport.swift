@@ -1454,12 +1454,17 @@ struct Exporter {
             }
             return SmartSourceInfo(uuid: uuid, size: size, dpi: sdpi)
         case let .linked(path):
-            guard let data = FileManager.default.contents(atPath: path) else { throw .unsupported("the linked file \(path) can't be read") }
+            // The path comes from the document. Regular files only, in bounded reads: a link to a
+            // FIFO would block the save and one to a device such as `/dev/zero` would never end
+            // (photocraft `712d463f8`).
+            let data: [UInt8]
+            do { data = try FileRead.readFile(URL(fileURLWithPath: path)) } catch { throw .unsupported("the linked file \(path) can't be read: \(error)") }
             let name = (path as NSString).lastPathComponent
+            let info = try embed(sm.contentsId, name, data, linked: true)
             warnings.append("the linked smart object \(name) was embedded (PSD export keeps no external links)")
-            return try embed(sm.contentsId, name, [UInt8](data))
+            return info
         case let .embedded(fileName, bytes):
-            return try embed(sm.contentsId, fileName, bytes)
+            return try embed(sm.contentsId, fileName, bytes, linked: false)
         }
     }
 
@@ -1501,15 +1506,19 @@ struct Exporter {
 
     /// Adds `bytes` as an embedded file (converted to PSB when it is a `.pcraft` bundle), once per
     /// contents identity and bytes. Equal bytes in independent objects stay independent.
-    mutating func embed(_ contentsId: SmartContentsId, _ fileName: String, _ bytes: [UInt8]) throws(PCIOError) -> SmartSourceInfo {
-        let key = "\(contentsId.rawValue):\(BLAKE3.hex(bytes))"
+    ///
+    /// `linked`: the bytes were read from a path the document names, so only a file that can be
+    /// opened is embedded; a link to a text or settings file is written as pixels instead
+    /// (photocraft `5ca6fc776`).
+    mutating func embed(_ contentsId: SmartContentsId, _ fileName: String, _ bytes: [UInt8], linked: Bool) throws(PCIOError) -> SmartSourceInfo {
+        let key = "\(contentsId.rawValue):\(linked ? "l" : "e"):\(BLAKE3.hex(bytes))"
         if let r = smart.converted[key] { return try r.get() }
-        let r = Result { () throws(PCIOError) -> SmartSourceInfo in try convertSource(contentsId, fileName, bytes) }
+        let r = Result { () throws(PCIOError) -> SmartSourceInfo in try convertSource(contentsId, fileName, bytes, linked: linked) }
         smart.converted[key] = r
         return try r.get()
     }
 
-    mutating func convertSource(_ contentsId: SmartContentsId, _ fileName: String, _ bytes: [UInt8]) throws(PCIOError) -> SmartSourceInfo {
+    mutating func convertSource(_ contentsId: SmartContentsId, _ fileName: String, _ bytes: [UInt8], linked: Bool) throws(PCIOError) -> SmartSourceInfo {
         let name: String, data: [UInt8], size: SIMD2<Double>, sdpi: Double
         var nestedDoc: Document?
         if PcraftFormat.isPcraft(bytes) {
@@ -1529,8 +1538,15 @@ struct Exporter {
             sdpi = Double(d.resolutionDpi)
             nestedDoc = d
         } else {
-            // Formats we can't decode (vector PDF/AI…) are still embedded; their size comes from the layer.
-            let g = (try? sourceGeometry(fileName, bytes)) ?? (SIMD2(0, 0), Double(dpi))
+            // Embedded formats we can't decode (vector PDF/AI…) are kept; their size comes from the
+            // layer. A linked file we can't decode is not embedded.
+            let g: (SIMD2<Double>, Double)
+            do {
+                g = try sourceGeometry(fileName, bytes)
+            } catch {
+                if linked { throw .unsupported("the linked file \(fileName) is not an image that can be opened: \(error)") }
+                g = (SIMD2(0, 0), Double(dpi))
+            }
             (name, data, size, sdpi) = (fileName, bytes, g.0, g.1)
         }
         let uuid = PSDExport.contentsUuid(contentsId, data)

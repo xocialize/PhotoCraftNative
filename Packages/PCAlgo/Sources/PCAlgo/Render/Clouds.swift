@@ -18,6 +18,8 @@ struct RenderCloudsGPU: BitwiseCopyable {
 /// alpha kept). The noise scale follows the document size: base wavelength
 /// `clamp(max(width, height) / 4, 16, 512)` px.
 public struct Clouds: Filter, Hashable {
+    /// The clouds' contrast at mid-grey: the slope of the octave sum's stretch there.
+    static let contrast: Float = 2.2
     public var seed: UInt32
     public var difference: Bool
     /// Straight sRGB RGBA (photocraft's session foreground colour).
@@ -66,8 +68,14 @@ public struct Clouds: Filter, Hashable {
             amp *= 0.5
             freq *= 2
         }
-        // Stretch the bell-shaped sum so the clouds use the full foreground→background range.
-        return clampf((sum / norm - 0.5) * 2.2 + 0.5, 0, 1)
+        // Stretch the bell-shaped sum around mid-grey so the clouds use most of the
+        // foreground→background range. A straight stretch clamped at 0 and 1 flattened its tails
+        // into pure foreground and background; this S-curve, x/√(1+x²) scaled so it meets 0 and 1
+        // only where the sum does, compresses them instead (photocraft #9959).
+        let c = Clouds.contrast
+        let h = (c * c - 1).squareRoot()
+        let d = (sum / norm - 0.5) * 2 * h
+        return clampf(0.5 + 0.5 * c / h * d / (1 + d * d).squareRoot(), 0, 1)
     }
 
     public func cpu(_ src: FloatImage, out: PixelRect, ctx: FilterContext) -> FloatImage {

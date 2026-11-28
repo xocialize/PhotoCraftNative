@@ -755,9 +755,24 @@ public enum Panorama {
                     label[i] = Int32(img)
                 }
             }
-            if no == 0 || nn == no { continue }
-            let ox = sx / Double(no), oy = sy / Double(no)
+            if no == 0 { continue }
             let cx = nx / Double(nn), cy = ny / Double(nn)
+            let ox: Double, oy: Double
+            if nn == no {
+                // Wholly inside the composite (photocraft #5745: two photos in one document, the
+                // second moved by Auto-Align so the canvas crops it to the part over the first).
+                // Its side of the seam is the one it lies towards from the composite's centre; an
+                // image centred on the composite has no side, and the earlier images keep it.
+                var px = 0.0, py = 0.0, pn = 0
+                for i in 0..<(w * h) where label[i] >= 0 {
+                    px += Double(i % w); py += Double(i / w); pn += 1
+                }
+                px /= Double(max(pn, 1)); py /= Double(max(pn, 1))
+                if abs(cx - px) < 0.5 && abs(cy - py) < 0.5 { continue }
+                (ox, oy) = (px, py)
+            } else {
+                (ox, oy) = (sx / Double(no), sy / Double(no))
+            }
             let vertical = abs(cx - ox) >= abs(cy - oy)
             let positive = vertical ? cx > ox : cy > oy
             let li = luma[img]

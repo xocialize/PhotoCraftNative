@@ -391,8 +391,12 @@ enum ExtraCommands: CommandModule {
             amp *= 0.5
             freq *= 2
         }
-        // Stretch the bell-shaped sum so the clouds use the full foreground→background range.
-        return min(max((sum / norm - 0.5) * 2.2 + 0.5, 0), 1)
+        // The same S-curve as PCAlgo's Clouds (photocraft #9959): slope 2.2 at mid-grey, tails
+        // compressed instead of clipped to the two colours.
+        let c: Float = 2.2
+        let h = (c * c - 1).squareRoot()
+        let d = (sum / norm - 0.5) * 2 * h
+        return min(max(0.5 + 0.5 * c / h * d / (1 + d * d).squareRoot(), 0), 1)
     }
 
     /// Filter › Render › Clouds / Difference Clouds, between the foreground and background colours.

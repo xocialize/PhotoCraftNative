@@ -54,21 +54,32 @@ public enum FileRead {
     /// Largest single read: big enough that a 5 GB file takes under a hundred reads.
     public static let readChunk = 64 << 20
 
-    /// Reads all of the file at `url`, in reads of at most `readChunk` bytes.
+    /// The most any one open reads (photocraft `MAX_OPEN_BYTES`), so a file that keeps growing
+    /// while it is read still ends.
+    public static let maxOpenBytes: UInt64 = 1 << 38
+
+    /// Reads all of the file at `url`, in reads of at most `readChunk` bytes and `maxOpenBytes`
+    /// in all. Anything but a regular file is refused without being read: opening a FIFO for
+    /// reading would wait for a writer, and a device such as `/dev/zero` never ends (photocraft
+    /// `712d463f8`).
     public static func readFile(_ url: URL) throws(IOError) -> [UInt8] {
         try readFile(url, chunk: readChunk)
     }
 
     /// `readFile` with a chosen read size (tests use small ones to exercise the loop).
     public static func readFile(_ url: URL, chunk: Int) throws(IOError) -> [UInt8] {
-        let fd = open(url.path, O_RDONLY | O_CLOEXEC)
+        // Non-blocking, so the open itself cannot wait on a FIFO; what was opened is then checked,
+        // not the name.
+        let fd = open(url.path, O_RDONLY | O_CLOEXEC | O_NONBLOCK)
         if fd < 0 { throw IOError.last(url.path) }
         defer { close(fd) }
         var st = stat()
-        let len: UInt64 = fstat(fd, &st) == 0 ? UInt64(max(0, st.st_size)) : 0
+        if fstat(fd, &st) != 0 { throw IOError.last(url.path) }
         if st.st_mode & S_IFMT == S_IFDIR { throw IOError(errno: EISDIR, url.path) }
+        if st.st_mode & S_IFMT != S_IFREG { throw IOError(.invalidInput, "\(url.path): not a regular file") }
+        let len = UInt64(max(0, st.st_size))
         var r = FileDescriptorReader(fd: fd)
-        return try readAll(&r, sizeHint: len, chunk: chunk)
+        return try readAll(&r, sizeHint: min(len, maxOpenBytes), chunk: chunk, limit: maxOpenBytes)
     }
 
     /// Reads `reader` to its end in reads of at most `readChunk` bytes. `sizeHint` (the file's

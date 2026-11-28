@@ -152,7 +152,14 @@ kernel void pca_sty_desaturate(constant pca_frame& f [[buffer(0)]], constant pca
 
 // ---------------------------------------------------------------- Find Edges, Solarize, Invert
 
-kernel void pca_sty_find_edges(constant pca_frame& f [[buffer(0)]],
+struct pca_sty_find_edges_params {
+    int sub;   // 1: channel values are ink (CMYK), so the edge strength is written as ink
+    int pad0;
+    int pad1;
+    int pad2;
+};
+
+kernel void pca_sty_find_edges(constant pca_frame& f [[buffer(0)]], constant pca_sty_find_edges_params& p [[buffer(1)]],
                                pca_in src [[texture(0)]], pca_out dst [[texture(1)]], uint2 gid [[thread_position_in_grid]]) {
     int2 q;
     if (!pca_out_pixel(f, gid, q)) return;
@@ -163,13 +170,14 @@ kernel void pca_sty_find_edges(constant pca_frame& f [[buffer(0)]],
     float4 gy = (sw + 2.0f * s + se) - (nw + 2.0f * n + ne);
     float4 m = gx * gx;
     m = m + gy * gy;
-    float4 r = clamp(1.0f - sqrt(m) / 4.0f, 0.0f, 1.0f);
+    float4 edge = clamp(sqrt(m) / 4.0f, 0.0f, 1.0f);
+    float4 r = p.sub != 0 ? edge : 1.0f - edge;
     if (f.alpha != 0u) r.w = c.w;
     dst.write(r, gid);
 }
 
 struct pca_sty_per_pixel_params {
-    int op;   // 0 invert, 1 solarize
+    int op;   // 0 invert, 1 solarize, 2 solarize for ink values (CMYK)
     int pad0;
     int pad1;
     int pad2;
@@ -180,7 +188,7 @@ kernel void pca_sty_per_pixel(constant pca_frame& f [[buffer(0)]], constant pca_
     int2 q;
     if (!pca_out_pixel(f, gid, q)) return;
     float4 v = pca_get(src, f, q);
-    float4 r = p.op == 0 ? 1.0f - v : select(v, 1.0f - v, v > 0.5f);
+    float4 r = p.op == 0 ? 1.0f - v : (p.op == 2 ? select(v, 1.0f - v, v < 0.5f) : select(v, 1.0f - v, v > 0.5f));
     if (f.alpha != 0u) r.w = v.w;
     dst.write(r, gid);
 }
