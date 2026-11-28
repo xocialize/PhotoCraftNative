@@ -14,6 +14,7 @@ extension Affinity {
         /// The node-space outline of a curve, shape or compound node, and whether it fills even-odd.
         /// Instances (master-page or symbol copies) take the geometry of their master.
         static func outline(_ r: Reader, _ id: ObjID, _ cls: Tag, _ world: Affine, depth: Int = 0) -> (Path, Bool)? {
+            if depth == 0 { r.beginOutline() }
             guard r.chargeOutlineVisit() else { return nil }
             guard let result = outlineUncharged(r, id, cls, world, depth: depth) else { return nil }
             // A compound's operands were charged as they were copied in.

@@ -196,6 +196,26 @@ func onThread<T: Sendable>(stackSize: Int, _ body: @escaping @Sendable () -> T) 
         #expect(text.paragraphRuns().map(\.len).reduce(0, +) == text.text.utf8.count)
     }
 
+    /// photocraft's type on a path and area type (added after this port's base) go through the
+    /// manifest's own decoder and encoder: a document holding them opens and is saved unchanged.
+    @Test func pathAndAreaTextShapesRoundtrip() throws {
+        var doc = Document(name: "shapes", size: PixelSize(width: 64, height: 64), mode: .rgb, depth: .u8)
+        var onPath = TextLayer(text: "along")
+        onPath.shape = .path(.init(path: Subpath(closed: false, knots: [.corner(0, 0), .corner(50, 10)]), start: 4, end: nil, flip: true))
+        var inArea = TextLayer(text: "inside")
+        inArea.shape = .area(.init(path: VectorPath([.polygon([(2, 2), (60, 2), (60, 40), (2, 40)])])))
+        doc.layers.append(Layer(name: "Path", content: .text(onPath)))
+        doc.layers.append(Layer(name: "Area", content: .text(inArea)))
+
+        let bytes = try save(doc)
+        #expect(try load(bytes) == doc)
+        // As photocraft writes it: `{"Path": {path, start, flip}}` with no `end` when unbounded.
+        let text = String(decoding: try JSONSerialization.data(withJSONObject: try manifestJSON(bytes), options: [.sortedKeys]), as: UTF8.self)
+        #expect(text.contains(#""shape":{"Path":{"flip":true,"path":"#), "\(text.prefix(0))")
+        #expect(text.contains(#""shape":{"Area":{"path":"#))
+        #expect(!text.contains(#""end""#))
+    }
+
     @Test func zipIncrementalOnlyNewTiles() throws {
         var doc = richDoc(.rgb, .u16)
         let w = PcraftWriter()

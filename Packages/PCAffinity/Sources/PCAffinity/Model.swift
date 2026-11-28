@@ -289,12 +289,21 @@ extension Affinity {
         private var warnings: [String: Int] = [:]
         private var nodes = 0
         private var active = Set<ObjID>()
-        /// Document-wide budgets for expanding outlines (photocraft #6486, `bf321f0f5`). Geometry is
-        /// expanded per occurrence, so a compound that lists one shared child twice per level
-        /// doubles the work at each level: the depth limit alone allows 2^depth visits.
-        private var outlineVisitsLeft = 500_000
-        private var outlinePointsLeft = 4_000_000
+        /// Budgets for expanding one node's outline, as craft-affinity has them (`MAX_OUTLINE_VISITS`,
+        /// `MAX_NODES`; photocraft #6486): geometry is expanded per occurrence, so a compound that
+        /// lists one shared child twice per level doubles the work at each level, and the depth
+        /// limit alone allows 2^depth visits. Each top-level outline starts with a full budget.
+        static let maxOutlineVisits = 100_000
+        static let maxOutlinePoints = 4_000_000
+        private var outlineVisitsLeft = Reader.maxOutlineVisits
+        private var outlinePointsLeft = Reader.maxOutlinePoints
         private var outlineBudgetWarned = false
+
+        /// Starts the budget of one top-level outline.
+        func beginOutline() {
+            outlineVisitsLeft = Reader.maxOutlineVisits
+            outlinePointsLeft = Reader.maxOutlinePoints
+        }
 
         /// Charges one outline call; false once the document's budget is spent.
         func chargeOutlineVisit() -> Bool {
@@ -308,14 +317,14 @@ extension Affinity {
             var points = 0
             for sp in path.subpaths { points += 1 + sp.segments.count * 3 }
             if points <= outlinePointsLeft { outlinePointsLeft -= points; return true }
-            // No more leaves are built for later roots either.
+            // No more leaves are built for the rest of this outline.
             outlineVisitsLeft = 0
             outlineBudgetExhausted()
             return false
         }
 
         private func outlineBudgetExhausted() {
-            if !outlineBudgetWarned { outlineBudgetWarned = true; warn("compound geometry budget exhausted; some shapes were not imported") }
+            if !outlineBudgetWarned { outlineBudgetWarned = true; warn("compound outlines exceeding the geometry work limit") }
         }
 
         init(_ s: Stream, _ archive: Archive) {

@@ -289,7 +289,8 @@ kernel void pca_rs_warp(constant pca_frame& f [[buffer(0)]], constant pca_rs_war
         dst.write(float4(0.0f), gid);
         return;
     }
-    dst.write(float4(acc.xyz / al, al), gid);
+    // The unclamped alpha: a bicubic overshoot past 1 must not lighten the colour (photocraft #6203).
+    dst.write(float4(acc.xyz / acc.w, al), gid);
 }
 
 // MARK: Mesh warp
@@ -366,7 +367,7 @@ kernel void pca_rs_mesh(constant pca_frame& f [[buffer(0)]], constant pca_rs_mes
         dst.write(float4(0.0f), gid);
         return;
     }
-    dst.write(float4(clamp(acc.xyz / al, 0.0f, 1.0f), al), gid);
+    dst.write(float4(clamp(acc.xyz / acc.w, 0.0f, 1.0f), al), gid);
 }
 
 // MARK: Unsharp Mask (Preserve Details)

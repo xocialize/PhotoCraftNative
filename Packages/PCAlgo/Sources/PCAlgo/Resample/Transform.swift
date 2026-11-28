@@ -359,8 +359,11 @@ enum TransformKit {
                 any = true
                 let o = (Int(y - origin.1) * ow + Int(x - origin.0)) * n
                 for c in 0..<a {
-                    // Integer storage clips on write; float colours retain their signed/HDR range.
-                    outp[o + c] = Float(acc[c] / al)
+                    // Un-premultiplied by the unclamped alpha: bicubic overshoots it past 1 next to
+                    // partly transparent pixels, and dividing by the clamped 1 would lighten the
+                    // colour by the overshoot (photocraft #6203). Integer storage clips on write;
+                    // float colours retain their signed/HDR range.
+                    outp[o + c] = Float(acc[c] / acc[a])
                 }
                 outp[o + a] = Float(al)
             }

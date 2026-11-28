@@ -72,4 +72,49 @@ import PCFoundation
         let far = PixelRect(x0: 1_500_000_000, y0: 1_500_000_000, x1: 1_500_000_032, y1: 1_500_000_032)
         #expect(TransformKit.prefilter(srcRect: far, h: .identity, interp: .bilinear, clip: nil) == nil)
     }
+
+    /// A sprite whose edge pixels are half transparent (photocraft #6203).
+    static func softEdgedSprite() -> Surface {
+        var s = Surface(format: PixelFormat(mode: .rgb, sample: .u8, alpha: true))
+        s.fill(PixelRect(x0: 10, y0: 10, x1: 30, y1: 30), with: [0.8, 0.6, 0.4, 0.5])
+        s.fill(PixelRect(x0: 11, y0: 11, x1: 29, y1: 29), with: [0.8, 0.6, 0.4, 1])
+        return s
+    }
+
+    static func worstColourOffset(_ out: Surface) -> Float {
+        var worst: Float = 0
+        let b = out.contentBounds
+        for y in b.y0..<b.y1 {
+            for x in b.x0..<b.x1 {
+                let p = out.pixel(x: x, y: y)
+                if p[3] > 0 { for i in 0..<3 { worst = max(worst, abs(p[i] - [0.8, 0.6, 0.4][i])) } }
+            }
+        }
+        return worst
+    }
+
+    /// photocraft #6203 `rotation_keeps_the_colour_of_a_soft_edged_sprite`: a bicubic rotation
+    /// overshoots the alpha past 1 next to partly transparent pixels; the colour must stay the
+    /// sprite's and not grow with the overshoot into a light border.
+    @Test(arguments: [Backend.cpu, .auto])
+    func rotationKeepsTheColourOfASoftEdgedSprite(_ backend: Backend) throws {
+        let s = Self.softEdgedSprite()
+        let c = 20.0, k = 0.5.squareRoot() * 10
+        let h = try #require(Homography.rectToQuad([10, 10, 30, 30], [SIMD2(c, c - 2 * k), SIMD2(c + 2 * k, c), SIMD2(c, c + 2 * k), SIMD2(c - 2 * k, c)]))
+        for interp in [Interp.bicubic, .bilinear] {
+            let out = Transform.warpSurface(s, srcRect: s.contentBounds, h: h, interp: interp, on: backend)
+            #expect(Self.worstColourOffset(out) <= 1.0 / 255.0, "\(interp)")
+        }
+    }
+
+    /// photocraft #6203 `a_rotated_soft_edged_sprite_keeps_its_colour` (mesh warp).
+    @Test(arguments: [Backend.cpu, .auto])
+    func meshRotationKeepsTheColourOfASoftEdgedSprite(_ backend: Backend) {
+        let s = Self.softEdgedSprite()
+        let k = 0.5.squareRoot()
+        let out = MeshWarp.warpMeshSurface(s, srcRect: s.contentBounds, map: { x, y in
+            (20 + (x - 20) * k - (y - 20) * k, 20 + (x - 20) * k + (y - 20) * k)
+        }, interp: .bicubic, on: backend)
+        #expect(Self.worstColourOffset(out) <= 1.0 / 255.0)
+    }
 }

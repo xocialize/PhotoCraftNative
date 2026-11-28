@@ -388,7 +388,8 @@ enum MeshKit {
             if al <= 1e-6 { continue }
             any = true
             let b = base(o)
-            for c in 0..<a { outp[b + c] = Float(min(max(acc[c] / al, 0), 1)) }
+            // The unclamped alpha, so a bicubic overshoot past 1 doesn't lighten the colour (photocraft #6203).
+            for c in 0..<a { outp[b + c] = Float(min(max(acc[c] / acc[a], 0), 1)) }
             outp[b + a] = Float(al)
         }
         return any
