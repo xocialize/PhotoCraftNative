@@ -188,6 +188,10 @@ public enum CompsMap {
         }
         var last = LayerComp(id: 0, name: "Last Document State", comment: "", applyVisibility: true, applyPosition: true,
                              applyAppearance: false, states: [])
+        // First comp of each id, looked up in a table: a scan per layer setting is quadratic in a
+        // hostile file (photocraft `7c78c951e`).
+        var compIndex: [UInt32: Int] = [:]
+        for (i, c) in comps.enumerated() where compIndex[c.id] == nil { compIndex[c.id] = i }
         doc.forEachLayer { _, _, l in
             guard let settings = layerCmls(l).flatMap(parseCmls) else { return }
             let here = l.compPosition
@@ -205,7 +209,7 @@ public enum CompsMap {
                 for id in s.comps {
                     if id == 0 {
                         last.states.append(state)
-                    } else if let i = comps.firstIndex(where: { $0.id == id }) {
+                    } else if let i = compIndex[id] {
                         comps[i].states.append(state)
                     }
                 }

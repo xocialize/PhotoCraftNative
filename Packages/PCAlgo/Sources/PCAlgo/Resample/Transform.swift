@@ -232,7 +232,8 @@ enum TransformKit {
         if let c = clip, let inv = h.inverse() {
             (cx, cy) = inv.apply((Double(c.x0) + Double(c.x1)) / 2, (Double(c.y0) + Double(c.y1)) / 2)
         } else {
-            (cx, cy) = (Double(srcRect.x0 + srcRect.x1) / 2, Double(srcRect.y0 + srcRect.y1) / 2)
+            // Summed as doubles: a source rect near ±1.5e9 overflows the Int32 sum (photocraft #5451).
+            (cx, cy) = ((Double(srcRect.x0) + Double(srcRect.x1)) / 2, (Double(srcRect.y0) + Double(srcRect.y1)) / 2)
         }
         let scale = h.localScale(cx, cy)
         if interp != .nearest && scale < 0.5 && scale > 0 {
@@ -300,10 +301,12 @@ enum TransformKit {
         }
         if poly.isEmpty { return nil }
         let fp = poly.map { inv.apply($0.0, $0.1) }
-        let fx0 = ResampleKit.i32(fp.map(\.0).reduce(Double.greatestFiniteMagnitude, min).rounded(.down)) &- 3
-        let fy0 = ResampleKit.i32(fp.map(\.1).reduce(Double.greatestFiniteMagnitude, min).rounded(.down)) &- 3
-        let fx1 = ResampleKit.i32(fp.map(\.0).reduce(-Double.greatestFiniteMagnitude, max).rounded(.up)) &+ 3
-        let fy1 = ResampleKit.i32(fp.map(\.1).reduce(-Double.greatestFiniteMagnitude, max).rounded(.up)) &+ 3
+        // Saturating: the casts saturate for a strongly skewed affine, and a wrapping ∓3 would turn
+        // that into a footprint on the far side (photocraft #5451).
+        let fx0 = Int32(clamping: Int64(ResampleKit.i32(fp.map(\.0).reduce(Double.greatestFiniteMagnitude, min).rounded(.down))) - 3)
+        let fy0 = Int32(clamping: Int64(ResampleKit.i32(fp.map(\.1).reduce(Double.greatestFiniteMagnitude, min).rounded(.down))) - 3)
+        let fx1 = Int32(clamping: Int64(ResampleKit.i32(fp.map(\.0).reduce(-Double.greatestFiniteMagnitude, max).rounded(.up))) + 3)
+        let fy1 = Int32(clamping: Int64(ResampleKit.i32(fp.map(\.1).reduce(-Double.greatestFiniteMagnitude, max).rounded(.up))) + 3)
         // Without a one-signed forward w, a tile straddling the inverse horizon has no bounded footprint.
         let straddles = s.side == nil && wc.contains { $0 <= 0 } && wc.contains { $0 >= 0 }
         let foot = straddles ? s.srcRect : PixelRect(x0: fx0, y0: fy0, x1: fx1, y1: fy1).intersect(s.srcRect)

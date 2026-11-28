@@ -453,6 +453,26 @@ import Testing
         #expect(try roundTrip(TextShape.box(.init(x: 1, y: 2, width: 3, height: 4))) == .box(.init(x: 1, y: 2, width: 3, height: 4)))
         #expect(try encodeJSON(TextShape.point) == #""Point""#)
     }
+
+    /// photocraft's later type on a path and area type (after this port's base) decode and are
+    /// written back unchanged; a path without `end` stays without it (photocraft
+    /// `path_end_is_backward_compatible`).
+    @Test func pathAndAreaShapesSurviveARoundTrip() throws {
+        let onPath = try decodeJSON(TextShape.self, #"{"Path":{"path":{"closed":false,"knots":[],"op":"Combine"},"start":2.0,"flip":false}}"#)
+        guard case .path(let p) = onPath else { Issue.record("not a path shape"); return }
+        #expect(p.start == 2 && p.end == nil && !p.flip)
+        let v = try jsonValue(onPath)
+        #expect(v["Path"]?["end"] == nil)
+        #expect(try roundTrip(onPath) == onPath)
+        #expect(onPath.layoutBox == nil)
+        let bounded = TextShape.path(.init(path: Subpath(), start: 80, end: 120, flip: true))
+        #expect(try roundTrip(bounded) == bounded)
+
+        let area = TextShape.area(.init(path: VectorPath([.polygon([(10, 20), (110, 20), (110, 70), (10, 70)])])))
+        #expect(try roundTrip(area) == area)
+        #expect(area.layoutBox == .init(x: 10, y: 20, width: 100, height: 50))
+        #expect(try jsonValue(area)["Area"]?["path"] != nil)
+    }
 }
 
 @Suite struct TextStylesTests {

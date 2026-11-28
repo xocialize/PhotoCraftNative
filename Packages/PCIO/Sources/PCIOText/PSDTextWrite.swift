@@ -402,9 +402,12 @@ extension PSDText {
         if dict.get("UseFractionalGlyphWidths") == nil { dict.put("UseFractionalGlyphWidths", .bool(true)) }
         let shapeType: Int64
         let boxBounds: [Float]?
-        switch layer.shape {
-        case .point: (shapeType, boxBounds) = (0, nil)
-        case let .box(b): (shapeType, boxBounds) = (1, [b.x, b.y, b.x + b.width, b.y + b.height])
+        // Type on a path is written as point text and area type as a box of the area's bounds: PSD's
+        // path-text records are not generated here.
+        if let b = layer.shape.layoutBox {
+            (shapeType, boxBounds) = (1, [b.x, b.y, b.x + b.width, b.y + b.height])
+        } else {
+            (shapeType, boxBounds) = (0, nil)
         }
         var photoshop = E.d([("ShapeType", .int(shapeType))])
         if let boxBounds {

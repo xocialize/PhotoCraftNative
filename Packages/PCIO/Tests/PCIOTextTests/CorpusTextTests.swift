@@ -18,7 +18,7 @@ struct CorpusTextTests {
         var failures: [String] = []
         for url in Corpus.files {
             let file = try PSDFile(contentsOf: url)
-            let dpi = Float(file.resolution.map { $0.hResUnit == 2 ? $0.hRes * 2.54 : $0.hRes } ?? 72)
+            let dpi = Float(file.resolution.map { $0.hRes } ?? 72)
             let txt2 = file.globalBlock("Txt2").flatMap { PSDText.parseTxt2([UInt8]($0.data)) }
             if let b = file.globalBlock("Txt2"), let parsed = txt2 {
                 txt2Files += 1
@@ -97,7 +97,7 @@ struct CorpusTextTests {
 
     /// The document resolution as photocraft's importer reads it (1005, per cm → per inch).
     static func dpi(_ file: PSDFile) -> Float {
-        Float(file.resolution.map { $0.hResUnit == 2 ? $0.hRes * 2.54 : $0.hRes } ?? 72)
+        Float(file.resolution.map { $0.hRes } ?? 72)
     }
 
     /// #2374: an unedited save hands Photoshop back its own `Txt2`, byte for byte. The type layers

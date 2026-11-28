@@ -104,10 +104,14 @@ public struct PSDSlices: Equatable, Sendable {
         // (with the records' snapshot) so an unchanged resource is written back exactly.
         let tailData = Data(r.rest)
         if r.remaining >= 4, let vd = try? PSDVersionedDescriptor.read(&r), let items = vd.descriptor.list("slices") {
+            // First slice of each id, looked up in a table: a scan per descriptor item is quadratic
+            // in a hostile resource (photocraft `42d8aad56`).
+            var firstByID: [Int64: Int] = [:]
+            for (i, x) in s.slices.enumerated() where firstByID[Int64(x.id)] == nil { firstByID[Int64(x.id)] = i }
             for v in items {
                 guard let d = v.descriptor else { continue }
                 let extra = slice(from: d)
-                if let i = s.slices.firstIndex(where: { $0.id == extra.id }) { s.slices[i].outsets = extra.outsets }
+                if let i = firstByID[Int64(extra.id)] { s.slices[i].outsets = extra.outsets }
             }
         }
         s.v6Tail = (tailData, s.bounds, s.groupName, s.slices)

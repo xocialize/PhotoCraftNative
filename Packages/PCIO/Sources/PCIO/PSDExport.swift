@@ -338,8 +338,8 @@ public enum PSDExport {
     /// Whether a kept ResolutionInfo (1005) still says `dpi` on both axes.
     static func resolutionMatches(_ data: [UInt8], _ dpi: Float) -> Bool {
         guard let ri = try? PSDResolutionInfo(bytes: Data(data)) else { return false }
-        func ppi(_ res: Double, _ unit: UInt16) -> Double { unit == 2 ? res * 2.54 : res }
-        return abs(ppi(ri.hRes, ri.hResUnit) - Double(dpi)) < 1e-3 && abs(ppi(ri.vRes, ri.vResUnit) - Double(dpi)) < 1e-3
+        // Always pixels per inch, whatever the display unit (photocraft #5280).
+        return abs(ri.hRes - Double(dpi)) < 1e-3 && abs(ri.vRes - Double(dpi)) < 1e-3
     }
 
     /// Whether a kept grid-and-guides resource (1032) holds exactly the document's guides.

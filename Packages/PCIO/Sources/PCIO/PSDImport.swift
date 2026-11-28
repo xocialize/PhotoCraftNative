@@ -604,8 +604,10 @@ struct Importer {
             switch r.id {
             case PSDResourceID.resolutionInfo:
                 if let ri = try? PSDResolutionInfo(bytes: r.data) {
-                    func ppi(_ res: Double, _ unit: UInt16) -> Double { unit == 2 ? res * 2.54 : res }
-                    let (x, y) = (ppi(ri.hRes, ri.hResUnit), ppi(ri.vRes, ri.vResUnit))
+                    // hRes and vRes are always pixels per inch; the unit shorts only say how to show
+                    // that number (1 = px/in, 2 = px/cm). Scaling by 2.54 opened a 300 ppi file with
+                    // a cm display unit at 762 ppi (photocraft #5280).
+                    let (x, y) = (ri.hRes, ri.vRes)
                     doc.resolutionDpi = Float(x)
                     if let w = unequalResolutionWarning(x, y) { warn(w) }
                 }

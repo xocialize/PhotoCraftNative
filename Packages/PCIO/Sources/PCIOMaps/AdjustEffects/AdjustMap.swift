@@ -224,9 +224,19 @@ public enum AdjustMap {
             v.u16(2)
             v.u8(h.colorize ? 1 : 0)
             v.u8(0)
-            for _ in 0 ..< 2 {
-                for x in [h.hue, h.saturation, h.lightness] { v.i16(clampI16(x)) }
+            // The colorize triplet (byte 4), then the master triplet (byte 10). The inactive one
+            // takes Photoshop's defaults (colorize 30/25/0, master 0/0/0), and the colorize hue
+            // (0..360 in the model) is stored signed, -180...180 (photocraft #7065). Writing the
+            // active triplet into both put a Colorize hue of 200 in the master slot, outside its range.
+            let colorizeHSL: [Float], master: [Float]
+            if h.colorize {
+                var hue = h.hue.truncatingRemainder(dividingBy: 360)
+                if hue < 0 { hue += 360 }
+                (colorizeHSL, master) = ([hue > 180 ? hue - 360 : hue, h.saturation, h.lightness], [0, 0, 0])
+            } else {
+                (colorizeHSL, master) = ([30, 25, 0], [h.hue, h.saturation, h.lightness])
             }
+            for x in colorizeHSL + master { v.i16(clampI16(x)) }
             // Six hue ranges (reds, yellows, greens, cyans, blues, magentas): range values in
             // 0..<360, then the range's hue, saturation and lightness.
             for i in 0 ..< 6 {
@@ -514,7 +524,13 @@ extension AdjustMap {
             }
         }
         guard let h = bei16(data, base), let s = bei16(data, base + 2), let l = bei16(data, base + 4) else { return nil }
-        return .hueSaturation(Adjustment.HueSaturation(hue: Float(h), saturation: Float(s), lightness: Float(l), colorize: colorize, ranges: ranges))
+        // Photoshop stores the colorize hue signed (200 as -160); the model keeps 0..360.
+        var hue = Float(h)
+        if colorize {
+            hue = hue.truncatingRemainder(dividingBy: 360)
+            if hue < 0 { hue += 360 }
+        }
+        return .hueSaturation(Adjustment.HueSaturation(hue: hue, saturation: Float(s), lightness: Float(l), colorize: colorize, ranges: ranges))
     }
 
     /// `grdm` (Adobe spec, "Gradient settings"): version (1, or 3 with an interpolation method key),

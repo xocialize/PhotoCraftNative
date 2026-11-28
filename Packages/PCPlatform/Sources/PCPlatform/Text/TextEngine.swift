@@ -49,7 +49,9 @@ struct TextBlock: Sendable {
         paragraphs = layer.paragraphRuns()
         // A box with non-finite fields (hostile input) lays out as if they were 0.
         func finite(_ v: Float) -> Double { v.isFinite ? Double(v) : 0 }
-        if case .box(let b) = layer.shape { box = CGRect(x: finite(b.x), y: finite(b.y), width: finite(b.width), height: finite(b.height)) } else { box = nil }
+        // Area type wraps in its path's bounding box and type on a path lays out as point text: the
+        // path itself is kept in the model but not followed here yet.
+        if let b = layer.shape.layoutBox { box = CGRect(x: finite(b.x), y: finite(b.y), width: finite(b.width), height: finite(b.height)) } else { box = nil }
     }
 
     var orientation: TextOrientation { layer.orientation }

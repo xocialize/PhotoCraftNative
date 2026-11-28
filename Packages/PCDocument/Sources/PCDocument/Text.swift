@@ -275,10 +275,59 @@ public struct ParagraphRun: Hashable, Sendable, Codable {
 
 /// Point text grows from its anchor (text-space origin = first baseline at the anchor); paragraph
 /// (box) text wraps inside a rectangle. JSON: `"Point"` / `{"Box":{"x":…,"y":…,"width":…,"height":…}}`.
+///
+/// `path` and `area` are photocraft's later type on a path and area type (after this port's base,
+/// photocraft #4365, #4377, #11629). They are decoded and written back unchanged so a photocraft
+/// document opens and survives a save; the text engine does not follow the path yet: path text is
+/// laid out as point text and area text in the path's bounding box (`layoutBox`).
 public enum TextShape: Hashable, Sendable, Codable {
     case point
     /// Text-space pixels, before the layer transform.
     case box(TextBox)
+    /// Type on a path. JSON: `{"Path":{"path":…,"start":…,"end":…?,"flip":…}}`.
+    case path(OnPath)
+    /// Area type: paragraph text inside the closed subpaths of `path`. JSON: `{"Area":{"path":…}}`.
+    case area(Area)
+
+    /// photocraft `TextShape::Path`: `start` is the arc-length offset (px) of the text origin along
+    /// the path, `end` the unwrapped end offset (absent = unbounded), `flip` the other side.
+    public struct OnPath: Hashable, Sendable, Codable {
+        public var path: Subpath
+        public var start: Float
+        public var end: Float?
+        public var flip: Bool
+        public init(path: Subpath, start: Float = 0, end: Float? = nil, flip: Bool = false) {
+            self.path = path; self.start = start; self.end = end; self.flip = flip
+        }
+    }
+
+    /// photocraft `TextShape::Area`.
+    public struct Area: Hashable, Sendable, Codable {
+        public var path: VectorPath
+        public init(path: VectorPath) { self.path = path }
+    }
+
+    /// The rectangle paragraph layout wraps in: the box itself, the bounding box of an area's
+    /// anchors (finite ones only), or nil for point and path text.
+    public var layoutBox: TextBox? {
+        switch self {
+        case .point, .path: return nil
+        case .box(let b): return b
+        case .area(let a):
+            var x0 = Double.infinity, y0 = Double.infinity, x1 = -Double.infinity, y1 = -Double.infinity
+            for sp in a.path.subpaths {
+                for k in sp.knots where k.anchor.x.isFinite && k.anchor.y.isFinite {
+                    x0 = min(x0, k.anchor.x); y0 = min(y0, k.anchor.y)
+                    x1 = max(x1, k.anchor.x); y1 = max(y1, k.anchor.y)
+                }
+            }
+            guard x0 <= x1, y0 <= y1 else { return TextBox(x: 0, y: 0, width: 0, height: 0) }
+            return TextBox(x: Float(x0), y: Float(y0), width: Float(x1 - x0), height: Float(y1 - y0))
+        }
+    }
+
+    /// Whether the text wraps in a region (box or area) instead of growing from an anchor.
+    public var isParagraph: Bool { layoutBox != nil }
 
     public struct TextBox: Hashable, Sendable, Codable {
         public var x: Float, y: Float, width: Float, height: Float
@@ -290,6 +339,8 @@ public enum TextShape: Hashable, Sendable, Codable {
         switch v.tag {
         case "Point": self = .point
         case "Box": self = .box(try v.payload())
+        case "Path": self = .path(try v.payload())
+        case "Area": self = .area(try v.payload())
         default: throw v.unknown()
         }
     }
@@ -298,6 +349,8 @@ public enum TextShape: Hashable, Sendable, Codable {
         switch self {
         case .point: try Tagged.unit("Point", to: encoder)
         case .box(let b): try Tagged.variant("Box", b, to: encoder)
+        case .path(let p): try Tagged.variant("Path", p, to: encoder)
+        case .area(let a): try Tagged.variant("Area", a, to: encoder)
         }
     }
 }

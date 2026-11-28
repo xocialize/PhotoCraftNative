@@ -132,7 +132,11 @@ extension GrayTile: Codable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         let w = try c.decode(UInt32.self, forKey: .width)
         let h = try c.decode(UInt32.self, forKey: .height)
-        let n = Int(w) * Int(h)
+        // Checked: two UInt32 extents can exceed Int (photocraft #8772).
+        let (n, overflow) = Int(w).multipliedReportingOverflow(by: Int(h))
+        guard !overflow else {
+            throw DecodingError.dataCorruptedError(forKey: .width, in: c, debugDescription: "tile \(w) × \(h) is too large")
+        }
         let d: [UInt16]
         if let s = try? c.decode(String.self, forKey: .data) {
             guard let b = Base64.decode(s) else {

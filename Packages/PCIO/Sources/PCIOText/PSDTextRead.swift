@@ -535,10 +535,10 @@ public enum PSDText {
         let matrix = m.count == 6 && m.allSatisfy(\.isFinite) ? PCAffine(m: m) : .identity
         let at: PCAffine
         switch layer.shape {
-        case .point:
+        case .point, .path:
             let p = arrF(frame.get("0"))
             at = p.count == 2 && p.allSatisfy(\.isFinite) ? .translate(p[0], p[1]) : .identity
-        case .box:
+        case .box, .area:
             at = .identity
         }
         let toText = matrix.mul(at)
@@ -550,9 +550,9 @@ public enum PSDText {
         // `bounds` near the origin: applying the frame again would move it twice.
         let origin: PCPoint
         switch layer.shape {
-        case .point:
+        case .point, .path:
             origin = PCPoint(0, 0)
-        case .box:
+        case .box, .area:
             let b = engineData(t.text).map { e in
                 arrF(e.at("EngineDict", "Rendered", "Shapes", "Children")?.arr?.first?.at("Cookie", "Photoshop", "BoxBounds"))
             } ?? []

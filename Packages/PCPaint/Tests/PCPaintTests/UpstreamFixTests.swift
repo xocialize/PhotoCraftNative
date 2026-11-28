@@ -94,3 +94,11 @@ import PCFoundation
         #expect(Date().timeIntervalSince(t0) < 60)
     }
 }
+
+@Suite struct UpstreamBoundTests {
+    /// photocraft #8772: a stored tile's width × height is checked before it is used as a length.
+    @Test func aTileWhoseExtentsOverflowIsRefused() {
+        let json = Data(#"{"width": 4294967295, "height": 4294967295, "data": ""}"#.utf8)
+        #expect(throws: (any Error).self) { try JSONDecoder().decode(GrayTile.self, from: json) }
+    }
+}

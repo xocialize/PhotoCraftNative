@@ -75,12 +75,13 @@ import Testing
         let r = try Kit.importFile("x.psd", try Self.psd(PSDResolutionInfo(dpi: 300)))
         #expect(abs(r.document.resolutionDpi - 300) < 1e-3, "\(r.document.resolutionDpi)")
         #expect(Self.resolutionNotes(r).isEmpty, "\(r.warnings)")
-        // Each axis is read in its own unit: 100 pixels per centimetre on both is 254 ppi on both.
-        var cm = PSDResolutionInfo(dpi: 100)
+        // Resource 1005 stores pixels per inch even when the display unit is centimetres; scaling
+        // it by 2.54 opened a 300 ppi file at 762 ppi (photocraft #5280).
+        var cm = PSDResolutionInfo(dpi: 300)
         cm.hResUnit = 2
         cm.vResUnit = 2
         let r2 = try Kit.importFile("x.psd", try Self.psd(cm))
-        #expect(abs(r2.document.resolutionDpi - 254) < 1e-3, "\(r2.document.resolutionDpi)")
+        #expect(abs(r2.document.resolutionDpi - 300) < 1e-3, "\(r2.document.resolutionDpi)")
         #expect(Self.resolutionNotes(r2).isEmpty, "\(r2.warnings)")
     }
 

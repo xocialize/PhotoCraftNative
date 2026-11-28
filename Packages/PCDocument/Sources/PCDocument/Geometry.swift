@@ -84,9 +84,13 @@ public struct PCAffine: Hashable, Sendable, Codable, CustomStringConvertible {
     /// The inverse, or nil for a (near-)singular transform.
     public var inverse: PCAffine? {
         let det = determinant
-        if abs(det) < 1e-12 { return nil }
+        // `!(… >= …)` also refuses a NaN determinant; a result with a non-finite term (a huge
+        // translation over a tiny determinant) is refused too (photocraft #8651).
+        if !(abs(det) >= 1e-12) || !det.isFinite { return nil }
         let inv = 1 / det
-        return PCAffine(a: d * inv, b: -b * inv, c: -c * inv, d: a * inv, e: (c * f - d * e) * inv, f: (b * e - a * f) * inv)
+        let r = PCAffine(a: d * inv, b: -b * inv, c: -c * inv, d: a * inv, e: (c * f - d * e) * inv, f: (b * e - a * f) * inv)
+        guard r.a.isFinite, r.b.isFinite, r.c.isFinite, r.d.isFinite, r.e.isFinite, r.f.isFinite else { return nil }
+        return r
     }
 
     public var isIdentity: Bool { self == .identity }

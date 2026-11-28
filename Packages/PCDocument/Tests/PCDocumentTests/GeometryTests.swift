@@ -49,6 +49,14 @@ import Testing
         #expect(PCAffine.scale(0).inverse == nil)
     }
 
+    /// photocraft #8651: a transform with a non-finite term, or whose inverse has one, has no inverse.
+    @Test func affineInverseRejectsNonFiniteResults() {
+        #expect(PCAffine(a: .nan, b: 0, c: 0, d: 1, e: 0, f: 0).inverse == nil)
+        #expect(PCAffine(a: .infinity, b: 0, c: 0, d: 1, e: 0, f: 0).inverse == nil)
+        #expect(PCAffine(a: 1e-6, b: 0, c: 0, d: 1e-6, e: 1e308, f: 1e308).inverse == nil)
+        #expect(PCAffine(a: 1e200, b: 0, c: 0, d: 1e200, e: 0, f: 0).inverse == nil)
+    }
+
     @Test func affineThenOrder() {
         let t = PCAffine.translate(10, 0).then(.scale(2))
         // translate first, then scale

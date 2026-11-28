@@ -14,9 +14,11 @@ public enum Halo: Hashable, Sendable {
     case bounds
 
     /// photocraft's `|v| Halo::Radius(v.max(0).ceil() + 1)`.
-    static func reach(_ v: Float) -> Halo { .radius(PCAMath.i32(PCAMath.pos(v).rounded(.up)) &+ 1) }
+    static func reach(_ v: Float) -> Halo { .radius(Halo.plusOne(PCAMath.i32(PCAMath.pos(v).rounded(.up)))) }
     /// photocraft's Gaussian halo: `ceil(3σ) + 1`.
-    static func gaussian(_ sigma: Float) -> Halo { .radius(PCAMath.i32((PCAMath.pos(sigma) * 3).rounded(.up)) &+ 1) }
+    static func gaussian(_ sigma: Float) -> Halo { .radius(Halo.plusOne(PCAMath.i32((PCAMath.pos(sigma) * 3).rounded(.up)))) }
+    /// Saturating `+ 1`: a wrapping add turns a saturated reach into a negative margin (photocraft #8946).
+    static func plusOne(_ v: Int32) -> Int32 { v == .max ? .max : v + 1 }
 }
 
 /// The context a filter runs in (photocraft `Ctx`).

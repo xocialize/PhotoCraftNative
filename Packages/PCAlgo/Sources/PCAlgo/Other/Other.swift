@@ -218,25 +218,56 @@ public struct Offset: Filter, Hashable {
     public var label: String { "Offset" }
     public func halo(bounds: PixelRect) -> Halo { .bounds }
     public func cpu(_ src: FloatImage, out: PixelRect, ctx: FilterContext) -> FloatImage {
-        let n = src.channels, edge = undefined.edge
+        let n = src.channels, undefined = undefined, b = ctx.bounds
+        let (dx, dy) = (Int64(horizontal), Int64(vertical))
         var res = FloatImage(rect: out, channels: n)
         res.data.withUnsafeMutableBufferPointer { rb in
             let rs = UnsafeSendable(rb)
             parallelChunks(out.height, minChunk: 16) { rows in
                 for oy in rows {
-                    let y = out.y0 + Int32(oy)
+                    let sy = Self.source(Int64(out.y0) + Int64(oy), dy, b.y0, b.y1, undefined)
                     for x in out.x0..<out.x1 {
                         let i = (oy * out.width + Int(x - out.x0)) * n
-                        for c in 0..<n { rs.value[i + c] = src.getEdge(x - horizontal, y - vertical, c, edge, ctx.bounds) }
+                        if let sy, let sx = Self.source(Int64(x), dx, b.x0, b.x1, undefined) {
+                            for c in 0..<n { rs.value[i + c] = src.get(sx, sy, c) }
+                        }
                     }
                 }
             }
         }
         return res
     }
+    /// The source coordinate for `position − distance` inside `start..<end` under the edge policy,
+    /// or nil where the result is transparent. Worked in 64 bits: the subtraction leaves Int32 for
+    /// valid parameters, and saturating it first would change the wrapped pixel (photocraft #4738).
+    @inline(__always)
+    static func source(_ position: Int64, _ distance: Int64, _ start: Int32, _ end: Int32, _ undefined: UndefinedAreas) -> Int32? {
+        guard start < end else { return nil }
+        let p = position - distance, s = Int64(start), e = Int64(end)
+        switch undefined {
+        case .wrap:
+            let m = (p - s) % (e - s)
+            return Int32(s + (m < 0 ? m + (e - s) : m))
+        case .repeat: return Int32(min(max(p, s), e - 1))
+        case .transparent: return p >= s && p < e ? Int32(p) : nil
+        }
+    }
+    /// An offset with the same result that keeps the shader's 32-bit `x − dx` in range: a wrap
+    /// offset modulo the size, any other clamped to the size (past it, every pixel is already edge
+    /// or transparent).
+    static func reduced(_ d: Int32, _ size: Int, _ undefined: UndefinedAreas) -> Int32 {
+        let n = Int64(max(size, 1))
+        if undefined == .wrap {
+            let m = Int64(d) % n
+            return Int32(m < 0 ? m + n : m)
+        }
+        return Int32(min(max(Int64(d), -n), n))
+    }
     struct Params: BitwiseCopyable { var dx: Int32; var dy: Int32; var edge: UInt32; var pad: UInt32 = 0 }
     public func encodeGPU(_ pass: GPUPass) throws {
-        try pass.dispatchOut("pca_offset", params: Params(dx: horizontal, dy: vertical, edge: undefined.gpuEdge))
+        let b = pass.ctx.bounds
+        try pass.dispatchOut("pca_offset", params: Params(dx: Self.reduced(horizontal, b.width, undefined), dy: Self.reduced(vertical, b.height, undefined),
+                                                          edge: undefined.gpuEdge))
     }
 }
 

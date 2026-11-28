@@ -364,8 +364,11 @@ struct MaxFlowGraph {
                     let ai = Int(a)
                     let j = Int(head[ai])
                     work += 1
+                    // Checked, not saturating: two nodes a global relabel left unreachable
+                    // (`UInt32.max`) must not count as admissible for each other, or float-stranded
+                    // excess passes between them forever (photocraft #4869).
                     let (dj1, o) = dist[j].addingReportingOverflow(1)
-                    if rCap[ai] > Self.eps && dist[i] == (o ? UInt32.max : dj1) {
+                    if rCap[ai] > Self.eps && !o && dist[i] == dj1 {
                         let delta = Float.minimum(Float(excess[i]), rCap[ai])
                         rCap[ai] -= delta
                         rCap[ai ^ 1] += delta

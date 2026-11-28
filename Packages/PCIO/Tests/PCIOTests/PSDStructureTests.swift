@@ -443,13 +443,15 @@ import Testing
         #expect(d2.channels.map(\.name) == ["Spot \u{e9}", "Alpha 2"])
     }
 
-    @Test func resolutionInCmConverted() throws {
+    /// photocraft #5280 `resolution_info_cm_display_unit_stays_pixels_per_inch`.
+    @Test func resolutionInfoCmDisplayUnitStaysPixelsPerInch() throws {
         var f = try PSDKit.small(.psd, .raw)
-        var ri = PSDResolutionInfo(dpi: 100)
+        var ri = PSDResolutionInfo(dpi: 300)
         ri.hResUnit = 2
+        ri.vResUnit = 2
         f.resources[0] = PSDImageResource(id: 1005, data: ri.serialized())
         let (d, _) = try PSDKit.psdToDocument(f)
-        #expect(abs(d.resolutionDpi - 254) < 1e-3)
+        #expect(abs(d.resolutionDpi - 300) < 1e-3)
     }
 
     @Test func staleIndexResourcesDropped() throws {

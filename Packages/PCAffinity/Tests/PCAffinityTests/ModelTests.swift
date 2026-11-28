@@ -481,6 +481,19 @@ typealias A = Affinity
         #expect(d.warnings == ["a layer that contains itself"])
     }
 
+    /// photocraft #6486: a compound that lists one shared child twice per level doubles the work
+    /// at each level, so 20 levels are a million outline calls inside the depth limit. The
+    /// document-wide budget stops it.
+    @Test func aCompoundThatFansOutIsStoppedByTheOutlineBudget() throws {
+        func comp(_ level: Int) -> F {
+            let id = UInt32(300 + level)
+            if level == 20 { return .def(id, ["Comp"], [("Chld", .shared([]))]) }
+            return .def(id, ["Comp"], [("Chld", .shared([comp(level + 1), .ref(id + 1)]))])
+        }
+        let d = try Self.read([comp(0)])
+        #expect(d.warnings.contains("compound geometry budget exhausted; some shapes were not imported"), "\(d.warnings)")
+    }
+
     @Test func aCompoundThatContainsItselfStops() throws {
         let compound: F = .def(210, ["Comp"], [("Chld", .shared([.ref(210)]))])
         let d = try Self.read([compound])

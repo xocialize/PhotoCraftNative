@@ -289,6 +289,34 @@ extension Affinity {
         private var warnings: [String: Int] = [:]
         private var nodes = 0
         private var active = Set<ObjID>()
+        /// Document-wide budgets for expanding outlines (photocraft #6486, `bf321f0f5`). Geometry is
+        /// expanded per occurrence, so a compound that lists one shared child twice per level
+        /// doubles the work at each level: the depth limit alone allows 2^depth visits.
+        private var outlineVisitsLeft = 500_000
+        private var outlinePointsLeft = 4_000_000
+        private var outlineBudgetWarned = false
+
+        /// Charges one outline call; false once the document's budget is spent.
+        func chargeOutlineVisit() -> Bool {
+            if outlineVisitsLeft > 0 { outlineVisitsLeft -= 1; return true }
+            outlineBudgetExhausted()
+            return false
+        }
+
+        /// Charges the points of a leaf outline or of a copy into a compound, before the copy.
+        func chargeOutlinePoints(_ path: Path) -> Bool {
+            var points = 0
+            for sp in path.subpaths { points += 1 + sp.segments.count * 3 }
+            if points <= outlinePointsLeft { outlinePointsLeft -= points; return true }
+            // No more leaves are built for later roots either.
+            outlineVisitsLeft = 0
+            outlineBudgetExhausted()
+            return false
+        }
+
+        private func outlineBudgetExhausted() {
+            if !outlineBudgetWarned { outlineBudgetWarned = true; warn("compound geometry budget exhausted; some shapes were not imported") }
+        }
 
         init(_ s: Stream, _ archive: Archive) {
             self.s = s

@@ -182,6 +182,20 @@ private func near(_ a: SIMD3<Float>, _ b: SIMD3<Float>, _ tol: Float) -> Bool { 
         #expect(!AdjustMap.retargetGradientMap(&data2, .invert, .cmyk))
     }
 
+    /// photocraft #7065 `hue2_writes_each_triplet_in_its_own_slot`: Photoshop keeps the colorize
+    /// triplet at byte 4 and the master triplet at byte 10 and fills the inactive one with its
+    /// defaults, colorize (30, 25, 0) and master (0, 0, 0). The colorize hue is stored signed.
+    @Test func hue2WritesEachTripletInItsOwnSlot() {
+        func triplets(_ a: Adjustment) -> [Int16] {
+            let d = AdjustMap.write(a)[0].1
+            return (0 ..< 6).map { i in Int16(bitPattern: UInt16(d[4 + 2 * i]) << 8 | UInt16(d[5 + 2 * i])) }
+        }
+        let on = Adjustment.hueSaturation(A.HueSaturation(hue: 200, saturation: 40, lightness: 10, colorize: true, ranges: HueRange.defaults))
+        #expect(triplets(on) == [-160, 40, 10, 0, 0, 0])
+        let off = Adjustment.hueSaturation(A.HueSaturation(hue: -30, saturation: 20, lightness: 5, colorize: false, ranges: HueRange.defaults))
+        #expect(triplets(off) == [30, 25, 0, -30, 20, 5])
+    }
+
     @Test func roundtrips() {
         rt(.invert)
         rt(.threshold(level: 128.0 / 255.0))

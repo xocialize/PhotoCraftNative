@@ -14,6 +14,14 @@ extension Affinity {
         /// The node-space outline of a curve, shape or compound node, and whether it fills even-odd.
         /// Instances (master-page or symbol copies) take the geometry of their master.
         static func outline(_ r: Reader, _ id: ObjID, _ cls: Tag, _ world: Affine, depth: Int = 0) -> (Path, Bool)? {
+            guard r.chargeOutlineVisit() else { return nil }
+            guard let result = outlineUncharged(r, id, cls, world, depth: depth) else { return nil }
+            // A compound's operands were charged as they were copied in.
+            if cls != "Comp", !r.chargeOutlinePoints(result.0) { return nil }
+            return result
+        }
+
+        private static func outlineUncharged(_ r: Reader, _ id: ObjID, _ cls: Tag, _ world: Affine, depth: Int) -> (Path, Bool)? {
             let s = r.s
             switch cls {
             case "PCrv", "TxtC":
@@ -37,6 +45,7 @@ extension Affinity {
                         r.warn("compound shapes that intersect or exclude (imported as add)")
                     }
                     if case let (p, _)? = outline(r, c, childClass, local.then(world), depth: depth + 1) {
+                        guard r.chargeOutlinePoints(p) else { return nil }
                         path.subpaths.append(contentsOf: p.transformed(local).subpaths)
                     }
                 }
