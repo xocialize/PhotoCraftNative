@@ -356,12 +356,24 @@ struct CoverCounts {
     }
 }
 
+extension Slices {
+    /// Most stored slices that are resolved (photocraft `MAX_RESOLVED_SLICES`, #10959); a file may
+    /// store more, and those past the limit are left out of the resolved list.
+    public static let maxResolved = 10_000
+}
+
 extension Document {
+    /// Why some stored slices are left out of `resolvedSlices`, or nil when none are.
+    public var slicesOverLimitNote: String? {
+        let n = slices.list.count - Slices.maxResolved
+        return n > 0 ? "\(n) stored slices past the first \(Slices.maxResolved) were ignored" : nil
+    }
+
     /// The visible part of every stored slice (later slices cover earlier ones, as in Photoshop),
-    /// clipped to the canvas.
+    /// clipped to the canvas. At most `Slices.maxResolved` of them.
     func clippedSlices() -> [(UInt32, PixelRect)] {
         let canvas = bounds
-        return slices.list.map { ($0.id, $0.rect.intersect(canvas)) }.filter { !$0.1.isEmpty }
+        return slices.list.prefix(Slices.maxResolved).map { ($0.id, $0.rect.intersect(canvas)) }.filter { !$0.1.isEmpty }
     }
 
     /// Every slice in display order (see `ResolvedSlice`). Without user or layer slices the whole

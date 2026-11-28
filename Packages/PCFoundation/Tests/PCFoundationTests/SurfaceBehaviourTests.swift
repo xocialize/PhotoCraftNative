@@ -496,3 +496,25 @@ enum Reference {
         #expect(s.withTransparentDefault(within: PixelRect(x0: 0, y0: 0, x1: 5, y1: 5)) == s)
     }
 }
+
+@Suite struct TileCountTests {
+    /// photocraft `3729c3f66` `a_surface_bounds_tile_count_is_counted_not_walked`: a rect's tiles are counted without
+    /// being visited, and taking tiles from a rect that spans billions answers from the stored ones.
+    @Test(.timeLimit(.minutes(1))) func tilesAreCountedNotWalked() {
+        #expect(PixelRect.empty.tileCount == 0)
+        #expect(PixelRect(x0: 0, y0: 0, x1: 257, y1: 257).tileCount == 4)
+        #expect(PixelRect(x0: -1, y0: -1, x1: 1, y1: 1).tileCount == 4)
+        let r = PixelRect(x0: 3, y0: -700, x1: 5000, y1: 900)
+        #expect(r.tileCount == UInt64(r.tiles.count))
+        let everything = PixelRect(x0: .min, y0: .min, x1: .max, y1: .max)
+        #expect(everything.tileCount == UInt64(1 << 24) * UInt64(1 << 24))
+
+        var s = Surface(format: .rgba8)
+        s.fill(PixelRect(x0: 10, y0: 10, x1: 20, y1: 20), with: [1, 0, 0, 1])
+        s.fill(PixelRect(x0: 1_000_000_000, y0: -1_000_000_000, x1: 1_000_000_010, y1: -999_999_990), with: [0, 1, 0, 1])
+        let taken = s.takeTiles(everything)
+        #expect(taken.count == 2 && s.contentBounds.isEmpty)
+        #expect(taken.map(\.0) == taken.map(\.0).sorted { ($0.ty, $0.tx) < ($1.ty, $1.tx) })
+    }
+}
+

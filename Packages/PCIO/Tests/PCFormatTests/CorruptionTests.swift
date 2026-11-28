@@ -31,6 +31,44 @@ func isJSON(_ e: Error) -> Bool { if case FormatError.json = e { true } else { f
         #expect(try load(old) == doc)
     }
 
+    /// photocraft #8893 `manifest_with_too_many_values_is_refused`: a manifest of millions of tiny values (`[0,0,…]`
+    /// deflates about 1000:1) is refused before it is parsed into a tree.
+    @Test func manifestWithTooManyValuesIsRefused() throws {
+        let n = (4 << 20) + 16
+        var m: [UInt8] = [0x5B]
+        m.reserveCapacity(2 * n + 1)
+        for i in 0 ..< n { m += i == 0 ? [0x30] : [0x2C, 0x30] }
+        m.append(0x5D)
+        let b = try rebuild(corruptionSample) { name, d in name == "manifest.json" ? m : d }
+        #expect { try load(b) } throws: { isLimit($0) }
+    }
+
+    /// photocraft `87da091f2`: two layers with one id are refused; layer comp and slice targets would be ambiguous.
+    @Test func duplicateLayerIdsAreRefused() throws {
+        var doc = Document(name: "ids", size: PixelSize(width: 4, height: 4), mode: .rgb, depth: .u8)
+        doc.layers.append(Layer.raster("A", format: doc.pixelFormat))
+        doc.layers.append(Layer.group("G", [Layer.raster("B", format: doc.pixelFormat)]))
+        let bytes = try save(doc)
+        #expect(try load(bytes).layers.count == 2)
+        let twice = try withManifest(bytes) { m in
+            var d = m["document"] as? [String: Any] ?? [:]
+            var layers = d["layers"] as? [[String: Any]] ?? []
+            let first = try #require(layers.first?["id"])
+            // The nested layer takes the first layer's id.
+            var content = layers[1]["content"] as? [String: Any] ?? [:]
+            var group = content["group"] as? [String: Any] ?? content
+            var children = group["children"] as? [[String: Any]] ?? []
+            #expect(children.count == 1)
+            children[0]["id"] = first
+            group["children"] = children
+            if content["group"] != nil { content["group"] = group } else { content = group }
+            layers[1]["content"] = content
+            d["layers"] = layers
+            m["document"] = d
+        }
+        #expect { try load(twice) } throws: { isCorrupt($0) }
+    }
+
     @Test func truncationNeverTrapsAndFails() {
         let b = corruptionSample
         let step = max(b.count / 200, 1)

@@ -540,24 +540,29 @@ final class Loader {
     }
 
     func document(_ m: DocM) throws(FormatError) -> Document {
-        // Reserve every stored id before allocating identities missing from older bundles. If an
-        // id is implausibly large, remap the whole document while keeping shared contents groups.
-        if preserveIds {
-            func maxIds(_ layers: [LayerM], _ depth: Int, _ max: inout UInt64) throws(FormatError) {
-                if depth > Convert.maxGroupDepth && !layers.isEmpty { throw Convert.tooDeep() }
-                for l in layers {
-                    max = Swift.max(max, l.id)
-                    switch l.content {
-                    case .group(let g): try maxIds(g.children, depth + 1, &max)
-                    case .smart(let s): if let id = s.contentsId { max = Swift.max(max, id) }
-                    default: break
-                    }
+        // Check the whole layer tree before decoding payloads or allocating ids. Remapping cannot
+        // repair duplicate layer ids: layer comp and slice targets would still be ambiguous
+        // (photocraft `87da091f2`).
+        func checkIds(_ layers: [LayerM], _ depth: Int, _ seen: inout Set<UInt64>, _ max: inout UInt64) throws(FormatError) {
+            if depth > Convert.maxGroupDepth && !layers.isEmpty { throw Convert.tooDeep() }
+            for l in layers {
+                if !seen.insert(l.id).inserted { throw .corrupt("duplicate layer id \(l.id)") }
+                max = Swift.max(max, l.id)
+                switch l.content {
+                case .group(let g): try checkIds(g.children, depth + 1, &seen, &max)
+                // Contents identities repeat on purpose for shared smart objects; embedded
+                // documents are opaque blobs with their own layer identities.
+                case .smart(let s): if let id = s.contentsId { max = Swift.max(max, id) }
+                default: break
                 }
             }
-            var max = m.id
-            try maxIds(m.layers, 0, &max)
-            preserveIds = Convert.reserveIdsThrough(max)
         }
+        var max = m.id
+        var seen = Set<UInt64>()
+        try checkIds(m.layers, 0, &seen, &max)
+        // Reserve every stored id before allocating identities missing from older bundles. If an
+        // id is implausibly large, remap the whole document while keeping shared contents groups.
+        if preserveIds { preserveIds = Convert.reserveIdsThrough(max) }
         var layers: [Layer] = []
         layers.reserveCapacity(m.layers.count)
         for l in m.layers { layers.append(try layer(l, depth: 0)) }

@@ -76,6 +76,15 @@ public struct PixelRect: Hashable, Sendable, Codable, CustomStringConvertible {
         o.isEmpty || (o.x0 >= x0 && o.y0 >= y0 && o.x1 <= x1 && o.y1 <= y1)
     }
 
+    /// How many tiles this rectangle touches, without visiting them: a rect can span billions
+    /// (photocraft `Rect::tile_count`, `3729c3f66`). Check it before asking for `tiles`.
+    public var tileCount: UInt64 {
+        if isEmpty { return 0 }
+        let tx0 = Int64(TileCoord.floorDiv(x0, tileSize)), ty0 = Int64(TileCoord.floorDiv(y0, tileSize))
+        let tx1 = Int64(TileCoord.floorDiv(x1 - 1, tileSize)), ty1 = Int64(TileCoord.floorDiv(y1 - 1, tileSize))
+        return UInt64(tx1 - tx0 + 1) * UInt64(ty1 - ty0 + 1)
+    }
+
     /// Every tile this rectangle touches, row-major.
     public var tiles: [TileCoord] {
         if isEmpty { return [] }

@@ -170,6 +170,22 @@ public enum Retouch {
         return rect
     }
 
+    /// The most a sequential-dab stroke's three working planes (original, working copy, mix) may take.
+    public static let maxDabStrokeBytes: Int64 = 4 << 30
+
+    /// Whether a dab stroke over `bounds` grown by `halo` fits `maxDabStrokeBytes`, without overflowing on the way.
+    public static func dabStrokeFits(_ bounds: PixelRect, halo: Int32, channels: Int) -> Bool {
+        let h = Int64(max(halo, 0))
+        let (w, ht) = (Int64(bounds.x1) - Int64(bounds.x0) + 2 * h, Int64(bounds.y1) - Int64(bounds.y0) + 2 * h)
+        guard w > 0, ht > 0 else { return true }
+        // Coordinates must stay in Int32 once grown.
+        guard Int64(bounds.x0) - h >= Int64(Int32.min), Int64(bounds.x1) + h <= Int64(Int32.max),
+              Int64(bounds.y0) - h >= Int64(Int32.min), Int64(bounds.y1) + h <= Int64(Int32.max) else { return false }
+        let (area, o1) = w.multipliedReportingOverflow(by: ht)
+        let (bytes, o2) = area.multipliedReportingOverflow(by: Int64(max(channels, 1)) * 4 * 3)
+        return !o1 && !o2 && bytes <= maxDabStrokeBytes
+    }
+
     /// Run a sequential-dab stroke: `effect(work, footprint)` edits the working copy for each dab in
     /// order; the result is mixed back at `stroke.brush.opacity × selection`. The working copy
     /// covers the stroke bounds grown by `halo` pixels so neighbourhood effects (blur, sharpen) can
@@ -181,6 +197,10 @@ public enum Retouch {
         if ds.isEmpty { return .empty }
         let ctx = BrushContext(stroke.brush)
         let bounds = ds.reduce(PixelRect.empty) { $0.union(ctx.dabRect($1, dual: false)) }
+        // The working copies are dense and sized by the area between the dabs, not by what they paint: two distant
+        // points on a sparse document would ask for gigabytes. Past the budget nothing is painted (photocraft #11070,
+        // which reports it as an error; here the damage is empty).
+        guard dabStrokeFits(bounds, halo: halo, channels: target.format.channels) else { return .empty }
         let outer = PixelRect(bounds.x0 - halo, bounds.y0 - halo, bounds.x1 + halo, bounds.y1 + halo)
         let orig = Region.read(target, outer)
         var work = orig

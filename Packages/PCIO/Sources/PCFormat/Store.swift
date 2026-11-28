@@ -64,15 +64,26 @@ enum Store {
     /// layer fields. The saver checks the same bound, so every bundle it writes loads again.
     static let maxManifestDepth = 3 * (Convert.maxGroupDepth + 1) + 64
 
-    /// Rejects JSON nested deeper than `maxManifestDepth` with a linear scan (no recursion), so
-    /// parsing can't exhaust the stack on hostile input.
+    /// Most JSON items (arrays and objects opened, plus elements and members after a comma) a
+    /// manifest may hold (photocraft `MAX_MANIFEST_ITEMS`, #8893). Parsing builds a tree of tens of
+    /// bytes per item, so `[0,0,…]` costs many times its size in memory; a typical manifest spends
+    /// 20 bytes or more per item, so this still admits manifests of about 80 MiB.
+    static let maxManifestItems = 4 << 20
+
+    /// Rejects JSON nested deeper than `maxManifestDepth` or holding more than `maxManifestItems`
+    /// items with a linear scan (no recursion), so parsing can't exhaust the stack, nor tiny values
+    /// the memory, on hostile input.
     static func checkManifestDepth(_ json: [UInt8]) throws(FormatError) {
-        var depth = 0
+        var depth = 0, items = 0
         var inString = false, escaped = false
         for b in json {
             if inString {
                 if escaped { escaped = false } else if b == 0x5C { escaped = true } else if b == 0x22 { inString = false }
                 continue
+            }
+            if b == 0x5B || b == 0x7B || b == 0x2C {
+                items += 1
+                if items > maxManifestItems { throw .limitExceeded("manifest JSON holds more than \(maxManifestItems) values") }
             }
             switch b {
             case 0x22: inString = true

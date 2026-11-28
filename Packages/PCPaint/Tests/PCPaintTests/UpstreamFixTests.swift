@@ -96,6 +96,23 @@ import PCFoundation
 }
 
 @Suite struct UpstreamBoundTests {
+    /// photocraft #11070 `a_dab_stroke_between_distant_points_is_refused_before_reading`: two distant points would
+    /// read gigabytes of working copy; nothing is painted and nothing is read.
+    @Test(.timeLimit(.minutes(1))) func aDabStrokeBetweenDistantPointsIsRefusedBeforeReading() {
+        #expect(Retouch.dabStrokeFits(PixelRect(x0: 0, y0: 0, x1: 4000, y1: 4000), halo: 8, channels: 4))
+        #expect(!Retouch.dabStrokeFits(PixelRect(x0: 0, y0: 0, x1: 200_000, y1: 200_000), halo: 8, channels: 4))
+        #expect(!Retouch.dabStrokeFits(PixelRect(x0: .min, y0: .min, x1: .max, y1: .max), halo: 100, channels: 4))
+        var surface = Surface(format: .rgba8)
+        surface.fill(PixelRect(x0: 0, y0: 0, x1: 8, y1: 8), with: [1, 0, 0, 1])
+        let before = surface
+        var brush = BrushSettings()
+        brush.size = 10
+        let stroke = Stroke(brush: brush, points: [StrokePoint(x: 4, y: 4), StrokePoint(x: 900_000_000, y: 900_000_000)])
+        var calls = 0
+        let damage = Retouch.applyDabStroke(&surface, stroke, selection: nil, lockTransparency: false, halo: 2) { _, _ in calls += 1 }
+        #expect(damage.isEmpty && calls == 0 && surface == before)
+    }
+
     /// photocraft #8772: a stored tile's width × height is checked before it is used as a length.
     @Test func aTileWhoseExtentsOverflowIsRefused() {
         let json = Data(#"{"width": 4294967295, "height": 4294967295, "data": ""}"#.utf8)

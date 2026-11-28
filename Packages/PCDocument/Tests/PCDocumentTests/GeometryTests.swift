@@ -49,6 +49,48 @@ import Testing
         #expect(PCAffine.scale(0).inverse == nil)
     }
 
+    /// photocraft `82f456b26` `remove_split_u_rejects_out_of_range_indices` (and `_v_`): an index at or past the
+    /// last knot, up to `Int.max`, is refused and leaves the mesh as it was.
+    @Test func removeSplitRejectsOutOfRangeIndices() {
+        let original = BezierMesh.identity(bounds: SIMD4(0, 0, 300, 300), cols: 2, rows: 3)
+        for k in [0, original.us.count - 1, original.us.count, Int.max - 1, Int.max] {
+            var mesh = original
+            #expect(!mesh.removeSplitU(k) && mesh == original, "u index \(k)")
+        }
+        for k in [0, original.vs.count - 1, original.vs.count, Int.max - 1, Int.max] {
+            var mesh = original
+            #expect(!mesh.removeSplitV(k) && mesh == original, "v index \(k)")
+        }
+    }
+
+    /// photocraft #8769: a mesh with more than 65 knots a side is not valid.
+    @Test func aMeshWithTooManyKnotsIsNotValid() {
+        func mesh(knots n: Int) -> BezierMesh {
+            let us = (0 ..< n).map { Double($0) / Double(n - 1) }
+            let nx = 3 * (n - 1) + 1
+            let points = (0 ..< 4).flatMap { j in (0 ..< nx).map { i in SIMD2(Double(i), Double(j)) } }
+            return BezierMesh(us: us, vs: [0, 1], points: points)
+        }
+        #expect(mesh(knots: 65).isValid)
+        #expect(mesh(knots: 66).isWellFormed && !mesh(knots: 66).isValid)
+    }
+
+    /// photocraft #10959 `slices_past_the_limit_are_left_out`: at most 10,000 stored slices are resolved, and the
+    /// document says how many were left out.
+    @Test func slicesPastTheLimitAreLeftOut() {
+        var d = Document(name: "slices", size: PixelSize(width: 100, height: 100), mode: .rgb, depth: .u8)
+        d.slices.list = (0 ..< Slices.maxResolved + 5).map { i in
+            var s = Slice(id: UInt32(i) + 1)
+            s.rect = PixelRect(x0: 0, y0: 0, x1: 10, y1: 10)
+            return s
+        }
+        #expect(d.slicesOverLimitNote == "5 stored slices past the first 10000 were ignored")
+        let ids = Set(d.resolvedSlices().compactMap(\.id))
+        #expect(!ids.contains { $0 > UInt32(Slices.maxResolved) }, "none past the limit")
+        d.slices.list.removeLast(5)
+        #expect(d.slicesOverLimitNote == nil)
+    }
+
     /// photocraft #8651: a transform with a non-finite term, or whose inverse has one, has no inverse.
     @Test func affineInverseRejectsNonFiniteResults() {
         #expect(PCAffine(a: .nan, b: 0, c: 0, d: 1, e: 0, f: 0).inverse == nil)

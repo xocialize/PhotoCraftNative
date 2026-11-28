@@ -185,7 +185,13 @@ public struct Surface: Sendable, Equatable {
 
     /// Removes and returns the tiles intersecting `r` (history snapshots).
     public mutating func takeTiles(_ r: PixelRect) -> [(TileCoord, Tile)] {
-        r.tiles.compactMap { c in store.removeValue(forKey: c).map { (c, $0) } }
+        // A rect spanning more tiles than are stored is answered from the stored ones, row-major as
+        // the grid walk gives them: the grid of a sparse surface's bounds can run to billions.
+        if r.tileCount > UInt64(store.count) {
+            let hit = store.keys.filter { !$0.rect.intersect(r).isEmpty }.sorted { ($0.ty, $0.tx) < ($1.ty, $1.tx) }
+            return hit.compactMap { c in store.removeValue(forKey: c).map { (c, $0) } }
+        }
+        return r.tiles.compactMap { c in store.removeValue(forKey: c).map { (c, $0) } }
     }
 
     public mutating func removeAllTiles() { store.removeAll() }

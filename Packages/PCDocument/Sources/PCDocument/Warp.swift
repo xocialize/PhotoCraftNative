@@ -375,6 +375,9 @@ public struct BezierMesh: Hashable, Sendable, Codable {
         return BezierMesh(us: us, vs: vs, points: points)
     }
 
+    /// Most knots a side of a valid mesh has (64 patches).
+    public static let maxKnots = 65
+
     /// Control points per row.
     public var nx: Int { us.count >= 2 ? 3 * (us.count - 1) + 1 : 0 }
     /// Control point rows.
@@ -388,7 +391,8 @@ public struct BezierMesh: Hashable, Sendable, Codable {
     /// Checks the invariants (knots and point count); malformed data from files is rejected.
     public var isValid: Bool {
         func knotsOK(_ k: [Double]) -> Bool {
-            k.count >= 2 && k[0] == 0 && k[k.count - 1] == 1 && zip(k, k.dropFirst()).allSatisfy { $1 > $0 }
+            // At most 65 knots a side (photocraft #8769): a file's mesh can't ask for unbounded patches.
+            (2...BezierMesh.maxKnots).contains(k.count) && k[0] == 0 && k[k.count - 1] == 1 && zip(k, k.dropFirst()).allSatisfy { $1 > $0 }
         }
         return knotsOK(us) && knotsOK(vs) && points.count == nx * ny && points.allSatisfy { $0.x.isFinite && $0.y.isFinite }
     }
@@ -457,7 +461,9 @@ public struct BezierMesh: Hashable, Sendable, Codable {
     /// kept and the inner handles extrapolated.
     @discardableResult
     public mutating func removeSplitU(_ k: Int) -> Bool {
-        guard k > 0, k + 1 < us.count, isWellFormed else { return false }
+        // `k < count − 1`, not `k + 1 < count`: an index near `Int.max` must be refused, not trap
+        // (photocraft `82f456b26`).
+        guard isWellFormed, k > 0, k < us.count - 1 else { return false }
         let a = (us[k] - us[k - 1]) / (us[k + 1] - us[k - 1])
         let (nx, ny) = (self.nx, self.ny)
         var pts: [SIMD2<Double>] = []
